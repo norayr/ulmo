@@ -204,7 +204,7 @@ MODULE AMD64LinuxOberonBuiltIns; (* Christian Ehrhardt, AMD64 adaptation *)
 	 op, opreg, dope, op2, sizeop, tagop, lenop, lenop2 : Op.Operand;
 	 param, tmp : Sym.Attribute;
 	 rset : SET;
-	 noerr, lab, lab2, beyond, start : FragmentedStreams.Label;
+	 noerr, lab, lab2, beyond, start, slotLbl : FragmentedStreams.Label;
 	 cs : Streams.Stream;
 	 i, j, scale : INTEGER;
 	 own : Regs.Owner;
@@ -460,19 +460,85 @@ MODULE AMD64LinuxOberonBuiltIns; (* Christian Ehrhardt, AMD64 adaptation *)
 	     * Linux calls the handler with C convention: rdi=signo, rsi=siginfo ptr,
 	     * rdx=ucontext ptr.  The Oberon procedure expects a param block on the
 	     * stack.  Emit a trampoline that bridges the calling convention gap.
+	     *
+	     * The handler pointer must be embedded in the trampoline as an absolute
+	     * address (loaded via a symbolic relocation), NOT captured in a caller
+	     * register — the trampoline runs later in kernel-provided context where
+	     * caller-side registers are gone.  We reserve an 8-byte static slot
+	     * inline in .text (protected by the jump-over) and store the evaluated
+	     * handler value into it at caller time; the trampoline loads from that
+	     * slot each time it fires.
 	     *)
+	    (* Evaluate the handler expression in caller context. *)
 	    op := CodeGen.GenExpr(proc, param, TRUE, Gen.StdRegs, own);
 	    CheckArg(param, errors);
 	    IF errors OR Op.IsError(op) THEN
 	       Regs.DestroyOwnerOnError(proc.regs, own);
 	       RETURN Op.Error();
 	    END;
-	    (* Jump over the trampoline body so it is not executed inline. *)
-	    FragmentedStreams.CreateLabel(lab);   (* trampolineLabel   *)
-	    FragmentedStreams.CreateLabel(lab2);  (* afterTrampolineLabel *)
+	    (* Get the handler value into %rax for a runtime dispatch check. *)
+	    Regs.UntracedValue(reg, Gen.genax);
+	    IF Op.Loc(op) = Op.immediateDyn THEN
+	       op.immsz := 8;
+	    END;
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, 8), op);
+	    Regs.DestroyOwnedValue(op.reg1, own);
+	    (* Runtime dispatch: if handler <= 1 it's SIG_DFL/SIG_IGN — pass
+	     * as-is; the kernel handles it and never invokes user code.  If
+	     * it's a real procedure address (> 1) we go through the C→Oberon
+	     * trampoline to bridge calling conventions. *)
+	    FragmentedStreams.CreateLabel(lab);       (* trampolineLabel      *)
+	    FragmentedStreams.CreateLabel(lab2);      (* afterTrampolineLabel *)
+	    FragmentedStreams.CreateLabel(slotLbl);   (* handler storage slot *)
+	    FragmentedStreams.CreateLabel(beyond);    (* after the whole dispatch *)
+	    FragmentedStreams.CreateLabel(start);     (* real-proc branch entry *)
+	    (* cmp $1, %rax; ja start  — jump if handler > 1 (real proc) *)
+	    Emit.Instr2(proc.s, AMD64.CMP, Op.RegOp(reg, 8), Op.ImmInt(1));
+	    Emit.JumpCC(proc.s, start, AMD64.JA-AMD64.JCC);
+	    (* SIG_DFL / SIG_IGN path: leave %rax as-is, jump to push-and-syscall.
+	     * Fall through to a jmp beyond so we skip the trampoline emission. *)
+	    Emit.Jump(proc.s, beyond);
+	    (* Real-proc path: store handler to slot, install trampoline addr *)
+	    FragmentedStreams.AttachLabel(proc.s, start);
+	    (* Unique symbol for the handler storage slot. *)
+	    ConstStrings.Init(cs);
+	    Write.StringS(cs, "__sig_handler_slot_");
+	    Write.IntS(cs, PC.Unique(proc), 0);
+	    ConstStrings.Close(cs, mod);
+	    (* Store handler to the static slot via absolute address relocation. *)
+	    NEW(ref);
+	    IF proc.module.origname # NIL THEN
+	       ref.modname := proc.module.origname;
+	    ELSE
+	       ref.modname := proc.module.name;
+	    END;
+	    ref.symname := mod;
+	    Reloc.Create(req, proc.s, Reloc.addSym, ref);
+	    op := Op.MemOp0(8, 0, 4);
+	    Op.RelocOpen(op, req);
+	    Emit.Instr2(proc.s, AMD64.MOV, op, Op.RegOp(reg, 8));
+	    (* Now load %rax with the trampoline address so the sa_handler
+	     * push below uses it. *)
+	    NEW(ref);
+	    IF proc.module.origname # NIL THEN
+	       ref.modname := proc.module.origname;
+	    ELSE
+	       ref.modname := proc.module.name;
+	    END;
+	    ConstStrings.Init(cs);
+	    Write.StringS(cs, "__sig_trampoline_");
+	    Write.IntS(cs, PC.Unique(proc), 0);
+	    ConstStrings.Close(cs, sym);
+	    ref.symname := sym;
+	    Reloc.Create(req, proc.s, Reloc.addSym, ref);
+	    op := Op.ImmIntFixed(0, 8);
+	    Op.RelocOpen(op, req);
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, 8), op);
+	    (* Jump over the inline trampoline body + slot. *)
 	    Emit.Jump(proc.s, lab2);
 	    (* ---- trampoline body ---- *)
 	    FragmentedStreams.AttachLabel(proc.s, lab);
+	    Reloc.NewSymbol(proc.s, sym, lab);
 	    (* subq $24, %rsp  — allocate 24-byte Oberon param block *)
 	    Regs.UntracedValue(sp, Gen.gensp);
 	    Emit.Instr2(proc.s, AMD64.SUB, Op.RegOp(sp, 8), Op.ImmInt(24));
@@ -485,44 +551,39 @@ MODULE AMD64LinuxOberonBuiltIns; (* Christian Ehrhardt, AMD64 adaptation *)
 	    (* movq %rdx, 16(%rsp) — ucontext* (8 bytes) *)
 	    Regs.UntracedValue(reg, Gen.gendx);
 	    Emit.Instr2(proc.s, AMD64.MOV, Op.MemOp1(sp, 8, 16, 0), Op.RegOp(reg, 8));
-	    (* movq handler, %rax; callq *%rax  — call the Oberon procedure *)
+	    (* movq handler_slot, %rax; callq *%rax *)
 	    Regs.UntracedValue(reg, Gen.genax);
-	    IF Op.Loc(op) = Op.immediateDyn THEN
-	       op.immsz := 8;
-	    END;
-	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, 8), op);
-	    Regs.DestroyOwnedValue(op.reg1, own);
-	    Emit.Instr1(proc.s, AMD64.CALL, Op.RegOp(reg, 8));
-	    (* addq $24, %rsp  — restore stack *)
-	    Regs.UntracedValue(sp, Gen.gensp);
-	    Emit.Instr2(proc.s, AMD64.ADD, Op.RegOp(sp, 8), Op.ImmInt(24));
-	    (* ret *)
-	    Emit.Instr0(proc.s, AMD64.RET);
-	    (* Register the trampoline as a local symbol so we can reference it *)
-	    ConstStrings.Init(cs);
-	    Write.StringS(cs, "__sig_trampoline_");
-	    Write.IntS(cs, PC.Unique(proc), 0);
-	    ConstStrings.Close(cs, sym);
-	    Reloc.NewSymbol(proc.s, sym, lab);
-	    (* ---- end trampoline body ---- *)
-	    FragmentedStreams.AttachLabel(proc.s, lab2);
-	    (* Build an immediateDyn referencing the trampoline address *)
 	    NEW(ref);
 	    IF proc.module.origname # NIL THEN
 	       ref.modname := proc.module.origname;
 	    ELSE
 	       ref.modname := proc.module.name;
 	    END;
-	    ref.symname := sym;
+	    ref.symname := mod;
 	    Reloc.Create(req, proc.s, Reloc.addSym, ref);
-	    op2 := Op.ImmIntFixed(0, 8);
-	    Op.RelocOpen(op2, req);
-	    (* AMD64 has no push-imm64 instruction; use MOV r64,imm64 + PUSH r64 *)
-	    Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
-	    Regs.LoadReg(reg, Gen.StdRegs);
-	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, 8), op2);
+	    op := Op.MemOp0(8, 0, 4);
+	    Op.RelocOpen(op, req);
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, 8), op);
+	    Emit.Instr1(proc.s, AMD64.CALL, Op.RegOp(reg, 8));
+	    (* addq $24, %rsp  — restore stack *)
+	    Regs.UntracedValue(sp, Gen.gensp);
+	    Emit.Instr2(proc.s, AMD64.ADD, Op.RegOp(sp, 8), Op.ImmInt(24));
+	    (* ret *)
+	    Emit.Instr0(proc.s, AMD64.RET);
+	    (* Emit the 8-byte handler storage slot right after the trampoline
+	     * body.  Since Ulm's linker script gives the binary a single RWE
+	     * segment, storing into .text at runtime is legal. *)
+	    FragmentedStreams.AttachLabel(proc.s, slotLbl);
+	    Reloc.NewSymbol(proc.s, mod, slotLbl);
+	    Emit.Bytes(proc.s, 0, 8);
+	    (* ---- end trampoline body ---- *)
+	    FragmentedStreams.AttachLabel(proc.s, lab2);
+	    (* Common tail: %rax already holds the sa_handler value we want
+	     * (either SIG_DFL/SIG_IGN passed through unchanged, or the trampoline
+	     * address loaded from the real-proc branch above).  Push it. *)
+	    FragmentedStreams.AttachLabel(proc.s, beyond);
+	    Regs.UntracedValue(reg, Gen.genax);
 	    Emit.Instr1(proc.s, AMD64.PUSH, Op.RegOp(reg, 8));
-	    Regs.DestroyOwnedValue(reg, own);
 	    (* newact = RSP (points to sa_handler = start of new sigaction) *)
 	    Regs.UntracedValue(reg, Gen.gensp);
 	    Regs.CreateValue(regarr[1], proc.regs, own, Regs.stdM);

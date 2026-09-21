@@ -93,5 +93,5 @@ BEGIN
    SYS.PUT(tagloc, SYS.VAL(SYS.ADDRESS, tag));
    current := main;
 
-   defaultsize := 65536;
+   defaultsize := 16384;  (* AMD64: 2x i386's 8192 for 8-byte pointers *)
 END Coroutines.
