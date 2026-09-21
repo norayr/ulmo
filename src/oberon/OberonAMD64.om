@@ -1,0 +1,199 @@
+MODULE OberonAMD64;
+
+   (* Installs itself as pass2 of the Oberon compiler for the AMD64 architecture. *)
+
+   IMPORT Architectures, CompilerErrors, CompilerKeys, CompilerObjects,
+      Compilers, ConstStrings, AMD64CodeGen := AMD64ObCodeGen,
+      AMD64LinuxBuiltIns := AMD64LinuxOberonBuiltIns, Iterators,
+      Oberon32iAnalyzer, Oberon32iBuiltIns, Oberon32iLittleEndianConversions,
+      Oberon64iBuiltIns, Oberon64iSymbols, Oberon64iUpdates, OberonCompiler,
+      OberonAMD64Analyzer := AMD64OberonAnalyzer,
+      OberonAMD64Results := AMD64OberonResults, ObjectLoader,
+      RelatedEvents, Sources := CompilerSources, Streams,
+      Sym := OberonSymbols, Write;
+
+   VAR
+      myarch: Architectures.Architecture;
+
+   PROCEDURE Pass2(compiler: Compilers.Compiler; context: Compilers.Context;
+		   definition, module: CompilerObjects.Object;
+		   arch: Architectures.Architecture;
+		   updatesPermitted: BOOLEAN;
+		   VAR archdef, code: Compilers.Result;
+		   errors: RelatedEvents.Object) : BOOLEAN;
+      VAR
+	 defheader, modheader: CompilerObjects.Header;
+	 defident, modident: Sym.Ident;
+	 updated: BOOLEAN;
+	 combinedArch: Architectures.Architecture;
+	 combinedKey: CompilerKeys.Key;
+	 ok: BOOLEAN;
+	 abort: BOOLEAN;
+	 modsrcid: ConstStrings.String;
+	 freshdef: BOOLEAN;
+	 errorObject: RelatedEvents.Object;
+
+      PROCEDURE CreateHeader(VAR header: CompilerObjects.Header; ident: Sym.Ident);
+      BEGIN
+	 CompilerObjects.CreateHeader(header, ident.name);
+	 header.src := NIL;
+	 IF ident.kind IN {Sources.defmod, Sources.module} THEN
+	    header.srcid := ident.key.modsrcid;
+	 ELSE
+	    header.srcid := ident.key.defsrcid;
+	 END;
+	 header.dependencies := ident.dependencies;
+	 header.stage := CompilerObjects.archDependent;
+	 header.key := ident.key;
+	 header.arch := ident.key.arch;
+      END CreateHeader;
+
+      PROCEDURE UpdateDependencies(module: Sym.Ident);
+	 VAR it: Iterators.Iterator; key: CompilerKeys.Key;
+	     header: CompilerObjects.Header; object: CompilerObjects.Object;
+	     es: Streams.Stream; ok: BOOLEAN; combinedKey: CompilerKeys.Key;
+      BEGIN
+	 CompilerKeys.GetKeys(module.dependencies, it);
+	 WHILE Iterators.Get(it, key) DO
+	    IF ~ObjectLoader.LoadObject(compiler, context, key.modname,
+				       CompilerObjects.public, arch,
+				       header, object, errors) THEN
+	       CompilerErrors.Open(es);
+	       CompilerErrors.At1(es, module.loc);
+	       Write.StringS(es, "unable to load architecture-dependent ");
+	       Write.StringS(es, "symbol file of ");
+	       ConstStrings.Write(es, key.modname);
+	       CompilerErrors.Close(es, errors);
+	       abort := TRUE; RETURN
+	    END;
+	    ok := CompilerKeys.CombineKeys(key, header.key, combinedKey);
+	    ASSERT(ok);
+	    CompilerKeys.Incl(module.dependencies, combinedKey);
+	 END;
+      END UpdateDependencies;
+
+      PROCEDURE ProcessModule(module: Sym.Ident);
+      BEGIN
+	 CompilerKeys.Incl(context.keys, module.key);
+	 UpdateDependencies(module); IF abort THEN RETURN END;
+	 Oberon32iLittleEndianConversions.Init(module);
+	 OberonAMD64Analyzer.Process(module, errors);
+      END ProcessModule;
+
+      PROCEDURE CreateNewModule(VAR module: Sym.Ident);
+	 VAR new: Sym.Ident;
+      BEGIN
+	 Sym.CreateModuleIdent(new, module.name, module.name,
+			       module.kind, module.pcontext, module.loc);
+	 new.scope := module.scope; new.export := module.export;
+	 CompilerKeys.CreateCopy(new.key, module.key);
+	 CompilerKeys.CreateSetCopy(new.dependencies, module.dependencies);
+	 new.loc := module.loc; new.body := module.body;
+	 module := new;
+      END CreateNewModule;
+
+      PROCEDURE ReturnErrors;
+	 VAR queue: RelatedEvents.Queue;
+      BEGIN
+	 RelatedEvents.GetQueue(errors, queue);
+	 RelatedEvents.AppendQueue(errorObject, queue);
+	 IF updated THEN
+	    CompilerObjects.RemoveAttachments(defident);
+	    Oberon64iSymbols.RemoveTypeMarks(defident);
+	 END;
+	 IF modident # NIL THEN
+	    CompilerObjects.RemoveAttachments(modident);
+	    Oberon64iSymbols.RemoveTypeMarks(modident);
+	 END;
+      END ReturnErrors;
+
+   BEGIN
+      errorObject := errors; NEW(errors); RelatedEvents.QueueEvents(errors);
+
+      ok := Architectures.Compatible(myarch, arch, combinedArch); ASSERT(ok);
+      arch := combinedArch;
+      ASSERT((definition # NIL) & (definition IS Sym.Ident));
+      ASSERT((module = NIL) OR (module IS Sym.Ident));
+      defident := definition(Sym.Ident);
+      IF module = NIL THEN modident := NIL;
+      ELSE modident := module(Sym.Ident); END;
+      archdef := NIL; code := NIL; updated := FALSE; abort := FALSE;
+      freshdef := FALSE;
+
+      IF updatesPermitted THEN
+	 IF defident.key.arch = NIL THEN
+	    CreateNewModule(defident);
+	    defident.key.arch := arch;
+	    CompilerKeys.CreateValue(defident.key.archkey);
+	    ProcessModule(defident); updated := TRUE; freshdef := TRUE;
+	    IF abort OR RelatedEvents.EventsPending(errors) THEN
+	       ReturnErrors; RETURN FALSE
+	    END;
+	 END;
+      ELSE
+	 ASSERT(defident.key.arch # NIL);
+      END;
+
+      IF modident # NIL THEN
+	 CreateNewModule(modident);
+	 ok := CompilerKeys.CombineKeys(defident.key, modident.key, combinedKey);
+	 ASSERT(ok);
+	 ProcessModule(modident);
+	 IF abort OR RelatedEvents.EventsPending(errors) THEN
+	    ReturnErrors; RETURN FALSE
+	 END;
+	 Oberon64iUpdates.CheckForUpdates(defident, modident,
+					  updatesPermitted, updated, errors);
+	 IF abort OR RelatedEvents.EventsPending(errors) THEN
+	    ReturnErrors; RETURN FALSE
+	 END;
+	 IF updated & ~freshdef THEN
+	    CompilerKeys.CreateValue(defident.key.archkey);
+	    CompilerKeys.Incl(context.keys, defident.key);
+	 END;
+	 modsrcid := modident.key.modsrcid;
+	 CompilerKeys.CreateCopy(modident.key, defident.key);
+	 modident.key.modsrcid := modsrcid;
+	 CompilerKeys.Incl(context.keys, modident.key);
+      END;
+
+      IF RelatedEvents.EventsPending(errors) THEN
+	 ReturnErrors; RETURN FALSE
+      END;
+
+      IF updated THEN
+	 CreateHeader(defheader, defident);
+	 defheader.type := CompilerObjects.public;
+	 NEW(archdef);
+	 archdef.header := defheader; archdef.object := defident;
+      END;
+
+      IF modident # NIL THEN
+	 CreateHeader(modheader, modident);
+	 modheader.type := CompilerObjects.private;
+	 NEW(code);
+	 OberonAMD64Results.Create(code.object);
+	 IF ~AMD64CodeGen.GenModule(code.object(OberonAMD64Results.Result),
+				    modident, errors) THEN
+	    code.object := NIL; ReturnErrors; RETURN FALSE;
+	 END;
+	 IF RelatedEvents.EventsPending(errors) THEN
+	    code.object := NIL; ReturnErrors; RETURN FALSE
+	 END;
+	 code.header := modheader;
+      END;
+      RETURN TRUE
+   END Pass2;
+
+   PROCEDURE Init;
+      VAR if: Compilers.Pass2Interface;
+   BEGIN
+      Architectures.Create(myarch, "AMD64");
+      myarch.variant := NIL; myarch.model := NIL;
+      NEW(if); if.pass2 := Pass2; if.defineArgs := NIL;
+      Compilers.Register(OberonCompiler.compiler, myarch, if);
+   END Init;
+
+BEGIN
+   Init;
+END OberonAMD64.

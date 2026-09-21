@@ -176,7 +176,11 @@ MODULE SysSignals;
 	 sigevent.sigcode := 0;
       END;
       IF (signo <= MAX(SET)) & (signo IN faultingSignals) THEN
-	 SYSTEM.GET (ucontext + 4 * 26, sigevent.addr);   (* cr2 *)
+	 IF SYSTEM.SIZE(SysTypes.UntracedAddress) = 8 THEN
+	    SYSTEM.GET (ucontext + 8 * 27, sigevent.addr);  (* AMD64: cr2 at uc_mcontext+176 = ucontext+216 *)
+	 ELSE
+	    SYSTEM.GET (ucontext + 4 * 26, sigevent.addr);  (* i386: cr2 at uc_mcontext+64 = ucontext+104 *)
+	 END;
 	 sigevent.sigcode := 1 (* XXX See SysStorage *);
       ELSE
 	 sigevent.addr := SYSTEM.VAL(SysTypes.UntracedAddress, NIL);

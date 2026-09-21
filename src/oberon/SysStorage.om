@@ -218,10 +218,14 @@ MODULE SysStorage;
       Nil = SYS.VAL(Address, NIL);
       minAlignment = SysMemParams.minAlignment; (* minimal alignment necessary *)
 
-      tagOffset = - wordSize;
-	 (* offset relative to a pointer to access the tag pointer *)
-      tagAreaSize = minAlignment;
-	 (* number of bytes reserved for tag pointer (must be aligned) *)
+      tagOffset = - SYS.SIZE(Address);
+	 (* offset relative to a pointer to access the tag pointer.
+	    Must equal -addrSize so that the AMD64 type guard (which reads
+	    ptr[-addrSize]) finds the tag written by the allocator. *)
+      tagAreaSize = SYS.SIZE(Address);
+	 (* number of bytes reserved for tag pointer; must be >= addrSize
+	    to hold a full pointer, and equal to -tagOffset so that the tag
+	    is at the start of the reserved area. *)
 
       (* formerly we used to take addrSize instead of tagOffset and tagAreaSize
          because (-tagOffset) was equal to tagAreaSize:
@@ -232,7 +236,9 @@ MODULE SysStorage;
       bitsPerAddress = 8 * addrSize;
          (* the largest memory size possible must be <= 2^bitsPerAddress-1 *)
       kByte = 1024;
-      maxSize = ASH(1, bitsPerAddress - 2);
+      maxSize = MAX(LONGINT);
+         (* was: ASH(1, bitsPerAddress - 2) = overflows LONGINT on AMD64 (64-bit)
+            MAX(LONGINT) = 2^31-1 is safe for both i386 and AMD64 *)
 
       maxPrecision = 8 * kByte;
          (* rounding precision (see PROC IsMapSize) *)
@@ -324,6 +330,15 @@ MODULE SysStorage;
          (* check this offset in DummyTagRec *)
       basetypeOffset = 4 * addrSize;
          (* offset to basetypes, if tag is not a dummy tag *)
+      tagHierlenOff = 2 * addrSize + SYS.SIZE(LONGINT);
+         (* byte offset of hierlen in a type descriptor:
+            i386: size(4)+module(4)+typeno(4)=12; AMD64: size(4)+pad(4)+module(8)+typeno(4)=20.
+            On AMD64 the compiler 8-aligns the module pointer, adding 4 bytes of padding
+            after size; this formula matches both GenTypes without a packed-struct read. *)
+      dummyTagSize = basetypeOffset + SYS.SIZE(Size);
+         (* total bytes for an inline (SYS.NEW) tag with no pointer fields:
+            header (4*addrSize) + sentinel (SYS.SIZE(Size)).
+            i386: 16+4=20 (was SYS.SIZE(DummyTagRec)); AMD64: 32+4=36 (NOT 24). *)
 
       (* pointer list definitions *)
 
@@ -548,6 +563,17 @@ MODULE SysStorage;
             critical regions may be nested when, for example, 
             during a call of AllocateWithTag the stack has to be extended
          *)
+      gcPreAllocating: BOOLEAN;
+         (* TRUE during CopyingCollector's NewRegularRegion pre-allocation
+            phase (before the point of no return); allows Memory.AllocateRegion
+            to call NEW for Region/MemoryBlock objects even while lock=TRUE and
+            criticalRegionNestLevel>0, because the old heap is still intact
+         *)
+      inMemoryAllocate: BOOLEAN;
+         (* TRUE while executing Memory.AllocateRegion (set in AllocInterval);
+            suppresses the OutOfMemory check in AllocateWithTag so that
+            Memory's internal MemoryBlock/Region object allocations via NEW
+            don't recursively trigger OutOfMemory or NewRegularRegion *)
       stackSizeProbed: BOOLEAN;
 	 (* lock that makes sure that we do not probe the stack
 	    size multiple times
@@ -691,12 +717,15 @@ MODULE SysStorage;
       END;
       IF protect THEN allocMode := allocMode + Memory.redzoneProtected END;
       Align(size, pageSize);
+      inMemoryAllocate := TRUE;
       IF Memory.AllocateRegion(size, allocMode, addr, mregion, errors) THEN
+         inMemoryAllocate := FALSE;
          mapAddr := addr;
          IF mode < 0 THEN DEC(mapAddr, size) END;
          IF Map(mapAddr, size, errors) THEN RETURN TRUE END;
          Memory.ReleaseRegion(mregion);
       END;
+      inMemoryAllocate := FALSE;
       RETURN FALSE;
    END AllocInterval;
 
@@ -1141,9 +1170,13 @@ MODULE SysStorage;
                END;
                IF ismapped THEN
                   p.size := size;
-                  NEW(attach); attach.id := HeaderID;
-                  attach.addr := SYS.VAL(Address, p);
-                  Disciplines.Add(mregion, attach);
+                  (* Skip Disciplines.Add during GC (lock=TRUE) to avoid
+                     AllocateWithTag while criticalRegionNestLevel>0. *)
+                  IF ~lock THEN
+                     NEW(attach); attach.id := HeaderID;
+                     attach.addr := SYS.VAL(Address, p);
+                     Disciplines.Add(mregion, attach);
+                  END;
                   INC(untagged.allocated, size);
                   INC(untagged.mapped, size);
                ELSE
@@ -1243,9 +1276,13 @@ MODULE SysStorage;
             IF mode = 0 THEN    (* new fixed region *)
                INC(storage.allocated, size);
             ELSE                (* new stack region *)
-               NEW(attach); attach.id := RegionID;
-               attach.addr := SYS.VAL(Address, region);
-               Disciplines.Add(mregion, attach);
+               (* Skip Disciplines tracking when GC lock is held to avoid
+                  tagged AllocateWithTag call while criticalRegionNestLevel>0. *)
+               IF ~lock THEN
+                  NEW(attach); attach.id := RegionID;
+                  attach.addr := SYS.VAL(Address, region);
+                  Disciplines.Add(mregion, attach);
+               END;
             END;
             RETURN TRUE
          END;
@@ -1563,7 +1600,7 @@ MODULE SysStorage;
             beginAddr,endAddr: Address;
             elementCount, index: LONGINT;
             ptr, rectag: Address;
-            dummytag: DummyTag;
+            hierlen: LONGINT; (* replaces dummytag; read via tagHierlenOff *)
 
          PROCEDURE Forward(root: Address);
             (* standardforwarding algorithm
@@ -1602,13 +1639,13 @@ MODULE SysStorage;
 		  END;
                   SYS.WMOVE(source - tagAreaSize, regionInUse.addr,
 		     (size + tagAreaSize) DIV wordSize);
-                  IF tag = source + size - SYS.SIZE(DummyTagRec) THEN
+                  IF tag = source + size - dummyTagSize THEN
 		     (* tag belongs to copied object (SYS.NEW)
 			so tag ptr in dest region must be updated
 		     *)
                      SYS.PUT(regionInUse.addr + tagAreaSize + tagOffset,
 		             regionInUse.addr + tagAreaSize +
-			     size - SYS.SIZE(DummyTagRec));
+			     size - dummyTagSize);
                   END;
                   tag := regionInUse.addr + tagAreaSize + copiedTag;
 		  INC(regionInUse.addr, size + tagAreaSize);
@@ -1668,9 +1705,12 @@ MODULE SysStorage;
 
       BEGIN (* ExamineObject *)
          IF pc = Nil THEN     (* not a procedure tag *)
-            (* ptrList addresses the type tag *)
-            dummytag := SYS.VAL(DummyTag, ptrList);
-            INC(ptrList, basetypeOffset + dummytag.hierlen * addrSize);
+            (* ptrList addresses the type tag; read hierlen at its true byte
+               offset (tagHierlenOff) rather than via the packed DummyTagRec
+               struct, which would give the wrong field on AMD64 because the
+               compiler 8-aligns the module pointer with 4 bytes of padding. *)
+            SYS.GET(ptrList + tagHierlenOff, hierlen);
+            INC(ptrList, basetypeOffset + hierlen * addrSize);
          END;
          LOOP
             SYS.GET(ptrList, offset); INC(ptrList, SYS.SIZE(Size));
@@ -1772,7 +1812,12 @@ MODULE SysStorage;
 	 size := storage.chunksize;
       END;
       (* workRegion is a reserve region *)
+      (* Allow Memory.AllocateRegion's internal NEW calls (for Region/MemoryBlock
+         objects) while lock=TRUE and criticalRegionNestLevel>0.  The old heap is
+         still intact at this point — we have not yet reached the point of no return. *)
+      gcPreAllocating := TRUE;
       IF ~NewRegularRegion(workRegion, storage.chunksize) THEN
+	 gcPreAllocating := FALSE;
 	 (* give up as long as we have some memory left for proper cleanup *)
 	 OutOfMemory;
       END;
@@ -1791,6 +1836,7 @@ MODULE SysStorage;
       Align(blocksize, pageSize);
       WHILE size > 0 DO
 	 IF ~NewRegularRegion(region, blocksize) THEN
+	    gcPreAllocating := FALSE;
 	    DeallocRegionList(workRegion);
 	    DeallocRegionList(freeHeaps);
 	    (* we prefer to give up; this is better than to
@@ -1805,6 +1851,7 @@ MODULE SysStorage;
 	 PutIntoList(freeHeaps, region);
 	 DEC(size, blocksize - pageSize - minChunkSize);
       END;
+      gcPreAllocating := FALSE;
 
       (* this is the point of no RETURN;
 	 no memory is available;
@@ -2127,16 +2174,51 @@ MODULE SysStorage;
    PROCEDURE AllocateWithTag(VAR ptr: Address; tag: Address; size: Size);
       VAR
          region: Region;
-         dummyTag: DummyTag;
          pass: INTEGER;
 	 mappedRegion: BOOLEAN;
    BEGIN
-      IF ~initCompleted OR (lock & (criticalRegionNestLevel # 0)) THEN
-         (* start up region too small or unfinished garbage collection *)
+      IF (~initCompleted & (criticalRegionNestLevel = 0)) OR ((lock & (gc # NIL) & (criticalRegionNestLevel # 0)) & ~gcPreAllocating) THEN
+         (* start up region too small or unfinished garbage collection;
+            AMD64: when criticalRegionNestLevel > 0, we may be inside Init's
+            simulated critical region (Memory.ReserveRegion -> NEW goes through
+            AllocateWithTag on AMD64; i386 used an inline CMPXCHG8B fast path) *)
          PanicExit;
       END;
-      IF criticalRegionNestLevel # 0 THEN OutOfMemory END;
-         (* there was more memory consumed than we expected *)
+      IF (gc # NIL) & (criticalRegionNestLevel > 1) & ~gcPreAllocating & ~inMemoryAllocate THEN OutOfMemory END;
+         (* there was more memory consumed than we expected.
+            On AMD64, NEW does not have an inline fast path (unlike i386 CMPXCHG8B),
+            so level=1 (AllocateStack's single critical region) must be allowed for
+            small allocations like Attach.  Level>1 means truly nested allocation. *)
+      IF gcPreAllocating THEN
+         (* Direct allocation from regionInUse during GC pre-alloc phase.
+            Skip the worksize check and NewRegularRegion to avoid infinite
+            recursion: NewRegularRegion -> Memory.AllocateRegion -> NEW(child)
+            -> AllocateWithTag -> NewRegularRegion -> ...
+            regionInUse holds the old heap and has ample space for the small
+            MemoryBlock/Region objects Memory needs here. *)
+         Align(size, minAlignment);
+         StartOfCriticalRegion;
+         IF Storage.left < size THEN
+            EndOfCriticalRegion;
+            PanicExit; (* old heap exhausted during GC pre-alloc -- unexpected *)
+         END;
+         ptr := Storage.end - Storage.left;
+         DEC(Storage.left, size);
+         IF size > 0 THEN SYS.WCLEAR(ptr, size DIV wordSize) END;
+         IF tag = Nil THEN
+            (* SYS.NEW: embed a dummy tag at the end of the object.
+               WCLEAR already zeroed module/typeno/hierlen; write size and
+               sentinel at the offsets the AMD64 compiler uses (tagHierlenOff
+               and basetypeOffset) so ExamineObject finds them correctly. *)
+            tag := ptr + size - dummyTagSize;
+            SYS.PUT(tag + sizeOffset, size - tagAreaSize);
+            SYS.PUT(tag + basetypeOffset, sentinel);
+         END;
+         SYS.PUT(ptr + tagAreaSize + tagOffset, tag);
+         INC(ptr, tagAreaSize);
+         EndOfCriticalRegion;
+         RETURN (* no AssureWorkingSize -- we are inside GC *)
+      END;
       mappedRegion := IsMapSize(size, storage.mapsize,
                          storage.mapsize, storage.precision);
       IF mappedRegion THEN
@@ -2172,8 +2254,16 @@ MODULE SysStorage;
             OR (((Storage.left >= size) OR SeekRegion(size, TRUE))
                 & SeekRegion(storage.worksize, FALSE))
                (* region becomes full but an additional region is left *)
-            OR NewRegularRegion(region, storage.chunksize)
-               (* allocation of a new region was successful *)
+            OR ((criticalRegionNestLevel > 1) &
+                ((Storage.left >= size) OR
+                 (inMemoryAllocate & SeekRegion(size, TRUE))))
+               (* nested call from Memory.AllocateRegion -> NEW(child):
+                  skip worksize guarantee; also try SeekRegion when current
+                  region is exhausted (Storage.left=0 after MoveLeft(0)) --
+                  a partial free region may still have room for the small
+                  MemoryBlock object even if no worksize-sized region exists *)
+            OR ((criticalRegionNestLevel <= 1) & NewRegularRegion(region, storage.chunksize))
+               (* allocation of a new region was successful (not nested) *)
             THEN       (* allocate it ... *)
                IF region # NIL THEN   (* NewRegion was called *)
                   PutIntoTree(fixedTree, region);
@@ -2188,18 +2278,22 @@ MODULE SysStorage;
                garbage collection intensity has been too low
             *)
          END;
-         IF pass > 1 THEN OutOfMemory ELSE INC(pass) END;
+         IF criticalRegionNestLevel > 1 THEN
+            (* nested allocation has no space: OutOfMemory/NewRegion would
+               recurse via Memory.AllocateRegion -> NEW -> AllocateWithTag *)
+            PanicExit
+         ELSIF pass > 1 THEN OutOfMemory
+         ELSE INC(pass)
+         END;
          EndOfCriticalRegion;
          GarbageCollection;
       END; (* of LOOP *)
       IF size > 0 THEN SYS.WCLEAR(ptr, size DIV wordSize) END; (* zero area *)
       IF tag = Nil THEN                   (* called via SYS.NEW *)
          (* allocate tag behind the requested area *)
-         tag := ptr + size - SYS.SIZE(DummyTagRec);
-         dummyTag := SYS.VAL(DummyTag, tag);
-         dummyTag.size := size - tagAreaSize; dummyTag.module := Nil;
-         dummyTag.typeno := 0; dummyTag.hierlen := 0;
-         dummyTag.sentinel := sentinel;
+         tag := ptr + size - dummyTagSize;
+         SYS.PUT(tag + sizeOffset, size - tagAreaSize);
+         SYS.PUT(tag + basetypeOffset, sentinel);
       END;
       SYS.PUT(ptr + tagAreaSize + tagOffset, tag);  (* store tag pointer *)
       INC(ptr, tagAreaSize);  (* points now to free area *)
@@ -2243,7 +2337,9 @@ MODULE SysStorage;
          GarbageCollection;
       END; (* of LOOP *)
       EndOfCriticalRegion;
-      AssureWorkingSize;
+      IF mode = 0 THEN
+	 AssureWorkingSize;
+      END;
    END AllocateStack;
 
    (* ======= interface procedure: Storage.EnableCollection ==============*)
@@ -2384,7 +2480,9 @@ MODULE SysStorage;
          sizeIndex: SizeIndex;
          signal: SysSignals.Signal;
          addr: Address;
+	 segSize: Size; (* segment.size converted to SysStorage.Size for arithmetic *)
 	 toBeBlocked: SigOps.SignalSet;
+	 addr32limit: Address; (* 4GB boundary; computed at runtime to avoid 64-bit const-fold in cross-compiler *)
    BEGIN
       lock := TRUE;                (* lock garbage collector *)
       storage.collection := 0;
@@ -2400,7 +2498,10 @@ MODULE SysStorage;
       (* set pagesize value *)
       pageSize := SysMemory.GetPageSize();
       Memory.SetPageSize(pageSize);
-      NEW(errors); RelatedEvents.QueueEvents(errors);
+      (* Note: errors = NIL here; tagged allocation (NEW) is not yet available
+         because lock=TRUE and initCompleted=FALSE.  SysIO.Open and similar calls
+         that take errors: RelatedEvents.Object work fine with NIL (errors silently
+         dropped).  The errors object is initialised after initCompleted := TRUE. *)
 
       (* init UntaggedStorage variables *)
       allocp := SYS.VAL(Header, SYS.ADR(base));
@@ -2447,25 +2548,78 @@ MODULE SysStorage;
       specialRegions := SYS.VAL(Region, New(SYS.SIZE(RegionRec)));
       stackIt := NIL;
 
+      (* AMD64 pre-init: On AMD64, Memory.ReserveRegion -> NEW goes through
+         AllocateWithTag (no inline CMPXCHG8B fast path as on i386).
+         AllocateWithTag needs: (a) non-zero storage.mapsize / storage.precision
+         so that small allocations are not misclassified as "mapped" allocations
+         (IsMapSize returns TRUE for any size when mapsize=0); (b) non-zero
+         regionInUse.end so that the first StartOfCriticalRegion at level 0->1
+         (in GarbageCollector->AllocateStack after Init) does not corrupt
+         Storage.left and Storage.end.
+         The segment loop's ELSIF will call InitRegion again with the same values;
+         it is safe and idempotent. *)
+      storage.precision := maxPrecision;
+      Align(storage.precision, minAlignment);
+      IF pageSize < storage.precision THEN storage.precision := pageSize END;
+      storage.mapsize := minMapSize; Align(storage.mapsize, pageSize);
+      storage.stacksize := minStackSize; Align(storage.stacksize, pageSize);
+      storage.worksize := minWorkSize;
+      storage.chunksize := 2 * minWorkSize;
+      IF storage.chunksize < minChunkSize THEN
+         storage.chunksize := minChunkSize;
+      END;
+      AlignPowerOf2(storage.chunksize, storage.chunksize);
+      storage.alloclimit := storage.chunksize;
+      storage.currentlimit := storage.alloclimit;
+      IF Storage.end # Nil THEN
+         storage.allocated := Storage.left;
+         IF storage.chunksize < storage.allocated THEN
+            storage.chunksize := storage.allocated;
+            AlignPowerOf2(storage.chunksize, storage.chunksize);
+            storage.alloclimit := storage.chunksize;
+            storage.currentlimit := storage.alloclimit;
+         END;
+         InitRegion(regionInUse, Storage.end - Storage.left, Storage.left,
+                    0, FALSE);
+         fixedTree := regionInUse;
+      END;
+
       (* reserve preallocated segments *)
+      (* On 64-bit: compute 4GB boundary to skip high AMD64 addresses.
+         On 32-bit: all addresses are in range; addr32limit is unused. *)
+      addr32limit := SYS.VAL(Address, MAX(LONGINT));
+      IF bitsPerAddress > 32 THEN
+         addr32limit := addr32limit + addr32limit + 2; (* = 0x100000000 = 4GB *)
+      END;
       numberOfSegments := SysSegments.NumberOfSegments();
       index := 0;
       WHILE index < numberOfSegments DO
          SysSegments.GetSegment(index, segment);
          addr := segment.addr;
-         Align(segment.size, pageSize);
+         segSize := SYS.VAL(Size, segment.size);
+         Align(segSize, pageSize);
          IF segment.mode = 0 THEN
             allocMode := Memory.fixed;
          ELSIF segment.mode < 0 THEN
-            DEC(addr, segment.size);
+            DEC(addr, segSize);
             allocMode := Memory.growingBackward;
          ELSE
             allocMode := Memory.growingForward;
          END;
-         Memory.ReserveRegion(segment.addr, segment.size, allocMode, mregion);
-         IF (SYS.ADR(addr) >= addr) & (SYS.ADR(addr) < addr + segment.size)
+         (* skip: Memory models [0, 2^30) = 1GB; skip segments outside that range.
+            - High AMD64 addresses (> addr32limit) are already excluded below.
+            - High i386 addresses (stack ~0xBFxxxxx, vDSO ~0xF7xxxxx) are negative
+              as LONGINT and would alias to the same buddy-tree leaf, causing a
+              false "overlapping regions" assertion on the second segment.
+            - Positive addresses in [0x40000000, 0x7FFFFFFF] are also outside
+              Memory's 1GB range and must be excluded too. *)
+         IF ((bitsPerAddress <= 32) OR (segment.addr < addr32limit)) &
+            (segment.addr >= 0) & (segment.addr < 40000000H) THEN
+            Memory.ReserveRegion(segment.addr, segSize, allocMode, mregion);
+         END;
+         IF (SYS.ADR(addr) >= addr) & (SYS.ADR(addr) < addr + segSize)
          THEN   (* it's the current coroutine stack *)
-            InitRegion(specialRegions, segment.addr, segment.size,
+            InitRegion(specialRegions, segment.addr, segSize,
                        segment.mode, (* mapped = *) FALSE);
             specialRegions.end := SYS.VAL(Address, Coroutines.current);
             specialRegions.start := specialRegions.end - tagAreaSize;
@@ -2475,12 +2629,12 @@ MODULE SysStorage;
                Disciplines.Add(mregion, attach);
             *)
          ELSIF (Storage.end - Storage.left >= addr) &
-	       (Storage.end - Storage.left < addr + segment.size)
+	       (Storage.end - Storage.left < addr + segSize)
          THEN   (* it's the start up region *)
-            InitRegion(regionInUse, segment.addr, segment.size,
+            InitRegion(regionInUse, segment.addr, segSize,
                        segment.mode, (* mapped = *) FALSE);
             fixedTree := regionInUse;
-            storage.allocated := segment.size;
+            storage.allocated := segSize;
          END;
          INC(index);
       END;
@@ -2533,11 +2687,12 @@ MODULE SysStorage;
       uif.chunkSize := UntaggedChunkSize;
       UntaggedStorage.Init(uif);
 
-      Events.Handler(SysSignals.SEGV, FaultHandler);
-
       criticalRegionNestLevel := 0;
       initCompleted := TRUE;
-      (* now allocate some additional memory in advance *)
+      NEW(errors); RelatedEvents.QueueEvents(errors); (* deferred: needs initCompleted *)
+      Events.Handler(SysSignals.SEGV, FaultHandler); (* deferred: Events.Handler calls NEW *)
+      (* now allocate some additional memory in advance;
+         AssureWorkingSize is a no-op when startup region already satisfies worksize *)
       AssureWorkingSize;
       (* a call of AllocateStack follows now *)
 

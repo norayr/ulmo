@@ -1,0 +1,535 @@
+MODULE AMD64Operands; (* AMD64 port of I386Operands — addresses are 8 bytes *)
+
+   IMPORT FragmentedStreams, Objects, Registers := CompilerRegisters,
+      Relocations := CompilerRelocations, SYSTEM, Types;
+
+   TYPE
+      Register = INTEGER;
+      Location = INTEGER;
+
+   CONST
+      noConst = 0;
+      integerConst = 1;
+      realConst = 2;
+      setConst = 3;
+      charConst = 4;
+      booleanConst = 5;
+      nilConst = 6;
+      dataConst = 7;
+   TYPE
+      ConstantKind = SHORTINT;
+      ConstantData = POINTER TO ConstantDataRec;
+      ConstantDataRec =
+	 RECORD
+	    (Objects.ObjectRec)
+	    kind: ConstantKind;
+	    intval: Types.Int32;
+	    realval: Types.Real64;
+	    setval: SET;
+	    charval: CHAR;
+	    boolval: BOOLEAN;
+	    data: POINTER TO ARRAY 16 OF BYTE;
+	 END;
+
+   CONST
+      maxelemincache = 100;
+
+   TYPE
+      Operand = POINTER TO OperandRec;
+      OperandRec = RECORD
+	 (Objects.ObjectRec)
+	 reg1, reg2 : Registers.Value;
+	 immsz, memsz, dispsz : LONGINT;
+	 disp : LONGINT;
+	 data : ConstantData;
+	 volatile : BOOLEAN;
+	 next : Operand;
+	 loc : Location;
+	 scale : INTEGER;
+	 reloc : Relocations.RelocRequest;
+      END;
+
+      OperandCache = POINTER TO OperandCacheRec;
+      OperandCacheRec = RECORD
+	 (Objects.ObjectRec)
+	 ops  : Operand;
+	 nelem : LONGINT;
+      END;
+
+   CONST
+      error = 31;
+      cached = 30;
+      none = 0;
+      immediate = 1;
+      immediateDyn = 2;
+      register = 3;
+      register2 = 4;
+      memory = 5;
+      fpuRegister = 6;
+      condition = 7;
+
+   PROCEDURE CreateCache (VAR opcache : OperandCache);
+   BEGIN
+      NEW (opcache);
+      opcache.ops := NIL;
+      opcache.nelem := 0;
+   END CreateCache;
+
+   PROCEDURE Alloc(opcache : OperandCache) : Operand;
+      VAR op : Operand;
+   BEGIN
+      IF (opcache # NIL) & (opcache.ops # NIL) THEN
+	 op := opcache.ops;
+	 opcache.ops := op.next;
+	 op.next := NIL;
+	 ASSERT (op.loc = cached);
+	 op.loc := none;
+	 op.volatile := TRUE;
+	 DEC (opcache.nelem);
+      ELSE
+	 NEW (op);
+	 op.loc := none;
+	 op.volatile := FALSE;
+	 IF opcache # NIL THEN op.volatile := TRUE; END;
+	 op.next := NIL;
+      END;
+      RETURN op;
+   END Alloc;
+
+   PROCEDURE Free(opcache : OperandCache; op : Operand);
+   BEGIN
+      IF (opcache # NIL) & (opcache.nelem < maxelemincache) THEN
+	 ASSERT (op.next = NIL);
+	 ASSERT (op.reloc = NIL);
+	 op.loc := cached;
+	 op.next := opcache.ops;
+	 opcache.ops := op;
+	 op.reg1 := NIL; op.reg2 := NIL; op.data := NIL;
+	 op.immsz := 0; op.memsz := 0; op.dispsz := 0;
+	 op.disp := 0; op.volatile := FALSE; op.scale := 0;
+      END;
+   END Free;
+
+   PROCEDURE Dup (op : Operand) : Operand;
+      VAR ret : Operand;
+   BEGIN
+      IF op = NIL THEN RETURN ret; END;
+      ASSERT (~op.volatile);
+      NEW(ret); ret^ := op^;
+      RETURN ret;
+   END Dup;
+
+   PROCEDURE ^ ImmOpBase (cache : OperandCache; dyn : BOOLEAN) : Operand;
+
+   PROCEDURE ImmOp (dyn : BOOLEAN) : Operand;
+   BEGIN RETURN ImmOpBase (NIL, dyn); END ImmOp;
+
+   PROCEDURE ImmOpV (cache : OperandCache; dyn : BOOLEAN) : Operand;
+   BEGIN RETURN ImmOpBase (cache, dyn); END ImmOpV;
+
+   PROCEDURE ImmOpBase (cache : OperandCache; dyn : BOOLEAN) : Operand;
+      VAR op : Operand;
+   BEGIN
+      op := Alloc(cache);
+      op.memsz := 0; op.immsz := 0; op.data := NIL;
+      op.loc := immediate; op.reg1 := NIL; op.reg2 := NIL;
+      IF dyn THEN op.loc := immediateDyn; END;
+      RETURN op;
+   END ImmOpBase;
+
+   PROCEDURE Error () : Operand;
+      VAR op : Operand;
+   BEGIN
+      NEW (op); op.loc := error;
+      RETURN op;
+   END Error;
+
+   PROCEDURE IsError (op : Operand) : BOOLEAN;
+   BEGIN ASSERT (op # NIL); RETURN op.loc = error; END IsError;
+
+   PROCEDURE ImmIntFixed (i : Types.Int32; sz : LONGINT) : Operand;
+      VAR op : Operand;
+   BEGIN
+      op := ImmOp (FALSE);
+      NEW(op.data); op.data.kind := integerConst; op.data.intval := i;
+      op.immsz := sz;
+      RETURN op;
+   END ImmIntFixed;
+
+   PROCEDURE ^ ImmIntBase (cache : OperandCache; i : Types.Int32) : Operand;
+
+   PROCEDURE ImmInt (i : Types.Int32) : Operand;
+   BEGIN RETURN ImmIntBase (NIL, i); END ImmInt;
+
+   PROCEDURE ImmIntV (cache : OperandCache; i : Types.Int32) : Operand;
+   BEGIN RETURN ImmIntBase (cache, i); END ImmIntV;
+
+   PROCEDURE ImmIntBase (cache : OperandCache; i : Types.Int32) : Operand;
+      VAR op : Operand; s : SHORTINT; cmp : SHORTINT;
+   BEGIN
+      op := ImmOp (TRUE);
+      NEW(op.data); op.data.kind := integerConst; op.data.intval := i;
+      op.immsz := 0; cmp := 0;
+      IF i < 0 THEN cmp := -1; END;
+      WHILE i # cmp DO
+	 s := SYSTEM.VAL (SHORTINT, i MOD 256);
+	 i := i DIV 256; INC(op.immsz);
+      END;
+      IF ((s >= 0) & (cmp < 0)) OR ((s < 0) & (cmp >= 0)) THEN
+	 INC(op.immsz);
+      END;
+      IF op.immsz = 0 THEN op.immsz := 1; END;
+      RETURN op;
+   END ImmIntBase;
+
+   PROCEDURE ImmReal (r : Types.Real64) : Operand;
+      VAR op : Operand;
+   BEGIN
+      op := ImmOp (FALSE);
+      NEW(op.data); op.data.kind := realConst; op.data.realval := r;
+      op.immsz := 8;
+      RETURN op;
+   END ImmReal;
+
+   PROCEDURE ImmSet (s : SET) : Operand;
+      VAR op : Operand;
+   BEGIN
+      op := ImmOp (FALSE);
+      NEW(op.data); op.data.kind := setConst; op.data.setval := s;
+      op.immsz := 4;
+      RETURN op;
+   END ImmSet;
+
+   PROCEDURE ImmChar (c : CHAR) : Operand;
+      VAR op : Operand;
+   BEGIN
+      op := ImmOp (FALSE);
+      NEW(op.data); op.data.kind := charConst; op.data.charval := c;
+      op.immsz := 1;
+      RETURN op;
+   END ImmChar;
+
+   PROCEDURE ImmBool (b : BOOLEAN) : Operand;
+      VAR op : Operand;
+   BEGIN
+      op := ImmOp (FALSE);
+      NEW(op.data); op.data.kind := booleanConst; op.data.boolval := b;
+      op.immsz := 1;
+      RETURN op;
+   END ImmBool;
+
+   PROCEDURE ImmNil () : Operand;
+      VAR op : Operand;
+   BEGIN
+      op := ImmOp (FALSE);
+      NEW(op.data); op.data.kind := nilConst;
+      op.immsz := 4;   (* AMD64: NIL=0 fits in sign-extended imm32 for MOV r/m64, imm32s *)
+      RETURN op;
+   END ImmNil;
+
+   PROCEDURE ImmData (dyn : BOOLEAN; sz : LONGINT; data : ARRAY OF BYTE) : Operand;
+      VAR op : Operand; i, cp : LONGINT; byte : BYTE;
+   BEGIN
+      op := ImmOp (dyn); op.immsz := sz;
+      ASSERT ((sz <= 16) & (sz <= LEN(data)));
+      cp := sz;
+      IF dyn THEN cp := LEN(data); ASSERT (cp >= sz); END;
+      ASSERT(cp <= 16);
+      i := 0; NEW(op.data); op.data.kind := dataConst; NEW(op.data.data);
+      WHILE i < cp DO byte := data[i]; op.data.data[i] := byte; INC(i); END;
+      WHILE i < 16 DO op.data.data[i] := byte; INC(i); END;
+      RETURN op;
+   END ImmData;
+
+   PROCEDURE ^ RegOpBase (cache : OperandCache; reg : Registers.Value; size : LONGINT) : Operand;
+
+   PROCEDURE RegOp (reg : Registers.Value; size : LONGINT) : Operand;
+   BEGIN RETURN RegOpBase (NIL, reg, size); END RegOp;
+
+   PROCEDURE RegOpV (cache : OperandCache; reg : Registers.Value; size : LONGINT) : Operand;
+   BEGIN RETURN RegOpBase (cache, reg, size); END RegOpV;
+
+   PROCEDURE RegOpBase (cache : OperandCache; reg : Registers.Value; size : LONGINT) : Operand;
+      VAR op : Operand;
+   BEGIN
+      ASSERT (reg # NIL); Registers.CheckLoc (reg);
+      op := Alloc(cache); op.loc := register;
+      op.reg1 := reg; op.reg2 := NIL;
+      op.memsz := size; op.immsz := 0;
+      RETURN op;
+   END RegOpBase;
+
+   PROCEDURE Reg2Op (reg1, reg2 : Registers.Value; size : LONGINT) : Operand;
+      VAR op : Operand;
+   BEGIN
+      ASSERT ((reg1 # NIL) & (reg2 # NIL));
+      Registers.CheckLoc (reg1); Registers.CheckLoc (reg2);
+      NEW(op); op.loc := register2;
+      op.reg1 := reg1; op.reg2 := reg2;
+      op.memsz := size; op.immsz := size;
+      RETURN op;
+   END Reg2Op;
+
+   PROCEDURE MemOp0 (memsz, disp, dispsz : LONGINT) : Operand;
+      VAR op : Operand;
+   BEGIN
+      NEW(op); op.loc := memory;
+      op.reg1 := NIL; op.reg2 := NIL;
+      op.disp := disp; op.dispsz := dispsz;
+      op.immsz := 8;   (* AMD64: 64-bit address mode *)
+      op.memsz := memsz;
+      RETURN op;
+   END MemOp0;
+
+   PROCEDURE MemOp1 (reg : Registers.Value; memsz, disp, dispsz : LONGINT) : Operand;
+      VAR op : Operand;
+   BEGIN
+      ASSERT (reg # NIL); Registers.CheckLoc (reg);
+      op := MemOp0 (memsz, disp, dispsz);
+      op.reg1 := reg;
+      RETURN op;
+   END MemOp1;
+
+   PROCEDURE MemOp2 (reg1, reg2 : Registers.Value; memsz, disp, dispsz : LONGINT;
+	             scale : INTEGER) : Operand;
+      VAR op : Operand;
+   BEGIN
+      ASSERT((reg2 # NIL) & (scale IN {1,2,4,8}));
+      Registers.CheckLoc (reg1); Registers.CheckLoc (reg2);
+      op := MemOp1 (reg1, memsz, disp, dispsz);
+      op.reg2 := reg2; op.scale := scale;
+      RETURN op;
+   END MemOp2;
+
+   PROCEDURE FPUOp (reg : Registers.Value) : Operand;
+      VAR op : Operand;
+   BEGIN
+      ASSERT (reg # NIL); Registers.CheckLoc (reg);
+      op := Alloc(NIL); op.loc := fpuRegister;
+      op.reg1 := reg; op.reg2 := NIL;
+      op.memsz := 0; op.immsz := 0;
+      RETURN op;
+   END FPUOp;
+
+   PROCEDURE CCOp (cc : LONGINT) : Operand;
+      VAR op : Operand;
+   BEGIN
+      NEW(op); op.reg1 := NIL; op.reg2 := NIL;
+      op.loc := condition; op.disp := cc;
+      RETURN op;
+   END CCOp;
+
+   PROCEDURE Loc (op : Operand) : INTEGER;
+   BEGIN
+      ASSERT((op # NIL) & (none <= op.loc) & (op.loc <= condition));
+      RETURN op.loc;
+   END Loc;
+
+   PROCEDURE Scale (op : Operand; VAR scale : INTEGER);
+   BEGIN
+      scale := -1;
+      IF op.reg2 # NIL THEN scale := op.scale; ASSERT (scale IN {1,2,4,8}); END;
+   END Scale;
+
+   PROCEDURE SetScale (op : Operand; newscale : INTEGER);
+   BEGIN
+      ASSERT (op.loc = memory); ASSERT (op.reg2 # NIL);
+      ASSERT (newscale IN {1,2,4,8}); op.scale := newscale;
+   END SetScale;
+
+   PROCEDURE SetLoc (op : Operand; newloc : Location);
+   BEGIN
+      CASE newloc OF
+      | none: (* OK *)
+      | immediate, immediateDyn: ASSERT (op.loc IN {immediate, immediateDyn});
+      | register, fpuRegister: ASSERT ((op.reg1 # NIL) & (op.reg2 = NIL));
+      | register2: ASSERT ((op.reg1 # NIL) & (op.reg2 # NIL));
+      | memory:
+	 IF (op.reg1 = NIL) & (op.reg2 = NIL) THEN
+	    ASSERT ((op.disp # 0) OR (op.dispsz # 0));
+	 END;
+	 ASSERT ((op.reg2 = NIL) OR (op.scale IN {1,2,4,8}));
+      END;
+      op.loc := newloc;
+   END SetLoc;
+
+   PROCEDURE Sizes (op: Operand; VAR immsz : LONGINT; VAR memsz : LONGINT) : BOOLEAN;
+   BEGIN
+      ASSERT (op # NIL);
+      CASE op.loc OF
+      | immediate, immediateDyn, register, memory, fpuRegister, register2:
+	 immsz := op.immsz; memsz := op.memsz; RETURN TRUE;
+      ELSE RETURN FALSE;
+      END;
+      RETURN FALSE;
+   END Sizes;
+
+   PROCEDURE Reg (op: Operand; VAR reg : Register) : BOOLEAN;
+      VAR ok : BOOLEAN;
+   BEGIN
+      ASSERT (op # NIL);
+      CASE op.loc OF
+      | register, fpuRegister:
+	 ASSERT (op.reg1 # NIL);
+	 ok := Registers.RegCode (op.reg1, reg); ASSERT (ok);
+      ELSE RETURN FALSE;
+      END;
+      RETURN TRUE;
+   END Reg;
+
+   PROCEDURE Reg2 (op : Operand; VAR reg1, reg2 : Register) : BOOLEAN;
+      VAR ok : BOOLEAN;
+   BEGIN
+      ASSERT (op # NIL);
+      CASE op.loc OF
+      | register2:
+	 ASSERT ((op.reg1 # NIL) & (op.reg2 # NIL));
+	 ok := Registers.RegCode (op.reg1, reg1); ASSERT (ok);
+	 ok := Registers.RegCode (op.reg2, reg2); ASSERT (ok);
+      ELSE RETURN FALSE;
+      END;
+      RETURN TRUE;
+   END Reg2;
+
+   PROCEDURE Mem16 (op : Operand; VAR reg1 : Register; VAR reg2 : Register;
+		    VAR disp : LONGINT; VAR dispsize : LONGINT) : BOOLEAN;
+      VAR ok : BOOLEAN;
+   BEGIN
+      ASSERT (op # NIL); dispsize := 0;
+      IF op.dispsz > 0 THEN dispsize := op.dispsz; END;
+      IF op.immsz # 2 THEN RETURN FALSE; END;
+      CASE op.loc OF
+      | memory:
+	 ASSERT ((op.reg1 # NIL) & (op.reg2 # NIL));
+	 ok := Registers.RegCode (op.reg1, reg1); ASSERT (ok);
+	 ok := Registers.RegCode (op.reg2, reg2); ASSERT (ok);
+	 disp := op.disp;
+      ELSE RETURN FALSE;
+      END;
+      RETURN TRUE;
+   END Mem16;
+
+   (* AMD64: 64-bit memory addressing (replaces Mem32) *)
+   PROCEDURE Mem64 (op : Operand; VAR base : Register; VAR index : Register;
+		    VAR scale : INTEGER; VAR disp : LONGINT;
+		    VAR dispsize : LONGINT) : BOOLEAN;
+      VAR ok : BOOLEAN;
+   BEGIN
+      ASSERT (op # NIL); dispsize := 0; disp := 0;
+      IF op.dispsz > 0 THEN dispsize := op.dispsz; END;
+      IF op.immsz # 8 THEN RETURN FALSE; END;
+      CASE op.loc OF
+      | memory:
+	 base := -1;
+	 IF op.reg1 # NIL THEN ok := Registers.RegCode (op.reg1, base); ASSERT (ok); END;
+	 index := -1; scale := -1;
+	 IF op.reg2 # NIL THEN ok := Registers.RegCode (op.reg2, index); ASSERT (ok); END;
+	 Scale (op, scale); disp := op.disp;
+      ELSE RETURN FALSE;
+      END;
+      RETURN TRUE;
+   END Mem64;
+
+   PROCEDURE DataCopy (VAR from : ARRAY OF BYTE; VAR to : ARRAY OF BYTE; len : LONGINT);
+      VAR i : INTEGER;
+   BEGIN
+      i := 0; ASSERT (LEN(from) = len); ASSERT (len <= LEN (to));
+      WHILE i < LEN(from) DO to[i] := from[i]; INC (i); END;
+   END DataCopy;
+
+   PROCEDURE GetImmData (op : Operand; VAR arr : ARRAY OF BYTE; len : LONGINT);
+      VAR i : SHORTINT; val, test : LONGINT; short, add : SHORTINT;
+          exp : LONGINT; sign, bits : INTEGER; r : LONGREAL;
+   BEGIN
+      ASSERT ((op # NIL) & (op.data # NIL));
+      ASSERT (LEN(arr) >= len);
+      ASSERT (((op.loc = immediate) & (len = op.immsz)) OR
+	      ((op.loc = immediateDyn) & (len >= op.immsz)));
+      CASE op.data.kind OF
+      | integerConst:
+	 i := 0; val := op.data.intval;
+	 WHILE i < len DO
+	    arr[i] := SYSTEM.VAL (BYTE, val MOD 256);
+	    val := val DIV 256; INC(i);
+	 END;
+      | realConst:
+	 ASSERT (len = 8); i := 0;
+	 IF op.data.realval = 0.0 THEN
+	    WHILE i < 8 DO arr[i] := SYSTEM.VAL (BYTE, 0); INC (i); END;
+	 ELSE
+	    r := op.data.realval; sign := 0;
+	    IF r < 0 THEN sign := 080H; r := -r; END;
+	    exp := 03FFH;
+	    WHILE r < 1.0 DO r := r * 2.0; DEC (exp); END;
+	    WHILE r >= 2.0 DO r := r / 2.0; INC (exp); END;
+	    ASSERT (exp >= 0); ASSERT (exp <= 2047);
+	    INC (sign, exp DIV 16);
+	    arr[7] := SYSTEM.VAL (BYTE, sign);
+	    sign := SHORT (exp MOD 16);
+	    bits := 4; i := 6; r := r - 1.0;
+	    WHILE i >= 0 DO
+	       WHILE bits < 8 DO
+		  sign := sign * 2; r := r * 2;
+		  IF r >= 1.0 THEN INC (sign); r := r - 1.0; END;
+		  INC (bits);
+	       END;
+	       arr[i] := SYSTEM.VAL (BYTE, sign);
+	       bits := 0; sign := 0; DEC (i);
+	    END;
+	 END;
+      | setConst:
+	 ASSERT (len = 4); i := 0; test := 0;
+	 WHILE i < len DO
+	    add := 1; short := 0;
+	    WHILE add # 0 DO
+	       IF test IN op.data.setval THEN INC(short, add); END;
+	       INC(add, add); INC(test);
+	    END;
+	    arr[i] := SYSTEM.VAL (BYTE, short); INC(i);
+	 END;
+      | charConst: ASSERT(len = 1); arr[0] := SYSTEM.VAL (BYTE, op.data.charval);
+      | booleanConst:
+	 ASSERT(len = 1); arr[0] := 0;
+	 IF op.data.boolval THEN arr[0] := 1; END;
+      | nilConst:
+	 ASSERT((len = 4) OR (len = 8)); i := 0;   (* NIL=0, 4 or 8 bytes *)
+	 WHILE i < len DO arr[i] := 0; INC(i); END;
+      | dataConst:
+	 ASSERT ((len <= 16) & (op.data.data # NIL)); i := 0;
+	 WHILE i < len DO arr[i] := op.data.data[i]; INC(i); END;
+      END;
+   END GetImmData;
+
+   PROCEDURE NeedReloc (op : Operand) : BOOLEAN;
+   BEGIN
+      RETURN (op.reloc # NIL) & (op.reloc.type # Relocations.noReloc);
+   END NeedReloc;
+
+   PROCEDURE RelocOpen (op : Operand; reloc : Relocations.RelocRequest);
+   BEGIN
+      ASSERT ((op.reloc = NIL) & (reloc # NIL));
+      IF op.loc IN {immediate, immediateDyn} THEN ASSERT (op.immsz >= 4); END;
+      IF op.loc = memory THEN ASSERT (op.dispsz = 4); END;
+      op.reloc := reloc;
+   END RelocOpen;
+
+   PROCEDURE RelocInstance (op : Operand; l : FragmentedStreams.Label);
+      VAR inst : Relocations.Instance;
+   BEGIN
+      ASSERT ((op # NIL) & (l # NIL));
+      IF op.reloc # NIL THEN
+	 NEW (inst); inst.label := l;
+	 inst.next := op.reloc.instances;
+	 op.reloc.instances := inst;
+      END;
+   END RelocInstance;
+
+   PROCEDURE RelocInfo (op : Operand; off, len : LONGINT);
+   BEGIN
+      IF op.reloc # NIL THEN
+	 op.reloc.instances.off := off;
+	 op.reloc.instances.len := len;
+      END;
+   END RelocInfo;
+
+END AMD64Operands.

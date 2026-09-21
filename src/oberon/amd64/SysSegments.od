@@ -1,0 +1,23 @@
+(* AMD64 SysSegments: uses SYS.UNTRACEDADDRESS (8-byte) for Address and Size.
+   This matches Types.UntracedAddress used in SysStorage, ensuring type
+   compatibility and correct AMD64 calling convention (8-byte parameter slots). *)
+DEFINITION SysSegments;
+
+   IMPORT SYS := SYSTEM;
+
+   TYPE
+      Address = SYS.UNTRACEDADDRESS;
+      Size = SYS.UNTRACEDADDRESS;
+      Mode = SHORTINT;
+      Segment =
+	 RECORD
+	    addr: Address;
+	    size: Size;
+	    mode: Mode;
+	 END;
+
+   PROCEDURE Register(addr: Address; size: Size; mode: Mode);
+   PROCEDURE NumberOfSegments() : INTEGER;
+   PROCEDURE GetSegment(segmentIndex: INTEGER; VAR segment: Segment);
+
+END SysSegments.

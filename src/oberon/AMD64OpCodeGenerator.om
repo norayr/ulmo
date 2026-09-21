@@ -1,0 +1,1563 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2004 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   $Id: AMD64OpCodeGenerator.om,v 1.1 2004/09/06 16:42:42 borchert Exp borchert $
+   ----------------------------------------------------------------------------
+   $Log: AMD64OpCodeGenerator.om,v $
+   Revision 1.1  2004/09/06 16:42:42  borchert
+   Initial revision
+
+   ----------------------------------------------------------------------------
+*)
+
+MODULE AMD64OpCodeGenerator; (* Christian Ehrhardt, AMD64 adaptation *)
+
+   IMPORT Op := AMD64Operands, SYSTEM;
+
+   TYPE
+      Register = Op.Register;
+      Mnemonic = LONGINT;
+
+   CONST
+      (* Register Constants for byte registers *)
+      regal   = 0;
+      regcl   = 1;
+      regdl   = 2;
+      regbl   = 3;
+      regah   = 4;
+      regch   = 5;
+      regdh   = 6;
+      regbh   = 7;
+
+      (* Register Constants for word, dword and qword registers *)
+      genax    = 0;
+      gencx    = 1;
+      gendx    = 2;
+      genbx    = 3;
+      gensp    = 4;
+      genbp    = 5;
+      gensi    = 6;
+      gendi    = 7;
+      genr8    = 8;
+      genr9    = 9;
+      genr10   = 10;
+      genr11   = 11;
+      genr12   = 12;
+      genr13   = 13;
+      genr14   = 14;
+      genr15   = 15;
+
+      StdRegs = {genax, genbx, gencx, gendx, gensi, gendi,
+                 genr8, genr9, genr10, genr11, genr12, genr13, genr14, genr15};
+      AllRegs = StdRegs + {gensp, genbp};
+      LowByteRegs = {regal, regbl, regcl, regdl};
+
+   CONST
+      (* Instruction format constants. We use single character to
+       * be able to use them as in CASE statements as well *)
+
+      (* Prefixes *)
+      plock   = "L";   (* Lock prefix (either F0H or nothing) *)
+      prep    = "R";   (* Repeat prefix (either F3H or F2H) *)
+      popsz   = "O";   (* Operand size prefix (either nothing or 66H) *)
+      paddrsz = "A";   (* Address size prefix (either nothing or 67H) *)
+      pseg    = "S";   (* Segment override followed by default segment *)
+      prexw   = "W";   (* REX.W prefix for 64-bit operand size *)
+
+   TYPE
+      OpcodeMode = SET; (* OF lock..prefixsize-1 *)
+
+   CONST
+
+      (* These constants are used in the mode set of EmitGeneric *)
+      lock       = 0;      (* Lock prefix *)
+      rep        = 1;      (* Repeat prefix *)
+      repe       = rep;    (* Repeat equal/zero prefix *)
+      repz       = rep;
+      repne      = 2;      (* Repeat not equal/not zero prefix *)
+      repnz      = repne;
+      addrsz     = 3;      (* 32 Bit Address Size (in 64-bit mode: 67H prefix) *)
+      opsz       = 4;      (* 16 Bit Operand Size *)
+      (* Segment override prefixes *)
+      segcs      = 5;
+      segss      = 6;
+      segds      = 7;
+      seges      = 8;
+      segfs      = 9;
+      seggs      = 10;
+      rexw       = 11;     (* REX.W - 64-bit operand size *)
+      prefixsize = 12;
+
+      (* Parameter Format letters *)
+      fdigit = "D";   (* modr/m byte with a fixed *D*igit as reg argument *)
+      frm    = "M";   (* R/M Operand of a modr/m byte *)
+      freg   = "R";   (* Register Operand of a modr/m byte *)
+      fcode  = "C";   (* A code destination *)
+      fimm   = "I";   (* Immediate Data *)
+      fradd  = "+";   (* Add register code of Operand to previous byte.
+                       * We don't encode the register size here. It
+                       * can be deduced from the operand size *)
+      ffreg  = "F";   (* Add FPU register number of Operand to previous
+                       * byte *)
+
+   TYPE
+      InstrOpType = INTEGER; (* timpl1..tnum-1 *)
+
+   CONST
+      (* Instruction Operand type Constants *)
+      timpl1   = 0;  (* An implicit register Operand. The register size
+                      * depends *)
+      timpl2   = 1;  (* An implicit register Operand that uses two registers.
+                      * register size depends *)
+      trel     = 2;  (* Relative Address within segment *)
+      tptr     = 3;  (* Typical size: 2+addrsize *)
+      treg     = 4;  (* A general Purpose register (8,16,32,64 bit) *)
+      timm     = 5;  (* Immediate data (1,2,4 bytes) *)
+      trm      = 6;  (* A register/memory Operand in modr/m byte *)
+      tsmems   = 7;  (* A memory byte/word/dword/qword as used by string
+                      * instructions, addressed via (R)SI *)
+      tsmemd   = 8;  (* A memory byte/word/dword/qword as used by string
+                      * instructions, addressed via (R)DI *)
+      tmem     = 9;  (* A far pointer or a memory pair addressed via modr/m .
+                      * Both are equivilent for opcode construction and
+                      * fomat selection can be done depending on context.
+                      * This is used for m16&16, m32&32, m16:32 etc.*)
+      tmoffs   = 10; (* A memory offset *)
+      tsreg    = 11; (* A Segment Register (only used by MOVE *)
+      treal    = 12; (* A FPU real number in memory *)
+      tint     = 13; (* A FPU integer number in memory *)
+      tnbyte   = 14; (* Bytes in Memory, size depends. We could probably
+                      * merge this with tmem *)
+      tst      = 15; (* Floating Point ACCU (implicit) *)
+      tsti     = 16; (* Floating Point register *)
+
+      tnum     = 17; (* Number of Operand types *)
+
+      (* Instruction size limits *)
+      maxfmtlen  = 256;
+      maxfmtop   = 5;
+
+   TYPE
+      Size = POINTER TO SizeRec;
+      SizeRec = RECORD
+         base, opm, addrm : LONGINT;
+      END;
+      InstrOp   = POINTER TO InstrOpRec;
+      InstrOpRec = RECORD
+         type : InstrOpType;      (* Operand type *)
+         (* fcode, fimm: immregsz is the size of the immediate
+            data read from the format string. memsz is only
+            used if type is tmoffs and should be initialized.
+          * frm, fdigit: immregsz is the addresse mode (16/32/64bit)
+            memsz is the width of the register/memory operand.
+            Both sizes can be initilized. If immregsz consists
+            of three zeros reasonable default values are
+            inserted for immregsz (32bits or 1*address_size).
+            immregsz is only relevant if memory is addressed.
+          * freg, fradd: memsz is the width of the register and
+            should be initilized.
+          * ffreg: No size required/used for now.
+          *)
+         immregsz, memsz : SizeRec;
+         (* Register codes of implicit registers if type = TIMP1 or
+          * timpl2. Otherwise unused. NOTE: When only one register is
+          * used, use reg1. If both registers are used, use reg1
+          * for the least significant part. In any case, memsz is
+          * the size of reg1 and immregsz is the size of register 2! *)
+         reg1, reg2 : Register;
+         (* These are initilized by RegisterFormat *)
+         format : CHAR;   (* Conversion Format. *)
+         digit : INTEGER;
+      END;
+
+
+      Instruction = POINTER TO InstructionRec;
+      InstructionRec = RECORD
+         fmt : ARRAY maxfmtlen OF CHAR;
+         nops : INTEGER;
+         ops : ARRAY maxfmtop OF InstrOpRec;
+         badness : INTEGER;
+         next : Instruction;
+      END;
+
+      Code = POINTER TO CodeRec;
+      CodeRec = RECORD
+         code : ARRAY 256 OF BYTE;
+         len : INTEGER;
+      END;
+
+   CONST
+      maxmatch = 10;
+      maxinst  = 1000;
+   VAR
+      FmtMatch : ARRAY tnum OF ARRAY maxmatch OF CHAR;
+      instructions : ARRAY maxinst OF Instruction;
+      PREFIX : ARRAY prefixsize OF BYTE;
+
+   PROCEDURE Error (code : LONGINT);
+   BEGIN
+   (*
+      Write.StringS (Streams.stdout, "Error: ");
+      Write.IntS (Streams.stdout, code, 0);
+      Write.LnS (Streams.stdout);
+      IF Streams.Flush (Streams.stdout) THEN END;
+   *)
+   END Error;
+
+   PROCEDURE ToDigit (ch : CHAR; base : INTEGER; VAR ret : SHORTINT) : BOOLEAN;
+   BEGIN
+      IF ("0" <= ch) & (ch <= "9") THEN
+         ret := SHORT(ORD(ch) - ORD("0"));
+      ELSIF ("a" <= ch) & (ch <= "z") THEN
+         ret := SHORT(ORD(ch) - ORD("a") + 10);
+      ELSIF ("A" <= ch) & (ch <= "Z") THEN
+         ret := SHORT(ORD(ch) - ORD("A") + 10);
+      ELSE
+         RETURN FALSE;
+      END;
+      RETURN (ret < base);
+   END ToDigit;
+
+   PROCEDURE GetInteger (str : ARRAY OF CHAR; VAR idx : INTEGER;
+                         VAR res : INTEGER) : BOOLEAN;
+      VAR
+         d : SHORTINT;
+   BEGIN
+      IF (idx >= LEN(str)) OR ~ToDigit (str[idx], 10, d) THEN
+         RETURN FALSE;
+      END;
+      res := d;
+      LOOP
+         INC (idx);
+         IF ~ToDigit (str[idx], 10, d) THEN
+            EXIT;
+         END;
+         res := res * 10 + d;
+      END;
+      RETURN TRUE;
+   END GetInteger;
+
+   PROCEDURE GetByte (str : ARRAY OF CHAR; VAR idx : INTEGER;
+		      VAR res : BYTE) : BOOLEAN;
+      VAR
+	 d1, d2 : SHORTINT;
+   BEGIN
+      IF (idx+1 >= LEN(str)) THEN Error (1); RETURN FALSE END;
+      IF ~ToDigit (str[idx], 16, d1) OR
+         ~ToDigit (str[idx+1], 16, d2) THEN
+         RETURN FALSE;
+      END;
+      d1 := d1*16+d2;
+      res := SYSTEM.VAL(BYTE, d1);
+      INC(idx,2);
+      RETURN TRUE;
+   END GetByte;
+
+   PROCEDURE GetSize (VAR sz : SizeRec; as, os : LONGINT) : LONGINT;
+   BEGIN
+      RETURN sz.base + os*sz.opm + as*sz.addrm;
+   END GetSize;
+
+
+   PROCEDURE RegisterFormat (mnem : Mnemonic; fmt : ARRAY OF CHAR; nops : INTEGER; ops : ARRAY OF InstrOp; badness : INTEGER) : BOOLEAN;
+      VAR
+         instr : Instruction;
+         ret : Instruction;
+         i,j,op : INTEGER;
+         addrsz, opsz : BOOLEAN;
+         opset : SET;
+         tmpop : InstrOp;
+   BEGIN
+      instr := NIL;
+      ASSERT (nops <= maxfmtop);
+      i := 0; opset := {};
+      WHILE i < nops DO
+         INCL(opset, i);
+         INC(i);
+      END;
+      i := 0;
+      WHILE (i < LEN(fmt)) & (fmt[i] # 0X) DO
+         INC(i);
+      END;
+      ASSERT ((fmt[i] = 0X) & (i < maxfmtlen));
+      ret := NIL;
+      addrsz := FALSE; opsz := FALSE;
+      i := 0;
+      LOOP
+         IF fmt[i] = 0X THEN EXIT END;
+         IF fmt[i] = "?" THEN
+            INC(i);
+            CASE fmt[i] OF
+            | popsz:
+               opsz := TRUE;
+            | paddrsz:
+               addrsz := TRUE;
+            ELSE
+               (* Nothing *)
+            END;
+            WHILE (fmt[i] # "?") & (fmt[i] # 0X) DO
+               INC(i);
+            END;
+            IF (fmt[i] # "?") THEN Error (2); RETURN FALSE END;
+         ELSIF fmt[i] = "%" THEN
+            INC(i);
+            IF ~GetInteger (fmt, i, op) OR ~(op IN opset) THEN
+               Error (3);
+               RETURN FALSE;
+            END;
+            EXCL(opset, op);
+            IF (op >= nops) OR (ops[op] = NIL) OR (fmt[i] = 0X) THEN
+               Error (4);
+               RETURN FALSE;
+            END;
+            (* Make a private copy and store the pointer at the
+             * old location *)
+            NEW(tmpop);
+            tmpop^ := ops[op]^;
+            ops[op] := tmpop;
+            j := 0;
+            IF ops[op].type >= tnum THEN
+               Error (5);
+               RETURN FALSE;
+            END;
+            LOOP
+               IF FmtMatch[ops[op].type][j] = 0X THEN
+                  Error (6);
+                  RETURN FALSE;
+               END;
+               IF FmtMatch[ops[op].type][j] = fmt[i] THEN
+                  EXIT
+               END;
+               INC(j);
+            END;
+            ops[op].format := fmt[i];
+            INC(i);
+            IF (fmt[i] = 0X) THEN Error (7); RETURN FALSE END;
+            IF ops[op].format = fdigit THEN
+               IF ~GetInteger (fmt,i,ops[op].digit) THEN
+                  Error (8);
+                  RETURN FALSE;
+               END;
+            END;
+            CASE ops[op].format OF
+            | fcode, fimm:
+               IF ops[op].type # tmoffs THEN
+                  ops[op].memsz.base := 0;
+                  ops[op].memsz.addrm := 0;
+                  ops[op].memsz.opm := 0;
+               END;
+            | frm, fdigit:
+               IF (ops[op].immregsz.base = 0) &
+                  (ops[op].immregsz.addrm = 0) &
+                  (ops[op].immregsz.opm = 0) THEN
+                  IF addrsz THEN
+                     ops[op].immregsz.addrm := 1;
+                  ELSE
+                     ops[op].immregsz.base := 4;
+                  END;
+               END;
+            | freg, fradd: (* Use defaults *)
+               ops[op].immregsz.base := 0;
+               ops[op].immregsz.addrm := 0;
+               ops[op].immregsz.opm := 0;
+            | ffreg: (* Use defaults *)
+               ops[op].immregsz.base := 0;
+               ops[op].immregsz.addrm := 0;
+               ops[op].immregsz.opm := 0;
+               ops[op].memsz.base := 0;
+               ops[op].memsz.addrm := 0;
+               ops[op].memsz.opm := 0;
+            ELSE
+               Error (9);
+               RETURN FALSE;
+            END;
+            IF (~opsz & (ops[op].immregsz.opm # 0)) OR
+               (~addrsz & (ops[op].immregsz.addrm # 0)) THEN
+               Error (10);
+               RETURN FALSE;
+            END;
+            IF (~opsz & (ops[op].memsz.opm # 0)) OR
+               (~addrsz & (ops[op].memsz.addrm # 0)) THEN
+               Error (11);
+               RETURN FALSE;
+            END;
+            IF fmt[i] # "%" THEN Error (12); RETURN FALSE END;
+         END;
+         INC(i);
+      END;
+      i := 0;
+      WHILE i < nops DO
+         IF i IN opset THEN
+            CASE ops[i].type OF
+            | timpl1, timpl2, tsmems, tsmemd, tst:
+               ; (* Nothing *)
+            ELSE
+               Error (13);
+               RETURN FALSE;
+            END;
+         END;
+         INC(i);
+      END;
+      NEW(instr);
+      COPY(fmt, instr.fmt);
+      instr.nops := nops;
+      i := 0;
+      WHILE i < nops DO
+         instr.ops[i] := ops[i]^;
+         INC(i);
+      END;
+      instr.badness := badness;
+      instr.next := NIL;
+      IF (mnem < maxinst) THEN
+         instr.next := instructions[mnem];
+         instructions[mnem] := instr;
+      END;
+      ret := instr;
+      RETURN TRUE;
+   END RegisterFormat;
+
+
+   PROCEDURE RegisterFormat0 (mnem : Mnemonic; fmt : ARRAY OF CHAR; badness : INTEGER) : BOOLEAN;
+      VAR
+         arr : ARRAY 1 OF InstrOp;
+   BEGIN
+      arr[0] := NIL;
+      RETURN RegisterFormat (mnem, fmt, 0, arr, badness);
+   END RegisterFormat0;
+
+   PROCEDURE RegisterFormat1 (mnem : Mnemonic; fmt : ARRAY OF CHAR; op : InstrOp; badness : INTEGER) : BOOLEAN;
+      VAR
+         arr : ARRAY 1 OF InstrOp;
+   BEGIN
+      arr[0] := NIL;
+      arr[0] := op;
+      RETURN RegisterFormat (mnem, fmt, 1, arr, badness);
+   END RegisterFormat1;
+
+   PROCEDURE RegisterFormat2 (mnem : Mnemonic; fmt : ARRAY OF CHAR; op1, op2 : InstrOp; badness : INTEGER) : BOOLEAN;
+      VAR
+         arr : ARRAY 2 OF InstrOp;
+   BEGIN
+      arr[0] := NIL;
+      arr[0] := op1; arr[1] := op2;
+      RETURN RegisterFormat (mnem, fmt, 2, arr, badness);
+   END RegisterFormat2;
+
+   PROCEDURE RegisterFormat3 (mnem : Mnemonic; fmt : ARRAY OF CHAR; op1, op2, op3 : InstrOp; badness : INTEGER) : BOOLEAN;
+      VAR
+         arr : ARRAY 3 OF InstrOp;
+   BEGIN
+      arr[0] := NIL;
+      arr[0] := op1; arr[1] := op2; arr[2] := op3;
+      RETURN RegisterFormat (mnem, fmt, 3, arr, badness);
+   END RegisterFormat3;
+
+
+   PROCEDURE NeedSIB (i : INTEGER) : BOOLEAN;
+   BEGIN
+      i := i MOD 256;
+      RETURN ((i DIV 64 < 3) & (i MOD 8 = 4));
+   END NeedSIB;
+
+
+   (* Assumes that the registers have been checked to be 16 bit *)
+   (* NOTE: dispsize is the minimum number of bytes needed for the
+    * displacement, set this to something > 0 if you need the space
+    * for possible relocations *)
+   PROCEDURE DoMem16 (VAR byte : SHORTINT; reg1, reg2 : Register;
+                      disp : LONGINT; VAR dispsize : LONGINT) : BOOLEAN;
+      VAR
+         base, index : Register;
+   BEGIN
+      IF (-32768 > disp) OR (disp > 32767) THEN Error (14); RETURN FALSE END;
+      IF (dispsize > 2) THEN Error (15); RETURN FALSE END;
+      IF (dispsize < 0) THEN dispsize := 0 END;
+      (* Here we have 0 <= disp <= 2 *)
+      IF (disp < -128) OR (127 < disp) THEN
+	 (* We need two bytes anyway *)
+         dispsize := 2
+      ELSIF (disp # 0) & (dispsize < 1) THEN
+	 (* One byte would suffice, but don't reduce the size! *)
+         dispsize := 1;
+      END;
+      IF (reg1 < 0) & (reg2 < 0) THEN
+         dispsize := 2;
+         byte := 6;
+         RETURN TRUE;
+      END;
+      IF (reg1 < 0) THEN
+         reg1 := reg2;
+         reg2 := -1;
+      END;
+      IF ~(reg1 IN {genbp, genbx, gensi, gendi}) THEN
+         Error (16);
+         RETURN FALSE;
+      END;
+      IF (reg2 >= 0) &
+         ((~(reg2 IN {genbp, genbx, gensi, gendi})) OR
+          ((reg1 IN {genbp, genbx }) & (reg2 IN {genbp, genbx })) OR
+          ((reg1 IN {gensi, gendi}) & (reg2 IN {gensi, gendi}))) THEN
+         Error (17);
+         RETURN FALSE
+      END;
+      (* 0 = genax, but non of the registers can be genax. This allows us
+       * to use the CASE statement below. *)
+      base := 0; index := 0;
+      CASE reg1 OF
+      | genbp, genbx:   base := reg1;
+      | gensi, gendi: index := reg1;
+      ELSE
+         Error (18);
+         RETURN FALSE (* Shouldn't happen! *)
+      END;
+      CASE reg2 OF
+      | genbp, genbx:   base := reg2;
+      | gensi, gendi: index := reg2;
+      | -1:   (* Nothing *)
+      ELSE
+         Error (19);
+         RETURN FALSE (* Shouldn't happen! *)
+      END;
+      IF (dispsize = 0) & (base = genbp) & (index = 0) THEN
+         dispsize := 1;
+      END;
+      CASE 8*base + index OF
+      | 8*genbx + gensi:
+         byte := 0;
+      | 8*genbx + gendi:
+         byte := 1;
+      | 8*genbp + gensi:
+         byte := 2;
+      | 8*genbp + gendi:
+         byte := 3;
+      | gensi:
+         byte := 4;
+      | gendi:
+         byte := 5;
+      | 8*genbp:
+         byte := 6;
+      | 8*genbx:
+         byte := 7;
+      ELSE
+         Error (20);
+         RETURN FALSE
+      END;
+      byte := SYSTEM.VAL (SHORTINT, byte + 64*dispsize);
+      RETURN TRUE;
+   END DoMem16;
+
+
+   (* DoMem64: compute ModRM and SIB bytes for 64-bit addressing mode.
+    * Registers 0-15 are supported. The lower 3 bits go in the normal
+    * ModRM/SIB fields; the high bit (bit 3) is encoded in the REX prefix
+    * (REX.B for base/rm, REX.X for index) which is handled in EmitGeneric.
+    * r12 (code 12, low3=4=rsp) requires SIB like rsp.
+    * r13 (code 13, low3=5=rbp) requires dispsize>=1 like rbp.
+    *)
+   PROCEDURE DoMem64 (VAR byte : SHORTINT; VAR sib : SHORTINT;
+                      reg1, reg2 : Register; scale : INTEGER; disp : LONGINT;
+                      VAR dispsize : LONGINT) : BOOLEAN;
+      VAR
+         mod : LONGINT;
+         issib : BOOLEAN;
+         reg1low, reg2low : INTEGER;
+   BEGIN
+      IF dispsize > 4 THEN Error (21); RETURN FALSE END;
+      IF dispsize < 0 THEN dispsize := 0 END;
+      IF dispsize > 1 THEN dispsize := 4 END;
+      IF (disp < -128) OR (disp > 127) THEN
+	 (* We need four bytes anyway *)
+	 dispsize := 4;
+      ELSIF (disp # 0) & (dispsize < 1) THEN
+	 (* One byte is enough but don't reduce the required size *)
+	 dispsize := 1;
+      END;
+      issib := FALSE;
+      IF (reg1 >= 0) & ((reg1 < 0) OR (reg1 > 15)) THEN
+	 Error (reg1);
+         Error (22);
+         RETURN FALSE
+      END;
+      IF (reg2 >= 0) & ((reg2 < 0) OR (reg2 > 15)) THEN
+	 Error (23);
+         RETURN FALSE
+      END;
+      (* Compute low 3 bits of each register for ModRM/SIB encoding *)
+      IF reg1 >= 0 THEN
+         reg1low := reg1 MOD 8;
+      ELSE
+         reg1low := -1;
+      END;
+      IF reg2 >= 0 THEN
+         reg2low := reg2 MOD 8;
+      ELSE
+         reg2low := -1;
+      END;
+      IF (reg1 < 0) THEN (* Use Displacement as base *)
+         IF reg2 >= 0 THEN     (* With index *)
+            IF reg2low = gensp THEN (* rsp/r12 can't be index *)
+	       Error (24);
+               RETURN FALSE
+            END;
+            byte := gensp;
+            reg1low := genbp;  (* Use rbp/r13 base with disp32=0 *)
+            issib := TRUE;
+         ELSE
+            (* AMD64: mod=0 rm=5 is RIP-relative, not absolute.
+             * Encode absolute address via SIB: ModRM rm=4 (SIB follows),
+             * SIB base=5 (disp32-only with mod=0), SIB index=4 (no index). *)
+            byte := gensp;    (* ModRM rm=4 → SIB byte follows *)
+            reg1low := genbp; (* SIB base=5 = disp32-only addressing *)
+            scale := 1;       (* index field will be 4 (no-index) via line below *)
+            issib := TRUE;
+         END;
+         dispsize := 4;
+      ELSIF reg2 < 0 THEN   (* AND reg1 >= 0 *)
+         (* rbp (5) and r13 (13, low3=5) both need dispsize>=1 *)
+         IF (dispsize = 0) & (reg1low = genbp) THEN
+            dispsize := 1;
+         END;
+         mod := (dispsize + 1) DIV 2; (* 0->0, 1->1, 4->2 *)
+         (* rsp (4) and r12 (12, low3=4) both need SIB *)
+         IF reg1low = gensp THEN
+            reg2low := gensp;
+            issib := TRUE;
+            scale := 2
+         END;
+         byte := SYSTEM.VAL (SHORTINT, 64*mod + reg1low);
+      ELSE (* Both registers >= 0 *)
+         IF reg2low = gensp THEN   (* rsp/r12 can't be used as index *)
+	    Error (25);
+            RETURN FALSE;
+         END;
+         issib := TRUE;
+         (* rbp (5) and r13 (13, low3=5) both need dispsize>=1 *)
+         IF (dispsize = 0) & (reg1low = genbp) THEN
+            dispsize := 1;
+         END;
+         mod := (dispsize + 1) DIV 2; (* 0->0, 1->1, 4->2 *)
+         byte := SYSTEM.VAL (SHORTINT, 64*mod + gensp);
+      END;
+      IF issib THEN
+         ASSERT (NeedSIB (byte));
+         CASE scale OF
+         | 1:   mod := 0;
+         | 2:   mod := 1;
+         | 4:   mod := 2;
+         | 8:   mod := 3;
+         ELSE
+	    Error (26);
+            RETURN FALSE;
+         END;
+         (* reg2 is index (low3 bits), reg1 is base (low3 bits) *)
+         IF reg2low < 0 THEN reg2low := 4 END; (* no index: encode as rsp/r12 low3=4 *)
+         sib := SYSTEM.VAL (SHORTINT, mod * 64 + 8*reg2low + reg1low);
+      ELSE
+         ASSERT (~NeedSIB(byte));
+      END;
+      RETURN TRUE;
+   END DoMem64;
+
+
+
+   PROCEDURE DoByte233 (code : Code; part1 (* 2 bits *), part2 (* 3 bits *),
+            part3 (* 3 bits *): INTEGER) : BOOLEAN;
+      VAR
+         res : SHORTINT;
+   BEGIN
+      ASSERT ((part1 >= 0) & (part1 < 4));
+      ASSERT ((part2 >= 0) & (part2 < 8));
+      ASSERT ((part3 >= 0) & (part3 < 8));
+      res := SYSTEM.VAL (SHORTINT, part1 * 64 + part2 * 8 + part3 * 8);
+      code.code[code.len] := SYSTEM.VAL(BYTE, res);
+      INC(code.len);
+      RETURN TRUE;
+   END DoByte233;
+
+
+   PROCEDURE EmitGeneric (fmt : Instruction; mode : SET; ops : ARRAY OF Op.Operand; code : Code) : BOOLEAN;
+      VAR
+         reg1, reg2, reg : Op.Register;
+         type,i,j,old, num : INTEGER;
+         rm, sib : SHORTINT;
+         base, index, rmreg : Register;
+	 scale : INTEGER;
+	 disp, dispsz, len : LONGINT;
+         as, os, loc : INTEGER;
+         imm,mem : SizeRec;
+         imms,mems,fimms,fmems : LONGINT;
+         s : SHORTINT;
+         ret, rmpending, regpending, needsib : BOOLEAN;
+         op, memop : Op.Operand;
+         ftype : CHAR;
+         arr : ARRAY 20 OF BYTE;
+         (* REX prefix fields *)
+         rexByte : INTEGER;   (* full rex = 40H OR rexByte *)
+         rexW, rexR, rexX, rexB : INTEGER;
+         (* saved rm/reg info for REX computation *)
+         rmBaseReg, rmIndexReg, regOpReg : Register;
+         hasRmBase, hasRmIndex, hasRegOp : BOOLEAN;
+   BEGIN
+      op := NIL;
+      ASSERT(code # NIL);
+      IF fmt.nops > LEN(ops) THEN
+         Error (27);
+         RETURN FALSE;
+      END;
+      as := 8; os := 4;   (* AMD64: default 64-bit addressing, 32-bit operand size *)
+      IF addrsz IN mode THEN
+         as := 4;   (* 67H override: 32-bit addressing in 64-bit mode *)
+      END;
+      IF opsz IN mode THEN
+         os := 2;
+      END;
+      IF rexw IN mode THEN
+         os := 8;   (* REX.W: 64-bit operand size *)
+      END;
+      i := 0;
+      WHILE i < fmt.nops DO
+         IF ops[i] = NIL THEN
+            Error (28);
+            RETURN FALSE
+         END;
+         loc := Op.Loc(ops[i]);
+         IF loc = Op.none THEN
+            Error (29);
+            RETURN FALSE
+         END;
+         IF ~Op.Sizes (ops[i], imms, mems) THEN
+            Error (30);
+            RETURN FALSE;
+         END;
+         fimms := GetSize (fmt.ops[i].immregsz, as, os);
+         fmems := GetSize (fmt.ops[i].memsz, as, os);
+         CASE loc OF
+         | Op.register: (* Operand is in register, only need to
+                         * check one size. *)
+            IF fmems # mems THEN Error (31); RETURN FALSE END;
+         | Op.register2: (* Two registers, check both sizes *)
+            IF (fmems # mems) OR (fimms # imms) THEN
+               Error (32);
+               RETURN FALSE
+            END;
+         | Op.immediate: (* Immediate data. The second size should
+                          * be 0 for both if not a memory pointer *)
+            IF (fimms # imms) OR (fmems # mems) THEN
+               Error (33);
+               RETURN FALSE;
+            END;
+         | Op.immediateDyn: (* Dynamic immedate Data. The second size
+			     * should be zero *)
+            IF (fimms < imms) OR  (fmems # 0) THEN
+	       Error (100);
+	       RETURN FALSE;
+	    END;
+         | Op.memory: (* Object in Memory, check both sizes *)
+            (* For wildcard immregsz {0,0,0}, any address size is accepted;
+             * only check fimms when immregsz is non-zero *)
+            IF fmems # mems THEN Error (34); RETURN FALSE; END;
+            IF ((fmt.ops[i].immregsz.base # 0) OR (fmt.ops[i].immregsz.addrm # 0) OR
+                (fmt.ops[i].immregsz.opm # 0)) & (fimms # imms) THEN
+               Error (34); RETURN FALSE;
+            END;
+	 | Op.fpuRegister:
+	    IF ((fimms # 0) OR (fmems # 0)) THEN
+	       Error (109);
+	    END;
+         ELSE
+            Error (35);
+            RETURN FALSE;
+         END;
+         CASE fmt.ops[i].type OF
+         | timpl1:
+            IF (loc # Op.register) OR ~Op.Reg (ops[i], reg) OR
+               (reg # fmt.ops[i].reg1) THEN
+               Error (36);
+               RETURN FALSE;
+            END;
+         | timpl2:
+            IF (loc # Op.register2) OR
+               ~Op.Reg2(ops[i],reg1,reg2) OR
+               (reg1 # fmt.ops[i].reg1) OR
+               (reg2 # fmt.ops[i].reg2) THEN
+               Error (37);
+               RETURN FALSE;
+            END;
+         | tptr, tmoffs:
+            IF (loc # Op.immediate) THEN
+               Error (38);
+               RETURN FALSE;
+            END;
+         | trel, timm:
+	    IF (loc # Op.immediate) & (loc # Op.immediateDyn) THEN
+	       Error (39);
+	       RETURN FALSE;
+	    END;
+         | tsmems, tsmemd:
+            IF (loc # Op.memory) THEN
+               Error (40);
+               RETURN FALSE;
+            END;
+            IF as = 2 THEN
+               scale := 1;
+               IF ~Op.Mem16 (ops[i], reg1, reg2, disp, dispsz) THEN
+                  Error (41);
+                  RETURN FALSE
+               END;
+            ELSE
+               IF ~Op.Mem64 (ops[i], reg1, reg2, scale, disp, dispsz) THEN
+                  Error (42);
+                  RETURN FALSE
+               END;
+            END;
+            IF reg1 < 0 THEN
+               reg1 := reg2;
+               reg2 := -1;
+	       IF scale # 1 THEN
+		  Error (107);
+		  RETURN FALSE;
+	       END;
+            END;
+            IF (reg1 < 0) OR (reg2 >= 0) OR (disp # 0) OR (dispsz # 0) THEN
+               Error (43);
+               RETURN FALSE
+            END;
+            IF ((fmt.ops[i].type = tsmems) & (reg1 # gensi)) OR
+               ((fmt.ops[i].type = tsmemd) & (reg1 # gendi)) THEN
+               Error (44);
+               RETURN FALSE
+            END;
+         | treg:
+            IF (loc # Op.register) THEN
+               Error (45);
+               RETURN FALSE;
+            END;
+         | trm:
+            IF (loc # Op.register) & (loc # Op.memory) THEN
+               Error (46);
+               RETURN FALSE;
+            END;
+         | tmem, treal, tint, tnbyte:
+            IF (loc # Op.memory) THEN
+               Error (47);
+               RETURN FALSE;
+            END;
+         | tst:
+            IF (loc # Op.fpuRegister) OR ~ Op.Reg (ops[i], reg) OR
+               (reg # fmt.ops[i].reg1) THEN
+               Error (48);
+               RETURN FALSE;
+            END;
+         | tsti:
+            IF (loc # Op.fpuRegister) THEN
+               Error (49);
+               RETURN FALSE;
+            END;
+         ELSE
+            Error (50);
+            RETURN FALSE;
+         END;
+         INC(i);
+      END;
+      old := code.len;
+      ret := FALSE;
+      i := 0;
+      rmpending := FALSE;
+      regpending := FALSE;
+      memop := NIL;
+
+      (* --- Compute REX prefix ---
+       * Scan the format operands to find out which registers are used
+       * in rm/freg/fradd positions, and whether 64-bit size is needed.
+       * REX.W = 1 if rexw in mode OR if any register/memory operand has size=8
+       * REX.R = 1 if freg/fdigit register code >= 8
+       * REX.X = 1 if SIB index register code >= 8
+       * REX.B = 1 if frm/fradd/timpl rm register code >= 8
+       *)
+      rexW := 0; rexR := 0; rexX := 0; rexB := 0;
+      hasRmBase := FALSE; hasRmIndex := FALSE; hasRegOp := FALSE;
+      rmBaseReg := -1; rmIndexReg := -1; regOpReg := -1;
+
+      IF rexw IN mode THEN
+         rexW := 1;
+      END;
+
+      i := 0;
+      WHILE i < fmt.nops DO
+         ftype := fmt.ops[i].format;
+         IF ftype = freg THEN
+            IF Op.Reg (ops[i], reg) THEN
+               regOpReg := reg;
+               hasRegOp := TRUE;
+               IF reg >= 8 THEN rexR := 1 END;
+            END;
+         ELSIF (ftype = frm) OR (ftype = fdigit) THEN
+            loc := Op.Loc(ops[i]);
+            IF loc = Op.register THEN
+               IF Op.Reg (ops[i], reg) THEN
+                  rmBaseReg := reg;
+                  hasRmBase := TRUE;
+                  IF reg >= 8 THEN rexB := 1 END;
+               END;
+            ELSIF loc = Op.memory THEN
+               IF Op.Mem64 (ops[i], base, index, scale, disp, dispsz) THEN
+                  IF base >= 8 THEN rexB := 1 END;
+                  IF (index >= 0) & (index >= 8) THEN rexX := 1 END;
+               END;
+               (* Also check if memory size is 8 bytes *)
+               IF Op.Sizes (ops[i], imms, mems) THEN
+                  IF mems = 8 THEN rexW := 1 END;
+               END;
+            END;
+         ELSIF (ftype = fradd) THEN
+            IF Op.Reg (ops[i], reg) THEN
+               IF reg >= 8 THEN rexB := 1 END;
+            END;
+         END;
+         (* Check register operands (freg/fradd/treg) for 64-bit size *)
+         loc := Op.Loc(ops[i]);
+         IF loc = Op.register THEN
+            IF Op.Sizes (ops[i], imms, mems) THEN
+               IF mems = 8 THEN rexW := 1 END;
+            END;
+         END;
+         INC(i);
+      END;
+
+      rexByte := rexW * 8 + rexR * 4 + rexX * 2 + rexB;
+      IF rexByte # 0 THEN
+         code.code[code.len] := SYSTEM.VAL(BYTE, SHORT(40H + rexByte));
+         INC(code.len);
+      END;
+
+      (* --- Now emit the instruction bytes --- *)
+      i := 0;
+      rmpending := FALSE;
+      regpending := FALSE;
+      memop := NIL;
+      LOOP
+         IF fmt.fmt[i] = 0X THEN
+            ret := TRUE;
+            EXIT;
+         END;
+         IF fmt.fmt[i] = "%" THEN
+            INC(i);
+            IF ~GetInteger (fmt.fmt, i, num) THEN
+               Error (51);
+               EXIT;
+            END;
+            op := ops[num];
+            (* %-formats were parsed and checked upon Registration *)
+            WHILE (fmt.fmt[i] # "%") DO
+               INC(i);
+            END;
+            INC(i);
+            IF ~rmpending THEN
+               (* Only used by memory references *)
+               dispsz := 0;
+	       memop := NIL;
+            END;
+            loc := Op.Loc(op);
+            ftype := fmt.ops[num].format;
+            ASSERT(~(regpending & (ftype # frm)));
+            ASSERT(~(rmpending & (ftype # freg)));
+            IF ftype = fdigit THEN
+               regpending := TRUE;
+               rmreg := SHORT(fmt.ops[num].digit);
+               ASSERT((0<=rmreg) & (rmreg < 8));
+            END;
+            CASE ftype OF
+            | fdigit, frm:
+               rmpending := TRUE;
+	       memop := op;
+               needsib := FALSE;
+               IF loc = Op.register THEN
+                  IF ~Op.Reg (op, reg) THEN
+		     Error (52);
+                     EXIT
+                  END;
+                  (* Use lower 3 bits for ModRM; high bit already in REX.B *)
+                  ASSERT((0<=reg) & (reg <= 15));
+                  rm := SYSTEM.VAL (SHORTINT, 3 * 64 + (reg MOD 8));
+               ELSIF (loc = Op.memory) & ((as = 4) OR (as = 8)) THEN
+                  IF ~Op.Mem64 (op, base, index, scale, disp, dispsz) OR
+                     ~DoMem64 (rm, sib, base, index, scale, disp, dispsz) THEN
+		     Error (53);
+                     EXIT;
+                  END;
+                  needsib := NeedSIB (rm);
+               ELSIF (loc = Op.memory) & (as = 2) THEN
+                  IF ~Op.Mem16 (op, reg1, reg2, disp, dispsz) THEN
+                     Error (54);
+                     EXIT;
+                  END;
+                  (* Will Print error messages itself *)
+                  IF ~DoMem16 (rm, reg1, reg2, disp, dispsz) THEN
+		     Error (55);
+                     EXIT;
+                  END;
+               END;
+            | freg:
+               regpending := TRUE;
+               IF ~Op.Reg (op, rmreg) THEN
+		  Error (56);
+                  EXIT
+               END;
+               (* Use lower 3 bits; high bit already in REX.R *)
+               ASSERT ((0<=rmreg) & (rmreg <= 15));
+               rmreg := rmreg MOD 8;
+            | fcode, fimm:
+	       len := GetSize (fmt.ops[num].immregsz, as, os);
+               Op.GetImmData (op, arr, len);
+               j := 0;
+	       Op.RelocInfo (op, code.len, len);
+               WHILE j < len DO
+                  code.code[code.len] := arr[j];
+                  INC(j); INC(code.len);
+               END;
+            | fradd, ffreg:
+               IF ~Op.Reg (op, reg) OR (reg < 0) OR
+                   (reg > 15) OR (code.len = 0) THEN
+		  Error (58);
+                  EXIT;
+               END;
+               DEC(code.len);
+               (* Add lower 3 bits of register to previous opcode byte *)
+               reg := (reg MOD 8) + SYSTEM.VAL(SHORTINT, code.code[code.len]);
+               code.code[code.len] := SYSTEM.VAL(BYTE, reg);
+               INC(code.len);
+            ELSE
+	       Error (59);
+               EXIT;
+            END;
+            IF rmpending & regpending THEN
+               rmpending := FALSE;
+               regpending := FALSE;
+               code.code[code.len] := SYSTEM.VAL(BYTE, rm + 8*rmreg);
+               INC(code.len);
+               IF needsib THEN
+                  code.code[code.len] := SYSTEM.VAL(BYTE,sib);
+                  INC(code.len);
+               END;
+	       Op.RelocInfo (memop, code.len, dispsz);
+	       memop := NIL;
+               WHILE dispsz > 0 DO
+                  s := SYSTEM.VAL (SHORTINT, disp MOD 256);
+                  disp := disp DIV 256;
+                  code.code[code.len] := SYSTEM.VAL (BYTE, s);
+                  INC(code.len);
+                  DEC(dispsz);
+               END;
+            END;
+         ELSIF fmt.fmt[i] = "?" THEN
+            INC(i);
+            CASE fmt.fmt[i] OF
+            |plock:
+               IF lock IN mode THEN
+                  EXCL(mode,lock);
+                  code.code[code.len] := PREFIX[lock];
+                  INC(code.len);
+               END;
+               INC(i);
+            |prep:
+               IF rep IN mode THEN
+                  EXCL(mode, rep);
+                  code.code[code.len] := PREFIX[rep];
+                  INC(code.len);
+               ELSIF repne IN mode THEN
+                  EXCL (mode, repne);
+                  code.code[code.len] := PREFIX[repne];
+                  INC(code.len);
+               END;
+               INC(i);
+            |popsz:
+               IF opsz IN mode THEN
+                  EXCL(mode,opsz);
+                  code.code[code.len] := PREFIX[opsz];
+                  INC(code.len);
+               END;
+               INC(i);
+            |paddrsz:
+               IF addrsz IN mode THEN
+                  EXCL(mode,addrsz);
+                  code.code[code.len] := PREFIX[addrsz];
+                  INC(code.len);
+               END;
+               INC(i);
+            |pseg:
+               reg := -1;
+               IF segcs IN mode THEN
+                  reg := segcs;
+               ELSIF segss IN mode THEN
+                  reg := segss
+               ELSIF segds IN mode THEN
+                  reg := segds
+               ELSIF seges IN mode THEN
+                  reg := seges
+               ELSIF segfs IN mode THEN
+                  reg := segfs
+               ELSIF seggs IN mode THEN
+                  reg := seggs
+               END;
+               IF reg >= 0 THEN
+                  EXCL(mode, reg);
+                  code.code[code.len] := PREFIX[reg];
+                  INC(code.len);
+               END;
+               INC(i);
+            |prexw:
+               (* REX.W is handled above before instruction bytes;
+                * consume the ?W? prefix marker so mode check passes *)
+               IF rexw IN mode THEN
+                  EXCL(mode, rexw);
+               END;
+               INC(i);
+            ELSE
+	       Error (60);
+               EXIT;
+            END;
+            IF fmt.fmt[i] # "?" THEN
+	       Error (61);
+               EXIT;
+            END;
+            INC(i);
+         ELSE
+            IF ~GetByte (fmt.fmt,i, code.code[code.len]) THEN
+	       Error (62);
+               EXIT;
+            END;
+            INC(code.len);
+         END;
+      END;
+      EXCL(mode, rexw);   (* REX.W emitted automatically via register size detection *)
+      IF mode # {} THEN Error (63); ret := FALSE END;
+      IF ~ret THEN
+	 Error(101);
+	 code.len := old;
+      END;
+      RETURN ret;
+   END EmitGeneric;
+
+
+   PROCEDURE Emit0 (fmt : Instruction; mode : SET; code : Code) : BOOLEAN;
+      VAR
+         arr : ARRAY 1 OF Op.Operand;
+   BEGIN
+      arr[0] := NIL;
+      RETURN EmitGeneric (fmt, mode, arr, code);
+   END Emit0;
+
+
+   PROCEDURE Emit1 (fmt : Instruction; mode : SET; op1 : Op.Operand; code : Code) : BOOLEAN;
+      VAR
+         arr : ARRAY 1 OF Op.Operand;
+   BEGIN
+      arr[0] := NIL;
+      arr[0] := op1;
+      RETURN EmitGeneric (fmt, mode, arr, code);
+   END Emit1;
+
+
+   PROCEDURE Emit2 (fmt : Instruction; mode : SET; op1, op2 : Op.Operand; code : Code) : BOOLEAN;
+      VAR
+         arr : ARRAY 2 OF Op.Operand;
+   BEGIN
+      arr[0] := NIL;
+      arr[0] := op1;
+      arr[1] := op2;
+      RETURN EmitGeneric (fmt, mode, arr, code);
+   END Emit2;
+
+
+   PROCEDURE Emit3 (fmt : Instruction; mode : OpcodeMode; op1,op2,op3 : Op.Operand; code : Code) : BOOLEAN;
+      VAR
+         arr : ARRAY 3 OF Op.Operand;
+   BEGIN
+      arr[0] := NIL;
+      arr[0] := op1;
+      arr[1] := op2;
+      arr[2] := op3;
+      RETURN EmitGeneric (fmt, mode, arr, code);
+   END Emit3;
+
+   PROCEDURE CalcSize (target : LONGINT; sz : SizeRec; VAR as, os : LONGINT) : BOOLEAN;
+      VAR
+	 div, oldsz, newsz : LONGINT;
+   BEGIN
+      (* This doesn't happen with current Pentium Instructions and
+       * CalcSize is much simpler with this restriction. Just make sure
+       * that we notice when new instructions break this assumption *)
+      ASSERT ((sz.addrm = 0) OR (sz.opm = 0));
+      newsz := target - sz.base;
+      IF sz.addrm # 0 THEN
+	oldsz := as;
+	div := sz.addrm;
+      ELSE
+	oldsz := os;
+	div := sz.opm;
+      END;
+      IF div = 0 THEN
+         (* {0,0,0}: wildcard — accepts any address size; {n,0,0}: fixed size n *)
+	 RETURN (newsz = 0) OR (sz.base = 0);
+      END;
+      ASSERT ((sz.addrm # 0) OR (sz.opm # 0));
+      IF newsz MOD div # 0 THEN
+	 RETURN FALSE;
+      END;
+      newsz := newsz DIV div;
+      IF ((newsz # 2) & (newsz # 4) & (newsz # 8)) OR ((oldsz >= 0) & (oldsz # newsz)) THEN
+	 RETURN FALSE;
+      END;
+      IF sz.addrm # 0 THEN
+	 as := newsz;
+      ELSE
+	 os := newsz;
+      END;
+      RETURN TRUE;
+   END CalcSize;
+
+
+   (* Call this function after all calls to CalcSize for this Instruction are
+    * done. We don't use prefixes if they aren't needed. Each of them
+    * costs us a cycle. Return FALSE if we can't match the operand. *)
+
+   PROCEDURE CalcDynSize (min : LONGINT; sz : SizeRec; VAR as, os : LONGINT) : BOOLEAN;
+   BEGIN
+      IF (sz.opm > 0) & (os < 0) THEN
+	 os := 4;
+      END;
+      IF (sz.addrm > 0) & (as < 0) THEN
+	 as := 8;   (* AMD64: default 64-bit addressing *)
+      END;
+      RETURN (GetSize (sz, as, os) >= min);
+   END CalcDynSize;
+
+
+   PROCEDURE CheckOpMatch (op : Op.Operand; VAR (* Read only *)iop : InstrOpRec;VAR as, os : LONGINT) : BOOLEAN;
+      VAR
+	 loc, scale : INTEGER;
+	 immsz, memsz : LONGINT;
+	 reg, reg2 : Register;
+	 disp, dispsz : LONGINT;
+	 ok : BOOLEAN;
+   BEGIN
+      as := -1; os := -1;
+      loc := Op.Loc(op);
+      CASE loc OF
+      | Op.immediate:
+         ok := Op.Sizes (op, immsz, memsz); ASSERT (ok);
+	 CASE iop.type OF
+         | trel, timm, tmoffs:
+	    (* Note: The second size is only used for tmoffs and should
+	     * be 0 for other operand types *)
+	    IF ~CalcSize (immsz, iop.immregsz, as, os) OR
+	       ~CalcSize (memsz, iop.memsz, as, os) THEN
+	       Error (82);
+	       RETURN FALSE;
+	    END;
+         | timpl1, timpl2, tptr, treg, trm, tsmems, tsmemd, tmem, tsreg, treal, tint, tnbyte, tst, tsti:
+	    Error (83);
+	    RETURN FALSE;
+	 END;
+      | Op.immediateDyn:
+	 CASE iop.type OF
+	 | timm, trel:
+	    RETURN TRUE;
+         | timpl1, timpl2, tptr, treg, trm, tsmems, tsmemd, tmem, tsreg, treal, tint, tnbyte, tst, tsti, tmoffs:
+	    Error (84);
+	    RETURN FALSE;
+	 END;
+      | Op.register:
+	 ok := Op.Sizes (op, immsz, memsz); ASSERT (ok);
+	 IF immsz # 0 THEN
+	    Error (64);
+	    RETURN FALSE;
+	 END;
+	 CASE iop.type OF
+	 | timpl1:
+	    IF ~CalcSize (memsz, iop.memsz, as, os) THEN
+	       Error (65);
+	       RETURN FALSE;
+            END;
+	    ok := Op.Reg (op, reg); ASSERT (ok);
+	    IF reg # iop.reg1 THEN
+	       Error (66);
+	       RETURN FALSE;
+	    END;
+	 | treg:
+	    IF ~CalcSize (memsz, iop.memsz, as, os) THEN
+	       Error (67);
+	       RETURN FALSE;
+	    END;
+         | trm:
+	    IF immsz # 0 THEN
+	       Error (76);
+	       RETURN FALSE;
+	    END;
+	    IF ~CalcSize (memsz, iop.memsz, as, os) THEN
+	       Error (77);
+	       RETURN FALSE;
+            END;
+	 | timpl2, trel, tptr, timm, tsmems, tsmemd, tmem, tmoffs,
+	   tsreg, treal, tint, tnbyte, tst, tsti:
+	    Error (69);
+	    RETURN FALSE;
+	 END;
+      | Op.register2:
+	 ok := Op.Sizes (op, immsz, memsz); ASSERT (ok);
+	 CASE iop.type OF
+	 | timpl2:
+	    IF ~CalcSize (immsz, iop.immregsz, as, os) OR
+	       ~CalcSize (memsz, iop.memsz, as, os) THEN
+	       Error (85);
+               RETURN FALSE;
+            END;
+	    ok := Op.Reg2 (op, reg, reg2); ASSERT(ok);
+	    IF (reg # iop.reg1) OR (reg2 # iop.reg2) THEN
+	       Error (86);
+	       RETURN FALSE;
+            END;
+	 | timpl1, treg, trel, tptr, timm, trm, tsmems, tsmemd, tmem, tmoffs,
+	   tsreg, treal, tint, tnbyte, tst, tsti:
+	    Error (87);
+            RETURN FALSE;
+         END;
+      | Op.memory:
+	 ok := Op.Sizes (op, immsz, memsz); ASSERT (ok);
+	 IF (as >= 0) & (as # immsz) THEN
+	    Error (70);
+	    RETURN FALSE;
+	 END;
+	 IF (immsz # 2) & (immsz # 4) & (immsz # 8) THEN
+	    Error (71);
+	    RETURN FALSE;
+	 END;
+	 as := immsz;
+	 IF ~CalcSize (immsz, iop.immregsz, as, os) OR
+	    ~CalcSize (memsz, iop.memsz, as, os) THEN
+	    Error (72);
+            RETURN FALSE;
+         END;
+	 CASE iop.type OF
+	 | tptr, trm, tmem, treal, tint, tnbyte:
+	    (* Nothing *)
+	 | tsmems, tsmemd:
+	    ASSERT ((as = 2) OR (as = 4) OR (as = 8));
+	    IF as = 2 THEN
+               IF ~Op.Mem16 (op, reg, reg2, disp, dispsz) THEN
+		  Error (102);
+		  RETURN FALSE;
+	       END;
+	       scale := 1;
+            ELSIF ~Op.Mem64 (op, reg, reg2, scale, disp, dispsz) THEN
+	       Error (103);
+	    END;
+	    IF (reg < 0) & (reg2 >= 0) THEN
+	       reg := reg2;
+	       reg2 := -1;
+	       IF scale # 1 THEN
+		  Error (108);
+		  RETURN FALSE;
+	       END;
+	    END;
+	    IF (reg < 0) OR (reg2 >= 0) THEN
+	       Error (73);
+	       RETURN FALSE;
+	    END;
+	    IF (disp # 0) OR (dispsz # 0) THEN
+	       Error (104);
+	       RETURN FALSE;
+	    END;
+	    IF (iop.type = tsmemd) & (reg # gendi) THEN
+	       Error (105);
+	       RETURN FALSE;
+	    END;
+	    IF (iop.type = tsmems) & (reg # gensi) THEN
+	       Error (106);
+	       RETURN FALSE;
+	    END;
+	 | timpl1, timpl2, trel, treg, timm, tmoffs, tsreg, tst, tsti:
+	    Error (75);
+	    RETURN FALSE;
+	 END;
+      | Op.fpuRegister:
+	 CASE iop.type OF
+         | tst:
+	    ok := Op.Sizes(op, immsz, memsz); ASSERT (ok);
+	    IF (immsz # 0) OR (memsz # 0) THEN
+	       Error (88);
+	       RETURN FALSE
+            END;
+	    ok := Op.Reg (op, reg); ASSERT (ok);
+	    IF reg # iop.reg1 THEN
+	       Error (89);
+	       RETURN FALSE;
+	    END;
+	 | tsti:
+            ok := Op.Sizes (op, immsz, memsz); ASSERT (ok);
+            IF (immsz # 0) OR (memsz # 0) THEN
+	       Error (90);
+	       RETURN FALSE;
+	    END;
+	 | timpl1, timpl2, trel, tptr, treg, timm, trm, tsmems, tsmemd,
+	   tmem, tmoffs, tsreg, treal, tint, tnbyte:
+	    Error (91);
+            RETURN FALSE;
+	 END;
+      ELSE
+	 Error (92);
+	 RETURN FALSE;
+      END;
+      RETURN TRUE;
+   END CheckOpMatch;
+
+
+   PROCEDURE CheckInstrMatch (inst : Instruction; nops : INTEGER; ops : ARRAY OF Op.Operand; VAR mode : OpcodeMode) : BOOLEAN;
+      VAR
+	 i, loc : INTEGER;
+	 as, os, tmpos, tmpas : LONGINT;
+	 immsz, memsz : LONGINT;
+	 ok : BOOLEAN;
+   BEGIN
+      ASSERT (LEN(ops) >= nops);
+      IF inst.nops # nops THEN
+	 Error (78);
+	 RETURN FALSE;
+      END;
+      i := 0; as := -1; os := -1;
+      WHILE i < nops DO
+	 loc := Op.Loc(ops[i]);
+	 tmpas := -1; tmpos := -1;
+	 IF ~CheckOpMatch (ops[i], inst.ops[i], tmpas, tmpos) THEN
+	    RETURN FALSE;
+	 END;
+	 IF tmpas >= 0 THEN
+	    IF (as >= 0) & (tmpas # as) THEN
+	       Error (79);
+	       RETURN FALSE;
+	    END;
+	    as := tmpas;
+	 END;
+	 IF tmpos >= 0 THEN
+	    IF (os >= 0) & (tmpos # os) THEN
+	       Error (80);
+	       RETURN FALSE;
+	    END;
+	    os := tmpos;
+	 END;
+	 INC(i);
+      END;
+      i := 0;
+      WHILE i < nops DO
+	 loc := Op.Loc(ops[i]);
+	 IF (loc = Op.immediateDyn) THEN
+	    ok := Op.Sizes (ops[i], immsz, memsz); ASSERT (ok);
+	    IF (memsz # 0) OR ~CalcDynSize (immsz, inst.ops[i].immregsz, as, os) THEN
+	       Error (81);
+               RETURN FALSE;
+	    END;
+	 END;
+	 INC(i);
+      END;
+      IF as >= 0 THEN
+	 ASSERT ((as = 2) OR (as = 4) OR (as = 8));
+         IF as = 2 THEN
+	    (* 16-bit addressing: add address-size override prefix *)
+	    INCL (mode, addrsz);
+	 END;
+	 (* as = 4: 32-bit addressing (needs 67H prefix in AMD64) *)
+	 (* as = 8: 64-bit addressing (AMD64 default, no prefix) *)
+      END;
+      IF os >= 0 THEN
+	 ASSERT ((os = 2) OR (os = 4) OR (os = 8));
+	 IF os = 2 THEN
+	    INCL (mode, opsz);
+	 ELSIF os = 8 THEN
+	    (* 64-bit operand size: REX.W prefix
+	       EmitGeneric auto-sets rexW from operand size=8,
+	       but set mode bit too for explicit ?W? format tokens *)
+	    INCL (mode, rexw);
+	 END;
+      END;
+      RETURN TRUE;
+   END CheckInstrMatch;
+
+
+   PROCEDURE OpcodeMatch (mnem : Mnemonic; nops : INTEGER; ops : ARRAY OF Op.Operand; VAR mode : OpcodeMode) : Instruction;
+      VAR
+	 inst,best : Instruction;
+         badness : INTEGER;
+	 tmpmode, bestmode : OpcodeMode;
+   BEGIN
+      inst := NIL;
+      ASSERT(mnem < maxinst);
+      inst := instructions[mnem];
+      ASSERT (inst # NIL);
+      best := NIL;
+      badness := 100000;
+      WHILE inst # NIL DO
+	 tmpmode := mode;
+	 IF (inst.badness < badness) & CheckInstrMatch(inst, nops, ops, tmpmode) THEN
+	    badness := inst.badness;
+	    best := inst;
+	    bestmode := tmpmode;
+	 END;
+	 inst := inst.next;
+      END;
+      mode := bestmode;
+      RETURN best;
+   END OpcodeMatch;
+
+
+BEGIN
+   FmtMatch[timpl1] := "";   (* None *)
+   FmtMatch[timpl2] := "";   (* None *)
+   FmtMatch[trel]   := "C";  (* fcode *)
+   FmtMatch[tptr]   := "C";  (* fcode *)
+   FmtMatch[treg]   := "R+"; (* freg, fradd *)
+   FmtMatch[timm]   := "I";  (* fimm *)
+   FmtMatch[trm]    := "MD"; (* frm, fdigit *)
+   FmtMatch[tsmems] := "";   (* None, implicit operand *)
+   FmtMatch[tsmemd] := "";   (* None, implicit operand *)
+   FmtMatch[tmem]   := "MD"; (* frm, fdigit *)
+   FmtMatch[tmoffs] := "I";  (* fimm *)
+   FmtMatch[tsreg]  := "R";  (* freg *)
+   FmtMatch[treal]  := "MD"; (* frm, fdigit *)
+   FmtMatch[tint]   := "MD"; (* frm, fdigit *)
+   FmtMatch[tnbyte] := "MD"; (* frm, fdigit *)
+   FmtMatch[tst]    := "";   (* None, implicit operand *)
+   FmtMatch[tsti]   := "F";  (* ffreg *)
+   (* These are the HEX Values of the respective constants *)
+   PREFIX[lock]   := 0F0X;
+   PREFIX[rep]    := 0F3X;
+   PREFIX[repe]   := 0F3X;
+   PREFIX[repz]   := 0F3X;
+   PREFIX[repne]  := 0F2X;
+   PREFIX[repnz]  := 0F2X;
+   PREFIX[segcs]  := 02EX;
+   PREFIX[segss]  := 036X;
+   PREFIX[segds]  := 03EX;
+   PREFIX[seges]  := 026X;
+   PREFIX[segfs]  := 064X;
+   PREFIX[seggs]  := 065X;
+   PREFIX[opsz]   := 066X;
+   PREFIX[addrsz] := 067X;
+   (* rexw slot: REX.W is emitted dynamically in EmitGeneric, not from table *)
+   PREFIX[rexw]   := 048X;   (* REX.W byte (base value, actual OR'd in EmitGeneric) *)
+END AMD64OpCodeGenerator.

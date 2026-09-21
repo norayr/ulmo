@@ -12,20 +12,22 @@
 #   2. copy a pre-built ulmoc binary to BinDir manually.
 # After that, ulmoc rebuilds itself without the DB.
 
+ARCH ?=			i386
 DestDir :=		$(shell pwd)/../../..
-BinDir :=		$(DestDir)/bin
-LibDir :=		$(BinDir)/../lib
+BinDir :=		$(DestDir)/$(ARCH)/bin
+LibDir :=		$(DestDir)/$(ARCH)/lib
 InstallBinDir :=	$(BinDir)
 OberonSrcDir :=		$(shell pwd)/../../oberon
 
 # Parameters substituted into ulmo.sh -> ulmo
-Parameters :=		BINDIR=$(BinDir)
+Parameters :=		BINDIR=$(BinDir) ARCH=$(ARCH)
 
 .PHONY: install
 install: $(InstallBinDir)/ulmo $(InstallBinDir)/ulmoc
 
 # Shell wrapper: always buildable, no Oberon compiler needed
 $(InstallBinDir)/ulmo: ulmo.sh
+	mkdir -p $(InstallBinDir)
 	../../../substparams $(Parameters) <$< >$@
 	chmod 755 $@
 

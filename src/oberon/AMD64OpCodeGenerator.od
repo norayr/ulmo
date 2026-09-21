@@ -1,0 +1,208 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2004 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   $Id: AMD64OpCodeGenerator.od,v 1.1 2004/09/06 16:42:16 borchert Exp borchert $
+   ----------------------------------------------------------------------------
+   $Log: AMD64OpCodeGenerator.od,v $
+   Revision 1.1  2004/09/06 16:42:16  borchert
+   Initial revision
+
+   ----------------------------------------------------------------------------
+*)
+
+DEFINITION AMD64OpCodeGenerator; (* Christian Ehrhardt, AMD64 adaptation *)
+
+   IMPORT Op := AMD64Operands;
+
+   TYPE
+      Register = Op.Register;
+      Mnemonic = LONGINT;
+
+   CONST
+      (* Register Constants for byte registers *)
+      regal   = 0;
+      regcl   = 1;
+      regdl   = 2;
+      regbl   = 3;
+      regah   = 4;
+      regch   = 5;
+      regdh   = 6;
+      regbh   = 7;
+
+      (* Register Constants for word, dword and qword registers *)
+      genax    = 0;
+      gencx    = 1;
+      gendx    = 2;
+      genbx    = 3;
+      gensp    = 4;
+      genbp    = 5;
+      gensi    = 6;
+      gendi    = 7;
+      genr8    = 8;
+      genr9    = 9;
+      genr10   = 10;
+      genr11   = 11;
+      genr12   = 12;
+      genr13   = 13;
+      genr14   = 14;
+      genr15   = 15;
+
+      StdRegs = {genax, genbx, gencx, gendx, gensi, gendi,
+                 genr8, genr9, genr10, genr11, genr12, genr13, genr14, genr15};
+      AllRegs = StdRegs + {gensp, genbp};
+      LowByteRegs = {regal, regbl, regcl, regdl};
+
+   TYPE
+      OpcodeMode = SET;     (* OF lock..seggs *)
+
+   CONST
+      (* Instruction format constants. We use single character to
+       * be able to use them as in CASE statements as well *)
+
+      (* These constants are used in the mode set of EmitGeneric *)
+      lock       = 0;      (* Lock prefix *)
+      rep        = 1;      (* Repeat prefix *)
+      repe       = rep;      (* Repeat equal/zero prefix *)
+      repz       = rep;
+      repne      = 2;      (* Repeat not equal/not zero prefix *)
+      repnz      = repne;
+      addrsz     = 3;      (* 32 Bit Address Size (in 64-bit mode) *)
+      opsz       = 4;      (* 16 Bit Operand Size *)
+      (* Segment override prefixes *)
+      segcs      = 5;
+      segss      = 6;
+      segds      = 7;
+      seges      = 8;
+      segfs      = 9;
+      seggs      = 10;
+      rexw       = 11;     (* REX.W prefix for 64-bit operand size *)
+      prefixsize = 12;
+
+   TYPE
+      InstrOpType = INTEGER; (* timpl1..tnum-1 *)
+
+   CONST
+      (* Instruction Operand type Constants *)
+      timpl1   = 0;  (* Accumulator is implicit Operand. (Size depends) *)
+      timpl2   = 1;  (* Accumulator is implicit Operand. (Size depends) *)
+      trel     = 2;  (* Relative Address within segment *)
+      tptr     = 3;  (* Typical size: 2+addrsize *)
+      treg     = 4;  (* A general Purpose register (8,16,32,64 bit) *)
+      timm     = 5;  (* Immediate data (1,2,4 bytes) *)
+      trm      = 6;  (* A register/memory Operand in modr/m byte *)
+      tsmems   = 7;  (* A memory byte/word/dword as used by string
+                      * instructions, addressed via (R)SI *)
+      tsmemd   = 8;  (* A memory byte/word/dword as used by string
+                      * instructions, addressed via (R)DI *)
+      tmem     = 9;  (* A far pointer in memory or a memory pair. Both
+                      * are equivilent for opcode construction and
+                      * fomat selection can be done depending on context *)
+      tmoffs   = 10; (* A memory offset *)
+      tsreg    = 11; (* A Segment Register (only used by MOVE *)
+      treal    = 12; (* A FPU real number in memory *)
+      tint     = 13; (* A FPU integer number in memory *)
+      tnbyte   = 14; (* Bytes in Memory, size depends. We could probably
+                      * merge this with tmem *)
+      tst      = 15; (* Floating Point ACCU (implicit) *)
+      tsti     = 16; (* Floating Point register *)
+
+      tnum     = 17; (* Number of Operand types *)
+
+      (* Instruction size limits *)
+      maxfmtlen  = 256;
+      maxfmtop   = 5;
+
+   TYPE
+      Size = POINTER TO SizeRec;
+      SizeRec = RECORD
+         base, opm, addrm : LONGINT;
+      END;
+      InstrOp   = POINTER TO InstrOpRec;
+      InstrOpRec = RECORD
+         type : InstrOpType;      (* Operand type *)
+         (* fcode, fimm: immregsz is the size of the immediate
+            data read from the format string. memsz is only
+            used if type is tmem and should be initialized.
+          * frm, fdigit: immregsz is the addresse mode (16/32bit)
+            memsz is the width of the register/memory operand.
+            Both sizes can be initilized. If immregsz consists
+            of three zeros reasonable default values are
+            inserted for immregsz (32bits or 1*address_size).
+            immregsz is only relevant if memory is addressed.
+          * freg, fradd: memsz is the width of the register and
+            should be initilized.
+          * ffreg: No size required/used for now.
+          *)
+         immregsz, memsz : SizeRec;
+         (* Implicit Registers *)
+         reg1, reg2 : Register;
+         (* These are initilized by RegisterFormat *)
+         format : CHAR;   (* Conversion Format. *)
+         digit : INTEGER;
+      END;
+
+      Instruction = POINTER TO InstructionRec;
+      InstructionRec = RECORD
+         fmt : ARRAY maxfmtlen OF CHAR;
+         nops : INTEGER;
+         ops : ARRAY maxfmtop OF InstrOpRec;
+         badness : INTEGER;
+         next : Instruction;
+      END;
+
+      Code = POINTER TO CodeRec;
+      CodeRec = RECORD
+         code : ARRAY 256 OF BYTE;
+         len : INTEGER;
+      END;
+
+   CONST
+      maxmatch = 10;
+      maxinst    = 1000;
+   VAR
+      FmtMatch : ARRAY tnum OF ARRAY maxmatch OF CHAR;
+      instructions : ARRAY maxinst OF Instruction;
+      PREFIX : ARRAY prefixsize OF BYTE;
+
+   PROCEDURE GetSize (VAR sz : SizeRec; as, os : LONGINT) : LONGINT;
+   PROCEDURE RegisterFormat (mnem : Mnemonic; fmt : ARRAY OF CHAR;
+                             nops : INTEGER; ops : ARRAY OF InstrOp;
+                             badness : INTEGER) : BOOLEAN;
+   PROCEDURE RegisterFormat0 (mnem : Mnemonic; fmt : ARRAY OF CHAR;
+                              badness : INTEGER) : BOOLEAN;
+   PROCEDURE RegisterFormat1 (mnem : Mnemonic; fmt : ARRAY OF CHAR;
+                              op : InstrOp; badness : INTEGER) : BOOLEAN;
+   PROCEDURE RegisterFormat2 (mnem : Mnemonic; fmt : ARRAY OF CHAR;
+                     op1, op2 : InstrOp; badness : INTEGER) : BOOLEAN;
+   PROCEDURE RegisterFormat3 (mnem : Mnemonic; fmt : ARRAY OF CHAR; op1, op2,
+                              op3 : InstrOp; badness : INTEGER) : BOOLEAN;
+   PROCEDURE EmitGeneric (fmt : Instruction; mode : OpcodeMode;
+                          ops : ARRAY OF Op.Operand; code : Code) : BOOLEAN;
+   PROCEDURE Emit0 (fmt : Instruction; mode : OpcodeMode; code : Code) : BOOLEAN;
+   PROCEDURE Emit1 (fmt : Instruction; mode : OpcodeMode;
+                    op1 : Op.Operand; code : Code) : BOOLEAN;
+   PROCEDURE Emit2 (fmt : Instruction; mode : OpcodeMode;
+                    op1, op2 : Op.Operand; code : Code) : BOOLEAN;
+   PROCEDURE Emit3 (fmt : Instruction; mode : OpcodeMode;
+                    op1,op2,op3 : Op.Operand; code : Code) : BOOLEAN;
+
+   PROCEDURE OpcodeMatch (mnem : Mnemonic; nops : INTEGER;
+	     ops : ARRAY OF Op.Operand; VAR mode : OpcodeMode) : Instruction;
+
+END AMD64OpCodeGenerator.

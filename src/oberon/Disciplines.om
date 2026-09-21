@@ -60,8 +60,8 @@ MODULE Disciplines;
       ObjectRec =
 	 RECORD
 	    (Objects.ObjectRec)
-	    (* private part *)
-	    list: DisciplineList; (* set of disciplines *)
+	    (* private part -- see Disciplines.od for why the field is named "disclist" *)
+	    disclist: DisciplineList; (* set of disciplines *)
 	 END;
 
    VAR
@@ -83,13 +83,13 @@ MODULE Disciplines;
 	 prev, dl: DisciplineList;
    BEGIN
       prev := NIL;
-      dl := object.list;
+      dl := object.disclist;
       WHILE (dl # NIL) & (dl.id # id) DO
 	 prev := dl; dl := dl.next;
       END;
       IF dl # NIL THEN
 	 IF prev = NIL THEN
-	    object.list := dl.next;
+	    object.disclist := dl.next;
 	 ELSE
 	    prev.next := dl.next;
 	 END;
@@ -104,15 +104,15 @@ MODULE Disciplines;
       VAR
 	 dl: DisciplineList;
    BEGIN
-      dl := object.list;
+      dl := object.disclist;
       WHILE (dl # NIL) & (dl.id # discipline.id) DO
 	 dl := dl.next;
       END;
       IF dl = NIL THEN
 	 NEW(dl);
 	 dl.id := discipline.id;
-	 dl.next := object.list;
-	 object.list := dl;
+	 dl.next := object.disclist;
+	 object.disclist := dl;
       END;
       dl.discipline := discipline;
    END Add;
@@ -123,7 +123,7 @@ MODULE Disciplines;
       VAR
 	 dl: DisciplineList;
    BEGIN
-      dl := object.list;
+      dl := object.disclist;
       WHILE (dl # NIL) & (dl.id # id) DO
 	 dl := dl.next;
       END;

@@ -1,0 +1,240 @@
+(* AMD64-specific SysTime:
+   On AMD64, the kernel uses 8-byte (long) fields in struct timeval, struct tms,
+   and struct itimerval.  The generic SysTime.om passes 8-byte Oberon buffers
+   where the kernel writes 16+ bytes, overflowing stack frames.
+
+   Fix: model each 8-byte kernel field as two consecutive 4-byte LONGINTs (lo/hi).
+   On little-endian AMD64, the lo word holds the lower 32 bits of each kernel long.
+   Current Unix time (~1.75e9) and microseconds (<1e6) both fit in 32 bits, so the
+   hi words are always 0 on output, and we zero them on input.
+   No SYS.MOVE or SYS.VAL cross-size casts needed.
+*)
+MODULE SysTime;
+
+   IMPORT Events, Sys, SYS := SYSTEM, SysErrors,
+      SysProcess, SysSignals, SysTypes;
+
+   CONST
+      itimerreal = 0;
+
+   TYPE
+      Time = SysTypes.Time;
+      TimesRec =
+	 RECORD
+	    utime: Time;
+	    stime: Time;
+	    cutime: Time;
+	    cstime: Time;
+	 END;
+      TimeVal =
+	 RECORD
+	    sec: Time;
+	    usec: Time;
+	 END;
+      TimeZone =
+	 RECORD
+	    minuteswest: INTEGER;
+	    dsttime: INTEGER;
+	 END;
+      IntervalTimerRec =
+	 RECORD
+	    interval: TimeVal;
+	    value: TimeVal;
+	 END;
+
+      (* 16 bytes: two 8-byte kernel longs, each split into lo+hi 32-bit halves *)
+      Timeval64 =
+	 RECORD
+	    seclo: LONGINT;   (* offset  0: lower 32 bits of tv_sec *)
+	    sechi: LONGINT;   (* offset  4: upper 32 bits of tv_sec (always 0) *)
+	    useclo: LONGINT;  (* offset  8: lower 32 bits of tv_usec *)
+	    usechi: LONGINT;  (* offset 12: upper 32 bits of tv_usec (always 0) *)
+	 END;
+      (* 32 bytes: four 8-byte kernel clock_t values, each as lo+hi *)
+      Tms64 =
+	 RECORD
+	    utimelo:  LONGINT; utimehi:  LONGINT;
+	    stimelo:  LONGINT; stimehi:  LONGINT;
+	    cutimelo: LONGINT; cutimehi: LONGINT;
+	    cstimelo: LONGINT; cstimehi: LONGINT;
+	 END;
+      (* 32 bytes: two struct timeval64 = four 8-byte longs *)
+      Itimerval64 =
+	 RECORD
+	    intseclo:  LONGINT; intsechi:  LONGINT;  (* it_interval.tv_sec *)
+	    intuseclo: LONGINT; intusechi: LONGINT;  (* it_interval.tv_usec *)
+	    valseclo:  LONGINT; valsechi:  LONGINT;  (* it_value.tv_sec *)
+	    valuseclo: LONGINT; valusechi: LONGINT;  (* it_value.tv_usec *)
+	 END;
+
+   VAR
+      real: TimeVal;
+      cpu: Time;
+
+   PROCEDURE GetTimeVal(VAR timeval: TimeVal);
+      VAR
+	 d0, d1: INTEGER;
+	 buf: Timeval64;
+   BEGIN
+      IF ~SYS.UNIXCALL(Sys.gettimeofday, d0, d1, SYS.ADR(buf), 0) THEN
+	 SysErrors.Raise(NIL, d0, Sys.gettimeofday, "");
+	 timeval.sec := 0;
+	 timeval.usec := 0;
+      ELSE
+	 timeval.sec  := buf.seclo;
+	 timeval.usec := buf.useclo;
+      END;
+   END GetTimeVal;
+
+   PROCEDURE GetTime() : Time;
+      VAR tp: TimeVal;
+   BEGIN
+      GetTimeVal(tp);
+      RETURN tp.sec
+   END GetTime;
+
+   PROCEDURE GetUnitsPerSecond() : INTEGER;
+   BEGIN
+      RETURN 100
+   END GetUnitsPerSecond;
+
+   PROCEDURE GetTimeOfDay(VAR time: TimeVal; VAR timezone: TimeZone);
+      (* TimeZone = {int,int} = 8 bytes in both Oberon and kernel — pass directly. *)
+      VAR
+	 d0, d1: INTEGER;
+	 buf: Timeval64;
+   BEGIN
+      IF ~SYS.UNIXCALL(Sys.gettimeofday, d0, d1,
+		       SYS.ADR(buf), SYS.ADR(timezone)) THEN
+	 SysErrors.Raise(NIL, d0, Sys.gettimeofday, "");
+	 time.sec := 0;
+	 time.usec := 0;
+	 timezone.minuteswest := 0;
+	 timezone.dsttime := 0;
+      ELSE
+	 time.sec  := buf.seclo;
+	 time.usec := buf.useclo;
+      END;
+   END GetTimeOfDay;
+
+   PROCEDURE GetProcessTimes(VAR times: TimesRec);
+      VAR
+	 d0, d1: INTEGER;
+	 buf: Tms64;
+   BEGIN
+      IF ~SYS.UNIXCALL(Sys.times, d0, d1, SYS.ADR(buf)) THEN
+	 SysErrors.Raise(NIL, d0, Sys.times, "");
+	 times.utime := 0; times.stime := 0;
+	 times.cutime := 0; times.cstime := 0;
+      ELSE
+	 times.utime  := buf.utimelo;
+	 times.stime  := buf.stimelo;
+	 times.cutime := buf.cutimelo;
+	 times.cstime := buf.cstimelo;
+      END;
+   END GetProcessTimes;
+
+   PROCEDURE RealTime(reset: BOOLEAN) : Time;
+      VAR
+	 result: Time;
+	 buf: TimeVal;
+
+      PROCEDURE DiffInUnits(tval1, tval2: TimeVal) : Time;
+      BEGIN
+	 RETURN (tval2.sec - tval1.sec) * GetUnitsPerSecond() +
+		(tval2.usec - tval1.usec) DIV 100 * GetUnitsPerSecond() DIV
+		10000;
+      END DiffInUnits;
+
+   BEGIN
+      GetTimeVal(buf);
+      result := DiffInUnits(real, buf);
+      IF reset THEN
+	 real := buf;
+      END;
+      RETURN result
+   END RealTime;
+
+   PROCEDURE CPUTime(reset: BOOLEAN) : Time;
+      VAR
+	 result: Time;
+	 buf: TimesRec;
+   BEGIN
+      GetProcessTimes(buf);
+      result := buf.utime + buf.stime + buf.cutime + buf.cstime - cpu;
+      IF reset THEN
+	 INC(cpu, result)
+      END;
+      RETURN result
+   END CPUTime;
+
+   PROCEDURE Alarm(seconds: Time);
+      VAR
+	 d0, d1: INTEGER;
+	 buf: Itimerval64;
+   BEGIN
+      buf.intseclo := 0;  buf.intsechi := 0;
+      buf.intuseclo := 0; buf.intusechi := 0;
+      buf.valseclo := seconds; buf.valsechi := 0;
+      buf.valuseclo := 0; buf.valusechi := 0;
+      IF ~SYS.UNIXCALL(Sys.setitimer, d0, d1, itimerreal, SYS.ADR(buf), NIL) THEN
+	 SysErrors.Raise(NIL, d0, Sys.setitimer, "");
+      END;
+   END Alarm;
+
+   PROCEDURE AlarmTime() : Time;
+      VAR
+	 d0, d1: INTEGER;
+	 buf: Itimerval64;
+   BEGIN
+      IF SYS.UNIXCALL(Sys.getitimer, d0, d1, itimerreal, SYS.ADR(buf)) THEN
+	 RETURN buf.valseclo
+      ELSE
+	 SysErrors.Raise(NIL, d0, Sys.getitimer, "");
+	 RETURN 0
+      END;
+   END AlarmTime;
+
+   PROCEDURE Sleep(seconds: Time);
+      VAR
+	 d0, d1: INTEGER;
+	 remaining: Time;
+	 sleep: Time;
+	 raise: BOOLEAN;
+	 event: SysSignals.Event;
+   BEGIN
+      remaining := AlarmTime();
+      IF (remaining > 0) & (remaining < seconds) THEN
+	 sleep := remaining; raise := TRUE;
+      ELSE
+	 sleep := seconds; raise := FALSE;
+      END;
+      WHILE seconds > 0 DO
+	 Events.SaveReaction(SysSignals.ALRM);
+	 Events.Handler(SysSignals.ALRM, Events.NilHandler);
+	 Alarm(sleep);
+	 SysProcess.Pause;
+	 Events.RestoreReaction(SysSignals.ALRM);
+	 IF raise THEN
+	    NEW(event);
+	    event.type := SysSignals.ALRM;
+	    event.message := SysSignals.text[SysSignals.ALRM.signo];
+	    event.signo := SysSignals.ALRM.signo;
+	    event.sigcode := 0;
+	    Events.Raise(event);
+	    raise := FALSE;
+	 END;
+	 DEC(seconds, sleep);
+	 sleep := seconds;
+      END;
+   END Sleep;
+
+   PROCEDURE Init;
+   BEGIN
+      GetTimeVal(real);
+      cpu := 0;
+   END Init;
+
+BEGIN
+   Init;
+END SysTime.

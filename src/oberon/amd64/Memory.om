@@ -1,0 +1,1279 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-1994 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   $Id: Memory.om,v 1.3 1994/12/20 16:22:17 borchert Exp $
+   ----------------------------------------------------------------------------
+   $Log: Memory.om,v $
+   Revision 1.3  1994/12/20  16:22:17  borchert
+   bug fix: Log2 returned wrong result if size wasn't a power of 2
+
+   Revision 1.2  1994/07/05  08:37:29  borchert
+   Types replaced by SysTypes
+
+   Revision 1.1  1994/02/23  07:58:14  borchert
+   Initial revision
+
+   ----------------------------------------------------------------------------
+   AFB 10/92
+   ----------------------------------------------------------------------------
+*)
+
+MODULE Memory;
+
+   (* general and machine-independent allocation of memory regions;
+      an exception are the types Address and Size which are per
+      definition system dependent
+
+      --
+
+      the algorithms below base on a buddy storage allocater which
+      has been modified to support growing regions;
+      usually buddy storage allocaters are disliked for their
+      fragmentation but this is negligible for the application of
+      this module which manages few and great regions
+   *)
+
+   IMPORT Assertions, Disciplines, Events, Priorities, RelatedEvents,
+      SYS := SYSTEM, Types;
+
+   TYPE
+      Address = Types.UntracedAddress;
+      Size = Types.Size;
+
+   CONST
+      (* allocation mode *)
+      fixed = { 0 };              (* memory region doesn't grow *)
+      growingForward = { 1 };     (* should be extensible to higher addresses *)
+      growingBackward = { 0, 1 }; (* should be extensible to lower addresses *)
+      modeMask = { 0, 1 };        (* masks growing mode *)
+      redzoneProtected = { 2 };   (* at least the page before and after the
+				     region should be protected
+				  *)
+
+      (* status returns for memory locations *)
+      stAllocated = 1;   	(* allocated by the given region *)
+      stRedzone = 2;            (* redzone area of given region *)
+      stReserved = 3;    	(* internally allocated for the given region *)
+      stThreatened = 4;  	(* free but threatened by the given region *)
+      stInternalFrag = 5; 	(* consumed by internal fragmentation *)
+      stFree = 6;        	(* free; region = NIL *)
+
+   TYPE
+      AllocationMode = SET;
+      Status = SHORTINT; (* stAllocated..stFree *)
+
+   TYPE
+      Region = POINTER TO RegionRec;
+
+   VAR
+      (* assertions *)
+      overlappingRegions: Events.EventType;
+      addrNotOnPageBoundary: Events.EventType;
+      pagesizeSetTwice: Events.EventType;
+      undefinedPageSize: Events.EventType;
+
+   CONST
+      cannotAllocRegion = 0; (* cannot allocate requested memory region *)
+      cannotExtendRegion = 1; (* cannot extend given region *)
+      fixedRegion = 2; (* fixed regions cannot grow *)
+      reservedRegionsAreNotProtected = 3;
+	 (* reserved regions cannot be redzone protected *)
+      badParamsOfReservedRegion = 4;
+	 (* addr/len params does not fit into address space *)
+      errorcodes = 5;
+   TYPE
+      ErrorEvent = POINTER TO ErrorEventRec;
+      ErrorEventRec =
+	 RECORD
+	    (Events.EventRec)
+	    errorcode: SHORTINT;
+	 END;
+   VAR
+      errormsg: ARRAY errorcodes OF Events.Message;
+      error: Events.EventType;
+
+   (* ================= private data structures ======================= *)
+
+   CONST
+      (* system dependent constants
+
+	 we assume following address space:
+
+	 [----->> addresses >= 0 <<-----)
+					[----->> addresses < 0 <<------)
+
+	 +------------------------------+------------------------------+
+	 |                              |                              |
+	 +------------------------------+------------------------------+
+	 0                     2^(bitsPerAddress-1)          2^bitsPerAddress
+					=
+                                minSignedAddress
+
+	 Types.Address is a signed integer!
+      *)
+      bitsPerAddress = 32;
+         (* full 32-bit address space; for AMD64 the SysStorage guard filters
+            addresses outside [0, 4GB) before calling Memory.ReserveRegion,
+            so the tree only sees addresses that fit in LONGINT arithmetic *)
+      minSignedAddress = MIN(LONGINT);  (* = -2^31; kept for arithmetic routines *)
+
+   CONST
+      left = 0; right = 1; (* BlockType: left or right buddy? *)
+      illegalSide = -1; (* neither left nor right *)
+      blocktypes = 2; (* two variants: either left or right *)
+      notthreatened = bitsPerAddress; (* constant of type AllocLevel *)
+      allocated = -1;
+	 (* constant of type AllocLevel; either the block itself
+	    or one of its descendants is allocated
+	 *)
+
+   TYPE
+      AllocMode = SHORTINT; (* <0: backward, =0: fixed, >0 forward *)
+      BlockType = SHORTINT; (* left or right *)
+      SizeIndex = SHORTINT; (* 0..bitsPerAddress; size is given by 2^index *)
+      AllocLevel = SHORTINT;
+	 (* -1..bitsPerAddress
+	    indicates whether this block is allocated or threatened by growing
+	    memory regions or not:
+	    -1: block is allocated or has allocated childs
+	    0: the buddy is threatening this block
+	    1: the child of the buddy is threatening this block
+	    ...
+	    bitsPerAddress: nobody is threatening this block
+	 *)
+      MemoryBlock = POINTER TO MemoryBlockRec;
+      RegionRec =
+	 RECORD
+	    (Disciplines.ObjectRec)
+	    (* allocated region is given by [addr, addr+len) *)
+	    addr: Address;
+	    len: Size;
+	       (* usually we've only one memory block;
+		  reserved regions may have additional blocks
+		  which are maintained in otherblocks;
+		  "block" is the only block which may grow
+	       *)
+	    block: MemoryBlock;
+	    otherblocks: MemoryBlock;
+	    lenOfOtherBlocks: Size; (* space occupied by otherblocks *)
+	    mode: AllocMode; (* fixed or backward/forward growing *)
+	    redzoneProtection: BOOLEAN;
+	 END;
+      MemoryBlockRec =
+	 RECORD
+	    addr: Address;
+	    buddy: MemoryBlock;
+	    parent: MemoryBlock;
+	    child: ARRAY blocktypes OF MemoryBlock;
+	    type: BlockType; (* left or right buddy? *)
+	    sizeIndex: SizeIndex;
+	    allocLevel: AllocLevel;
+	    prev, next: MemoryBlock; (* freelist or alloclist *)
+	    region: Region; (* the region which the blocks belongs to *)
+	 END;
+      FreeList =
+	 ARRAY
+	    bitsPerAddress + 1,   (* SizeIndex *)
+	    bitsPerAddress + 1    (* AllocLevel[0..bitsPerAddress] *)
+	 OF MemoryBlock;
+   VAR
+      pageSize: Size;	(* the system's pagesize -- our finest granularity *)
+      log2pagesize: SizeIndex; (* the appropiate size index *)
+      root: MemoryBlock; (* the memory block without buddies and parents *)
+      freelist: FreeList; (* list of free blocks *)
+
+   (* ===== error handling ================================================= *)
+
+   PROCEDURE InitErrorHandling;
+   BEGIN
+      Assertions.Define(overlappingRegions, "Memory");
+      Assertions.Define(addrNotOnPageBoundary, "Memory");
+      Assertions.Define(pagesizeSetTwice, "Memory");
+      Assertions.Define(undefinedPageSize, "Memory");
+      errormsg[cannotAllocRegion] := "cannot allocate requested memory region";
+      errormsg[cannotExtendRegion] := "cannot extend given memory region";
+      errormsg[fixedRegion] := "fixed regions cannot grow";
+      errormsg[reservedRegionsAreNotProtected] :=
+	 "reserved regions cannot be redzone protected";
+      errormsg[badParamsOfReservedRegion] :=
+	 "addr/len parameters of ReserveRegion does not fit into address space";
+      Events.Define(error);
+      Events.SetPriority(error, Priorities.liberrors);
+   END InitErrorHandling;
+
+   PROCEDURE Error(errors: RelatedEvents.Object; code: SHORTINT);
+      VAR
+	 event: ErrorEvent;
+   BEGIN
+      NEW(event);
+      event.type := error;
+      event.message := errormsg[code];
+      event.errorcode := code;
+      RelatedEvents.Raise(errors, event);
+   END Error;
+
+   (* ===== utility funcs for addresses, pages, sizes and lengths ========== *)
+
+   PROCEDURE CheckPageSize(proc: ARRAY OF CHAR; errors: RelatedEvents.Object);
+   BEGIN
+      IF pageSize = 0 THEN
+	 Assertions.Raise(errors,
+			  undefinedPageSize, proc, "undefined pagesize");
+	 pageSize := 512; (* try to survive it... *)
+      END;
+   END CheckPageSize;
+
+   PROCEDURE CheckSize(VAR size: Size;
+		       proc: ARRAY OF CHAR; errors: RelatedEvents.Object);
+   BEGIN
+      CheckPageSize(proc, errors);
+      IF size MOD pageSize # 0 THEN
+	 Assertions.Raise(errors, addrNotOnPageBoundary,
+			  proc, "size not on page boundary");
+	 (* survive it by aligning the page size *)
+	 IF size < 0 THEN
+	    size := pageSize;
+	 ELSE
+	    size := (size + pageSize) - size MOD pageSize;
+	 END;
+      END;
+   END CheckSize;
+
+   PROCEDURE Log2(size: Size) : SizeIndex;
+      (* convert Size to SizeIndex *)
+      VAR
+	 count: SizeIndex;
+	 odd: BOOLEAN;
+   BEGIN
+      IF size = 0 THEN
+	 RETURN bitsPerAddress
+      ELSIF (size < 0) OR (size >= ASH(1, bitsPerAddress - 2)) THEN
+	 RETURN bitsPerAddress - 1
+      ELSE
+         count := 0; odd := FALSE;
+         WHILE size > 1 DO
+	    INC(count); odd := odd OR (size MOD 2 # 0); size := size DIV 2;
+         END;
+	 IF odd THEN
+	    (* ensure that 2^count >= original value of size *)
+	    INC(count);
+	 END;
+         RETURN count
+      END;
+   END Log2;
+
+   PROCEDURE PowerOf2(sizeIndex: SizeIndex) : Size;
+      (* convert SizeIndex to Size *)
+   BEGIN
+      IF sizeIndex = bitsPerAddress THEN RETURN 0
+      ELSIF sizeIndex = bitsPerAddress - 1 THEN RETURN minSignedAddress
+      ELSE RETURN ASH(1, sizeIndex)
+      END;
+   END PowerOf2;
+
+   PROCEDURE AddressCompare(addr1, addr2: Address) : INTEGER;
+   BEGIN
+      IF addr1 = addr2 THEN RETURN 0 END;
+      IF (addr1 >= 0) = (addr2 >= 0) THEN
+	 IF addr1 > addr2 THEN
+	    RETURN 1
+	 ELSE
+	    RETURN -1
+	 END;
+      ELSE
+	 IF addr1 < 0 THEN
+	    RETURN 1
+	 ELSE
+	    RETURN -1
+	 END;
+      END;
+   END AddressCompare;
+
+   PROCEDURE LengthCompare(len1, len2: Size) : INTEGER;
+      (* lengths compare like addresses with the exception that
+	 length 0 represents 2^bitsPerAddress, i.e. the entire address space
+      *)
+   BEGIN
+      IF len1 = len2 THEN RETURN 0
+      ELSIF len1 = 0 THEN RETURN 1
+      ELSIF len2 = 0 THEN RETURN -1
+      ELSE
+	 RETURN AddressCompare(len1, len2)
+      END;
+   END LengthCompare;
+
+   PROCEDURE AddressPlusLen(addr: Address; len: Size;
+			    VAR overflow: BOOLEAN) : Address;
+      (* return addr + len;
+	 a return value of 0 with overflow set to FALSE indicates the
+	 end of the address space
+      *)
+   BEGIN
+      overflow := FALSE;
+      IF len = 0 THEN
+	 IF addr # 0 THEN
+	    overflow := TRUE;
+	 END;
+	 RETURN 0
+      ELSIF len < 0 THEN
+	 IF (addr = minSignedAddress) & (len = minSignedAddress) THEN
+	    RETURN 0
+	 ELSIF addr < 0 THEN
+	    overflow := TRUE; RETURN 0
+	 END;
+	 (* len < 0, addr >= 0 *)
+	 IF minSignedAddress + addr + (len - minSignedAddress) > 0 THEN
+	    overflow := TRUE; RETURN 0
+	 END;
+	 RETURN minSignedAddress + addr + len - minSignedAddress
+      ELSIF addr < 0 THEN
+	 IF addr + len > 0 THEN
+	    overflow := TRUE; RETURN 0
+	 END;
+	 RETURN addr + len
+      ELSIF minSignedAddress + addr + len >= 0 THEN
+	 RETURN minSignedAddress + addr + len - minSignedAddress
+      ELSE
+	 RETURN addr + len
+      END;
+   END AddressPlusLen;
+
+   PROCEDURE LenPlusLen(len1, len2: Size; VAR overflow: BOOLEAN) : Size;
+   BEGIN
+      RETURN SYS.VAL(Size,
+		     AddressPlusLen(len1, len2, overflow))
+   END LenPlusLen;
+
+   PROCEDURE AddressMinusLen(addr: Address; len: Size;
+			     VAR underflow: BOOLEAN) : Address;
+      (* return addr - len;
+	 a address value of 0 represents the end of the address space
+      *)
+   BEGIN
+      underflow := FALSE;
+      IF len = 0 THEN
+	 IF addr # 0 THEN
+	    underflow := TRUE;
+	 END;
+	 RETURN 0
+      ELSIF len < 0 THEN
+	 IF (addr = minSignedAddress) & (len = minSignedAddress) THEN
+	    RETURN 0
+	 ELSIF addr > 0 THEN
+	    underflow := TRUE; RETURN 0
+	 END;
+	 (* len < 0, addr <= 0 *)
+	 IF addr < len THEN
+	    underflow := TRUE; RETURN 0
+	 END;
+	 RETURN addr - len
+      ELSIF addr < 0 THEN
+	 (* len >= 0, addr < 0 *)
+	 RETURN addr - minSignedAddress - len + minSignedAddress
+      ELSIF addr = 0 THEN
+	 RETURN - len
+      ELSE
+	 (* len >= 0, addr >= 0 *)
+	 IF addr < len THEN
+	    underflow := TRUE; RETURN 0
+	 END;
+	 RETURN  addr - len
+      END;
+   END AddressMinusLen;
+
+   PROCEDURE LenMinusLen(size, len: Size; VAR underflow: BOOLEAN) : Size;
+   BEGIN
+      RETURN SYS.VAL(Size, AddressMinusLen(size, len, underflow))
+   END LenMinusLen;
+
+   PROCEDURE AddressMinusAddress(addr1, addr2: Address;
+				 VAR underflow: BOOLEAN) : Size;
+   BEGIN
+      RETURN SYS.VAL(Size,
+	     AddressMinusLen(addr1, SYS.VAL(Size, addr2), underflow))
+   END AddressMinusAddress;
+
+   PROCEDURE Inside(location: Address; addr: Address; len: Size) : BOOLEAN;
+      VAR
+	 end: Address;
+	 overflow: BOOLEAN;
+   BEGIN
+      IF AddressCompare(location, addr) < 0 THEN RETURN FALSE END;
+      end := AddressPlusLen(addr, len, overflow);
+      RETURN ~overflow & (AddressCompare(location, end) < 0)
+   END Inside;
+
+   PROCEDURE InsideOfRegion(location: Address; region: Region) : BOOLEAN;
+      VAR
+	 overflow: BOOLEAN;
+   BEGIN
+      IF region.redzoneProtection THEN
+	 RETURN Inside(location,
+		       AddressPlusLen(region.addr, pageSize, overflow),
+		       LenMinusLen(region.len, 2 * pageSize, overflow))
+      ELSE
+	 RETURN Inside(location, region.addr, region.len)
+      END;
+   END InsideOfRegion;
+
+   PROCEDURE InsideOfRedzone(location: Address; region: Region) : BOOLEAN;
+      (* for growing regions we view only the page which is not
+	 threatened as redzone
+      *)
+      VAR
+	 overflow: BOOLEAN;
+   BEGIN
+      IF ~region.redzoneProtection THEN RETURN FALSE END;
+      IF region.mode = 0 THEN
+	 RETURN Inside(location, region.addr, region.len) &
+		~InsideOfRegion(location, region)
+      ELSIF region.mode < 0 THEN
+	 RETURN Inside(location,
+		       AddressPlusLen(region.addr,
+			  LenMinusLen(region.len, pageSize, overflow),
+			  overflow),
+		       pageSize)
+      ELSE (* region.mode > 0 *)
+	 RETURN Inside(location, region.addr, pageSize)
+      END;
+   END InsideOfRedzone;
+
+   PROCEDURE AddressOfRidge(addr: Address;
+			    sizeIndex: SizeIndex) : Address;
+   BEGIN
+      (* special case only needed when bitsPerAddress=32 to avoid LONGINT overflow
+         of ASH(1,31); with bitsPerAddress<=30 the shift result is always positive *)
+      IF (bitsPerAddress >= 32) & (addr = 0) & (sizeIndex = bitsPerAddress) THEN
+	 RETURN minSignedAddress
+      ELSE
+	 RETURN addr + ASH(1, sizeIndex - 1)
+      END;
+   END AddressOfRidge;
+
+   PROCEDURE FittingBlocksize(addr: Address; len: Size) : SizeIndex;
+      VAR
+	 sizeIndex: SizeIndex;
+	 blocksize: Size;
+	 overflow: BOOLEAN;
+   BEGIN
+      (* seek for a sizeIndex where
+	 (1) 2^sizeIndex <= len
+	 (2) addr MOD 2^sizeIndex = 0
+      *)
+      IF len < 0 THEN
+	 IF (len = minSignedAddress) &
+	       ((addr = 0) OR (addr = minSignedAddress)) THEN
+	    RETURN bitsPerAddress - 1
+	 END;
+	 (* addr >= 0
+	    so we can len reduce now to the difference between
+	    minSignedAddress and addr
+	 *)
+	 len := AddressMinusAddress(minSignedAddress, addr, overflow);
+      END;
+      IF len > 0 THEN
+	 sizeIndex := bitsPerAddress-2; blocksize := ASH(1, bitsPerAddress-2);
+	 WHILE (LengthCompare(blocksize, len) > 0) OR
+	       (addr MOD blocksize # 0) DO
+	    DEC(sizeIndex); blocksize := blocksize DIV 2;
+	 END;
+      ELSE (* len = 0 *)
+	 sizeIndex := bitsPerAddress;
+      END;
+      RETURN sizeIndex
+   END FittingBlocksize;
+
+   (* ===== free list management ================================ *)
+
+   PROCEDURE InitFreeList;
+      VAR
+	 sizeIndex: SizeIndex;
+	 allocLevel: AllocLevel;
+   BEGIN
+      (* Initially, we don't have any free blocks at all *)
+      sizeIndex := 0;
+      WHILE sizeIndex <= bitsPerAddress DO
+	 allocLevel := 0;
+	 WHILE allocLevel <= bitsPerAddress DO
+	    freelist[sizeIndex, allocLevel] := NIL;
+	    INC(allocLevel);
+	 END;
+	 INC(sizeIndex);
+      END;
+   END InitFreeList;
+
+   PROCEDURE PutBlockInFreeList(block: MemoryBlock);
+      VAR
+	 index1: SizeIndex; index2: AllocLevel;
+   BEGIN
+      index1 := block.sizeIndex;
+      index2 := block.allocLevel;
+      block.prev := NIL;
+      block.next := freelist[index1, index2];
+      IF freelist[index1, index2] # NIL THEN
+	 freelist[index1, index2].prev := block;
+      END;
+      freelist[index1, index2] := block;
+      block.region := NIL;
+   END PutBlockInFreeList;
+
+   PROCEDURE RemoveBlockFromFreeList(block: MemoryBlock);
+      VAR
+	 sindex: SizeIndex;
+	 aindex: AllocLevel;
+   BEGIN
+      sindex := block.sizeIndex;
+      aindex := block.allocLevel;
+      IF block.prev = NIL THEN
+	 freelist[sindex, aindex] := block.next;
+      ELSE
+	 block.prev.next := block.next;
+      END;
+      IF block.next # NIL THEN
+	 block.next.prev := block.prev;
+      END;
+      block.prev := NIL; block.next := NIL;
+   END RemoveBlockFromFreeList;
+
+   PROCEDURE AddBlockToRegion(region: Region; block: MemoryBlock);
+      VAR
+	 overflow: BOOLEAN;
+   BEGIN
+      IF region.block = NIL THEN
+	 region.block := block; block.prev := NIL; block.next := NIL;
+      ELSE
+	 block.prev := NIL;
+	 block.next := region.otherblocks;
+	 region.otherblocks := block;
+	 IF block.next # NIL THEN
+	    region.lenOfOtherBlocks :=
+	       LenPlusLen(region.lenOfOtherBlocks,
+			  PowerOf2(block.sizeIndex), overflow);
+	 ELSE
+	    region.lenOfOtherBlocks := PowerOf2(block.sizeIndex);
+	 END;
+      END;
+      block.region := region;
+   END AddBlockToRegion;
+
+   PROCEDURE RemoveBlockFromRegion(region: Region; block: MemoryBlock);
+      VAR
+	 underflow: BOOLEAN;
+   BEGIN
+      IF region.block = block THEN
+	 region.block := NIL;
+      ELSE
+	 IF block.prev # NIL THEN
+	    block.prev.next := block.next;
+	 ELSE
+	    region.otherblocks := block.next;
+	 END;
+	 IF block.next # NIL THEN
+	    block.next.prev := block.prev;
+	 END;
+	 region.lenOfOtherBlocks :=
+	    LenMinusLen(region.lenOfOtherBlocks,
+			    PowerOf2(block.sizeIndex), underflow);
+      END;
+      block.prev := NIL; block.next := NIL; block.region := NIL;
+   END RemoveBlockFromRegion;
+
+   PROCEDURE InitRoot(VAR root: MemoryBlock);
+   BEGIN
+      NEW(root);
+      root.addr := 0;
+      root.buddy := NIL;
+      root.parent := NIL;
+      root.child[left] := NIL; root.child[right] := NIL;
+      root.type := left;
+      root.sizeIndex := bitsPerAddress - 1; (* AMD64: restrict tree to [0, 2GB) *)
+      root.allocLevel := notthreatened;
+      root.prev := NIL; root.next := NIL;
+      root.region := NIL;
+      PutBlockInFreeList(root);
+   END InitRoot;
+
+   PROCEDURE Split(memoryBlock: MemoryBlock;
+		   requestedSize: SizeIndex;
+		   allocMode: AllocMode;
+		   reservedRegion: BOOLEAN;
+		   requestedAddress: Address;
+		   VAR newBlock: MemoryBlock);
+      (* PRE:  memoryBlock is a free block (but not in the free list)
+		  without childs;
+	       memoryBlock.sizeIndex >= requestedSize
+	       requestedAddress is only needed if reservedRegion = TRUE
+	 POST: newBlock is a new child of memoryBlock with the
+	       requested size and all buddies between newBlock
+	       and memoryBlock have the correct allocLevel
+      *)
+      VAR
+	 block: MemoryBlock; (* memoryBlock or one of its new childs *)
+	 sizeIndex: SizeIndex;
+	 descSide, otherSide: BlockType;
+	 threatenedSide: BlockType;
+
+      PROCEDURE CreateChild(VAR child: MemoryBlock;
+			    type: BlockType);
+	 (* initialize all components except buddy and allocLevel *)
+      BEGIN
+	 NEW(child);
+	 IF type = left THEN
+	    child.addr := block.addr;
+	 ELSE
+	    child.addr := AddressOfRidge(block.addr, block.sizeIndex);
+	 END;
+	 child.parent := block;
+	 child.child[left] := NIL;
+	 child.child[right] := NIL;
+	 child.type := type;
+	 child.sizeIndex := sizeIndex - 1;
+	 child.prev := NIL; child.next := NIL;
+	 child.region := NIL;
+      END CreateChild;
+
+   BEGIN (* Split *)
+      block := memoryBlock;
+      sizeIndex := memoryBlock.sizeIndex;
+      WHILE sizeIndex > requestedSize DO
+	 block.allocLevel := allocated;
+	 CreateChild(block.child[left], left);
+	 CreateChild(block.child[right], right);
+	 block.child[left].buddy := block.child[right];
+	 block.child[right].buddy := block.child[left];
+	 IF reservedRegion THEN
+	    IF AddressCompare(requestedAddress,
+			      AddressOfRidge(block.addr, block.sizeIndex))
+		  < 0 THEN
+	       descSide := left; otherSide := right;
+	    ELSE
+	       descSide := right; otherSide := left;
+	    END;
+	    IF allocMode # 0 THEN
+	       IF allocMode < 0 THEN
+		  threatenedSide := left;
+	       ELSE
+		  threatenedSide := right;
+	       END;
+	       IF threatenedSide # otherSide THEN
+		  threatenedSide := illegalSide;
+	       END;
+	    ELSE
+	       threatenedSide := illegalSide;
+	    END;
+	 ELSE
+	    IF allocMode < 0 THEN
+	       (* allocate right buddy *)
+	       descSide := right; otherSide := left;
+	    ELSE
+	       descSide := left; otherSide := right;
+	    END;
+	    threatenedSide := otherSide;
+	 END;
+	 IF (allocMode = 0) OR (threatenedSide = illegalSide) THEN
+	    block.child[otherSide].allocLevel := notthreatened;
+	 ELSE
+	    block.child[threatenedSide].allocLevel :=
+	       sizeIndex - requestedSize - 1;
+	 END;
+	 PutBlockInFreeList(block.child[otherSide]);
+
+	 block := block.child[descSide];
+	 DEC(sizeIndex);
+      END;
+
+      (* block points now to the new block *)
+      newBlock := block;
+      newBlock.allocLevel := allocated;
+   END Split;
+
+   PROCEDURE ReleaseAndJoin(block: MemoryBlock);
+      (* release the given memory block and
+	 join all buddies in the level of block and all parent levels until
+	 we find a allocated buddy or we end up at the root
+      *)
+      VAR
+	 buddy: MemoryBlock;
+	 desc: MemoryBlock;
+   BEGIN
+      WHILE (block # root) &
+	    (block.buddy.allocLevel # allocated) DO
+	 RemoveBlockFromFreeList(block.buddy);
+	 block := block.parent;
+      END;
+      block.child[left] := NIL; block.child[right] := NIL;
+      IF block = root THEN
+	 (* inbelievable, the root is free again *)
+	 block.allocLevel := notthreatened;
+      ELSE
+	 buddy := block.buddy;
+	 IF (buddy.region # NIL) &
+	    ((buddy.region.mode > 0) & (buddy.type = left) OR
+	     (buddy.region.mode < 0) & (buddy.type = right)) THEN
+	    block.allocLevel := 0; (* threatened by buddy *)
+	 ELSIF buddy.allocLevel = allocated THEN
+	    desc := buddy.child[block.type];
+	    IF (desc # NIL) & (desc.allocLevel # allocated) &
+		  (desc.allocLevel # notthreatened) THEN
+	       block.allocLevel := desc.allocLevel + 1;
+	    ELSE
+	       block.allocLevel := notthreatened;
+	    END;
+	 ELSE
+	    block.allocLevel := notthreatened;
+	 END;
+      END;
+      PutBlockInFreeList(block);
+   END ReleaseAndJoin;
+
+   PROCEDURE ExtendBlock(memoryBlock: MemoryBlock;
+			 mode: AllocMode;
+			 requestedSize: SizeIndex;
+			 VAR newBlock: MemoryBlock) : BOOLEAN;
+      (* PRE:  requestedSize > memoryBlock.sizeIndex
+      *)
+      VAR
+	 block: MemoryBlock;
+	 correctSide: BlockType;
+	 allocLevel: AllocLevel;
+   BEGIN
+      block := memoryBlock;
+      (* we may extend as long we are on the correct side *)
+      IF mode < 0 THEN
+	 correctSide := right;
+      ELSE
+	 correctSide := left;
+      END;
+      (* check if we can extend the block *)
+      WHILE (block.type = correctSide) &
+	    (block.buddy.allocLevel # allocated) &
+	    (block.sizeIndex < requestedSize) DO
+	 block := block.parent;
+      END;
+      IF block.sizeIndex # requestedSize THEN
+	 RETURN FALSE
+      END;
+
+      (* release & join *)
+      block := memoryBlock;
+      WHILE block.sizeIndex < requestedSize DO
+	 RemoveBlockFromFreeList(block.buddy);
+	 block := block.parent;
+      END;
+      block.child[left] := NIL; block.child[right] := NIL;
+      newBlock := block;
+
+      (* update allocLevels of threatened blocks *)
+      IF block # root THEN
+	 allocLevel := 0;
+	 WHILE (block # root) & (block.buddy.allocLevel # allocated) &
+	       (block.type = correctSide) DO
+	    RemoveBlockFromFreeList(block.buddy);
+	    block.buddy.allocLevel := allocLevel;
+	    PutBlockInFreeList(block.buddy);
+	    INC(allocLevel);
+	    block := block.parent;
+	 END;
+      END;
+      RETURN TRUE
+   END ExtendBlock;
+
+   PROCEDURE SeekFixedBlock(sizeIndex: SizeIndex;
+			    VAR newBlock: MemoryBlock) : BOOLEAN;
+      (* use following order:
+	 (1) allocLevel should be maximal
+	 (2) size should be minimal but >= sizeIndex
+      *)
+      VAR
+	 sindex: SizeIndex;
+	 aindex: AllocLevel;
+   BEGIN
+      aindex := notthreatened;
+      WHILE aindex >= 0 DO
+	 (* we assume sizeIndex >= log2pagesize *)
+	 sindex := sizeIndex;
+	 WHILE sindex <= bitsPerAddress DO
+	    IF freelist[sindex, aindex] # NIL THEN
+	       newBlock := freelist[sindex, aindex];
+	       RemoveBlockFromFreeList(newBlock);
+	       RETURN TRUE
+	    END;
+	    INC(sindex);
+	 END;
+	 DEC(aindex);
+      END;
+      RETURN FALSE
+   END SeekFixedBlock;
+
+   PROCEDURE SeekGrowingBlock(sizeIndex: SizeIndex;
+			      allocMode: AllocMode;
+			      VAR newBlock: MemoryBlock) : BOOLEAN;
+      (* use following order:
+	 (1) size should be maximal
+	 (2) allocLevel should be maximal
+      *)
+      VAR
+	 sindex: SizeIndex;
+	 aindex: AllocLevel;
+   BEGIN
+      sindex := bitsPerAddress;
+      WHILE sindex >= sizeIndex DO
+	 aindex := notthreatened;
+	 WHILE aindex >= 0 DO
+	    IF freelist[sindex, aindex] # NIL THEN
+	       newBlock := freelist[sindex, aindex];
+	       RemoveBlockFromFreeList(newBlock);
+	       RETURN TRUE
+	    END;
+	    DEC(aindex);
+	 END;
+	 DEC(sindex);
+      END;
+      RETURN FALSE
+   END SeekGrowingBlock;
+
+   PROCEDURE SeekBlock(sizeIndex: SizeIndex;
+		       allocMode: AllocMode;
+		       VAR newBlock: MemoryBlock) : BOOLEAN;
+   BEGIN
+      IF allocMode = 0 THEN
+	 RETURN SeekFixedBlock(sizeIndex, newBlock)
+      ELSE
+	 RETURN SeekGrowingBlock(sizeIndex, allocMode, newBlock)
+      END;
+   END SeekBlock;
+
+   PROCEDURE AllocBlock(sizeIndex: SizeIndex;
+			allocMode: AllocMode;
+			VAR newBlock: MemoryBlock) : BOOLEAN;
+      VAR
+	 parent, block: MemoryBlock;
+   BEGIN
+      IF ~SeekBlock(sizeIndex, allocMode, parent) THEN
+	 RETURN FALSE
+      END;
+      Split(parent, sizeIndex, allocMode,
+            (* reservedRegion = *) FALSE, 0,
+	    block);
+      newBlock := block;
+      RETURN TRUE
+   END AllocBlock;
+
+   PROCEDURE ReserveBlock(VAR addr: Address; VAR len: Size;
+			  allocMode: AllocMode;
+			  VAR newBlock: MemoryBlock) : BOOLEAN;
+      (* allocate a block at the given address;
+	 PRE:  addr and len are on page boundaries
+	 POST: the size of the block is <= the initial value of len;
+	       the new value of len is diminished by the size of the block;
+	       the new value of addr is old addr + size of the block
+      *)
+      VAR
+	 sizeIndex: SizeIndex;
+	 block: MemoryBlock;
+
+      PROCEDURE SeekBlock(addr: Address; VAR block: MemoryBlock) : BOOLEAN;
+	 (* seek for a free block of maximal size with no childs
+	    which contains addr
+	 *)
+      BEGIN
+	 block := root;
+	 WHILE (block.region = NIL) & (block.child[left] # NIL) DO
+	    IF AddressCompare(addr,
+			      AddressOfRidge(block.addr, block.sizeIndex))
+		  < 0 THEN
+	       block := block.child[left];
+	    ELSE
+	       block := block.child[right];
+	    END;
+	 END;
+	 RETURN block.region = NIL
+      END SeekBlock;
+
+   BEGIN (* ReserveBlock *)
+      (* seek for a sizeIndex where
+	 (1) 2^sizeIndex <= len
+	 (2) addr MOD 2^sizeIndex = 0
+      *)
+      sizeIndex := FittingBlocksize(addr, len);
+      (* now, we can try to allocate a block with the given sizeIndex
+	 at the given address
+      *)
+      IF ~SeekBlock(addr, block) OR (block.sizeIndex < sizeIndex) THEN
+	 RETURN FALSE (* overlapping regions *)
+      END;
+      RemoveBlockFromFreeList(block);
+      Split(block, sizeIndex, allocMode,
+	    (* reservedRegion = *) TRUE, addr, newBlock);
+      RETURN TRUE
+   END ReserveBlock;
+
+   (* ========= exported procedures ================================== *)
+
+   PROCEDURE ReserveRegion(addr: Address; len: Size;
+			   mode: AllocationMode;
+			   VAR region: Region);
+      (* reserve region which has been already allocated by the system;
+	 this procedure should only be called by some system dependent
+	 modules during the initialisation;
+	 the memory region is given by
+	    [addr, addr+len)
+	       for fixed or forward growing regions and by
+	    [addr-len, addr)
+	       for backward growing regions;
+	 addr and len must be on page boundaries
+      *)
+      CONST
+	 errors = NIL;
+      VAR
+	 allocMode: AllocMode;
+	 redzone: BOOLEAN;
+	 addrOfFirstBlock: Address;
+	 upperBound: Address;
+	 lenOfFirstBlock: Size;
+	 overflow: BOOLEAN; result: Address; (* of addr + len *)
+	 block: MemoryBlock;
+
+      PROCEDURE OverlappingRegions;
+      BEGIN
+	 Assertions.Raise(errors, overlappingRegions, "ReserveRegion",
+	    "given address interval overlaps existing regions");
+      END OverlappingRegions;
+
+      PROCEDURE BackwardBoundary(addr: Address; len: Size) : Address;
+	 (* we have a region which grows forward:
+
+	    --------------+-----------------------------+-------------
+			  |                             |  -->
+	    --------------+-----------------------------+-------------
+			addr                        addr + len
+	    we seek an address b which satifies following conditions:
+	    (1) (b >= addr) & (b < addr + len)
+	    (2) there exist an sizeIndex s with: addr + len - b = 2^s
+	    (3) s must be maximal
+	 *)
+	 VAR
+	    sizeIndex: SizeIndex;
+	    limit: Address; (* address + len *)
+	    overflow: BOOLEAN;
+      BEGIN
+	 limit := AddressPlusLen(addr, len, overflow);
+	 sizeIndex := FittingBlocksize(limit, len);
+	 RETURN AddressMinusLen(limit, PowerOf2(sizeIndex), overflow);
+      END BackwardBoundary;
+
+   BEGIN (* ReserveRegion *)
+      IF len = 0 THEN RETURN END; (* nothing to reserve for zero-length segment *)
+      (* check params for general validity *)
+      CheckSize(len, "ReserveRegion", errors);
+      IF mode * modeMask = fixed THEN
+	 allocMode := 0;
+      ELSIF mode * modeMask = growingForward THEN
+	 allocMode := 1;
+      ELSE
+	 allocMode := - 1;
+      END;
+      redzone := redzoneProtected * mode = redzoneProtected;
+      IF redzone THEN
+	 Error(errors, reservedRegionsAreNotProtected);
+      END;
+      IF addr MOD pageSize # 0 THEN
+	 Assertions.Raise(errors, addrNotOnPageBoundary, "ReserveRegion",
+	    "given address is not on a page boundary");
+	 (* try to survive the problem by aligning the address *)
+	 IF allocMode < 0 THEN
+	    (* growing backward *)
+	    IF (addr > 0) & (MAX(Address) - addr < pageSize) THEN
+	       addr := minSignedAddress;
+	    ELSE
+	       INC(addr, pageSize - addr MOD pageSize);
+	    END;
+	 ELSE
+	    (* this works for positive and negative addresses *)
+	    DEC(addr, addr MOD pageSize);
+	 END;
+      END;
+      IF (addr # 0) OR (allocMode >= 0) THEN
+	 IF allocMode >= 0 THEN
+	    result := AddressPlusLen(addr, len, overflow);
+	 ELSE
+	    result := AddressMinusLen(addr, len, overflow);
+	 END;
+	 IF overflow THEN
+	    Error(errors, badParamsOfReservedRegion);
+	    (* try to survive by shortening the length *)
+	    IF allocMode >= 0 THEN
+	       len := AddressMinusAddress(0, addr, overflow);
+	    ELSE
+	       len := SYS.VAL(Size, addr);
+	    END;
+	 END;
+      END;
+
+      (* init region *)
+      NEW(region);
+      IF allocMode >= 0 THEN
+	 region.addr := addr;
+      ELSIF addr # 0 THEN
+	 region.addr := AddressMinusLen(addr, len, overflow);
+      ELSE
+	 region.addr := - len;
+      END;
+      region.len := len;
+      region.block := NIL;
+      region.otherblocks := NIL;
+      region.lenOfOtherBlocks := 0;
+      region.mode := allocMode;
+      region.redzoneProtection := FALSE;
+
+      (* allocate growing block for growing regions *)
+      IF allocMode # 0 THEN
+	 IF allocMode < 0 THEN
+	    IF addr = 0 THEN
+	       addrOfFirstBlock := - len;
+	    ELSE
+	       addrOfFirstBlock := AddressMinusLen(addr, len, overflow);
+	    END;
+	    lenOfFirstBlock := len;
+	 ELSE
+	    addrOfFirstBlock := BackwardBoundary(addr, len);
+	    upperBound := AddressPlusLen(addr, len, overflow);
+	    lenOfFirstBlock :=
+	       AddressMinusAddress(upperBound, addrOfFirstBlock, overflow);
+	 END;
+	 IF ReserveBlock(addrOfFirstBlock, lenOfFirstBlock,
+			 allocMode, block) THEN
+	    AddBlockToRegion(region, block);
+	 ELSE
+	    OverlappingRegions; RETURN (* give up *)
+	 END;
+	 (* advance addr and reduce len *)
+	 len := LenMinusLen(len, PowerOf2(block.sizeIndex), overflow);
+	 IF allocMode < 0 THEN
+	    addr := AddressPlusLen(addrOfFirstBlock,
+				   PowerOf2(block.sizeIndex), overflow);
+	 END;
+	 allocMode := 0; (* we've only one growing block *)
+      END;
+
+      (* allocate all other blocks;
+	 while a length of 0 usually represents the entire address space,
+	 we have here len as an result of AddressMinusLen giving an
+	 address which diminishes to zero if all blocks are allocated
+      *)
+      WHILE len # 0 DO
+	 IF ReserveBlock(addr, len, allocMode, block) THEN
+	    AddBlockToRegion(region, block);
+	 ELSE
+	    OverlappingRegions; RETURN (* give up *)
+	 END;
+	 addr := AddressPlusLen(addr, PowerOf2(block.sizeIndex), overflow);
+	 len := LenMinusLen(len, PowerOf2(block.sizeIndex), overflow);
+      END;
+   END ReserveRegion;
+
+   PROCEDURE AllocateRegion(len: Size; mode: AllocationMode;
+			    VAR addr: Address; VAR region: Region;
+			    errors: RelatedEvents.Object) : BOOLEAN;
+      VAR
+	 block: MemoryBlock;
+	 sizeIndex: SizeIndex;
+	 allocMode: AllocMode;
+	 redzone: BOOLEAN;
+	 overflow: BOOLEAN;
+   BEGIN
+      CheckSize(len, "AllocateRegion", errors);
+      IF mode * modeMask = fixed THEN
+	 allocMode := 0;
+      ELSIF mode * modeMask = growingForward THEN
+	 allocMode := 1;
+      ELSE
+	 allocMode := - 1;
+      END;
+      redzone := redzoneProtected * mode = redzoneProtected;
+      IF redzone THEN
+	 INC(len, 2 * pageSize);
+      END;
+      sizeIndex := Log2(len);
+      IF ~AllocBlock(sizeIndex, allocMode, block) THEN
+	 Error(errors, cannotAllocRegion); RETURN FALSE
+      END;
+      NEW(region);
+      IF allocMode >= 0 THEN (* fixed or growing forward *)
+	 region.addr := block.addr;
+	 IF redzone THEN
+	    addr := region.addr + pageSize;
+	 ELSE
+	    addr := region.addr;
+	 END;
+      ELSE (* growing backwards *)
+	 addr := block.addr + ASH(1, sizeIndex);
+	 region.addr := AddressMinusLen(addr, len, overflow);
+	 IF redzone THEN
+	    DEC(addr, pageSize);
+	 END;
+      END;
+      region.len := len;
+      region.block := NIL;
+      region.otherblocks := NIL;
+      region.lenOfOtherBlocks := 0;
+      region.mode := allocMode;
+      region.redzoneProtection := redzone;
+      AddBlockToRegion(region, block);
+      RETURN TRUE
+   END AllocateRegion;
+
+   PROCEDURE ExtendRegion(region: Region; newlen: Size;
+			  errors: RelatedEvents.Object) : BOOLEAN;
+      VAR
+	 requestedSize: SizeIndex;
+	 oldBlock, newBlock: MemoryBlock;
+	 overflow: BOOLEAN;
+   BEGIN
+      CheckSize(newlen, "ExtendRegion", errors);
+      IF region.mode = 0 THEN
+	 Error(errors, fixedRegion);
+      END;
+      IF region.redzoneProtection THEN
+	 INC(newlen, 2 * pageSize);
+      END;
+      IF LengthCompare(newlen, region.len) <= 0 THEN
+	 RETURN TRUE
+      END;
+      IF region.otherblocks # NIL THEN
+	 newlen := LenMinusLen(newlen, region.lenOfOtherBlocks, overflow);
+      END;
+      requestedSize := Log2(newlen);
+      IF requestedSize # region.block.sizeIndex THEN
+	 oldBlock := region.block;
+	 RemoveBlockFromRegion(region, oldBlock);
+	 IF ~ExtendBlock(oldBlock, region.mode, requestedSize, newBlock) THEN
+	    AddBlockToRegion(region, oldBlock);
+	    Error(errors, cannotExtendRegion); RETURN FALSE
+	 END;
+	 AddBlockToRegion(region, newBlock);
+      END;
+      IF region.mode < 0 THEN
+	 (* update region.addr for backward growing regions *)
+	 region.addr := AddressMinusLen(region.addr,
+			    LenMinusLen(newlen, region.len, overflow),
+			    overflow);
+      END;
+      IF region.otherblocks # NIL THEN
+	 region.len :=
+	    LenPlusLen(newlen, region.lenOfOtherBlocks, overflow);
+      ELSE
+	 region.len := newlen;
+      END;
+      RETURN TRUE
+   END ExtendRegion;
+
+   PROCEDURE ReleaseRegion(region: Region);
+      VAR
+	 block, nextBlock: MemoryBlock;
+   BEGIN
+      ReleaseAndJoin(region.block);
+      block := region.otherblocks;
+      WHILE block # NIL DO
+	 nextBlock := block.next;
+	 ReleaseAndJoin(block);
+	 block := nextBlock;
+      END;
+      region.block := NIL;
+      region.otherblocks := NIL;
+   END ReleaseRegion;
+
+   PROCEDURE GetStatus(addr: Address;
+		       VAR status: Status; VAR region: Region);
+      (* return status of the given memory location *)
+      VAR
+	 block: MemoryBlock;
+   BEGIN
+      block := root;
+      WHILE (block.region = NIL) & (block.child[left] # NIL) DO
+	 IF AddressCompare(addr,
+			   AddressOfRidge(block.addr, block.sizeIndex))
+	       < 0 THEN
+	    block := block.child[left];
+	 ELSE
+	    block := block.child[right];
+	 END;
+      END;
+      IF block.region # NIL THEN
+	 region := block.region;
+	 IF InsideOfRegion(addr, region) THEN
+	    status := stAllocated;
+	 ELSIF InsideOfRedzone(addr, region) THEN
+	    status := stRedzone;
+	 ELSIF region.mode = 0 THEN
+	    status := stInternalFrag;
+	 ELSE
+	    status := stReserved;
+	 END;
+      ELSIF block.allocLevel = notthreatened THEN
+	 status := stFree; region := NIL;
+      ELSE
+	 status := stThreatened;
+	 (* look for threatening region *)
+	 block := block.buddy;
+	 WHILE block.region = NIL DO
+	    block := block.child[block.type];
+	 END;
+	 status := stThreatened; region := block.region;
+      END;
+   END GetStatus;
+
+   PROCEDURE SetPageSize(pagesize: Size);
+      (* has to be set once during initialisation by some
+	 system-dependent module
+      *)
+   BEGIN
+      IF pageSize = 0 THEN
+	 pageSize := pagesize;
+	 log2pagesize := Log2(pagesize);
+      ELSE
+	 Assertions.Raise(NIL, pagesizeSetTwice, "SetPageSize",
+	    "pagesize has already been set");
+      END;
+   END SetPageSize;
+
+   PROCEDURE GetPageSize() : Size;
+      (* returns the pagesize *)
+   BEGIN
+      CheckPageSize("GetPageSize", NIL);
+      RETURN pageSize
+   END GetPageSize;
+
+   PROCEDURE AlignSize(VAR size: Size);
+      (* align size to next page boundary *)
+   BEGIN
+      CheckPageSize("AlignSize", NIL);
+      IF size < 0 THEN
+	 size := pageSize;
+      ELSE
+	 size := (size + pageSize) - size MOD pageSize;
+      END;
+   END AlignSize;
+
+BEGIN
+   InitErrorHandling;
+   pageSize := 0;
+   InitFreeList;
+   InitRoot(root);
+END Memory.

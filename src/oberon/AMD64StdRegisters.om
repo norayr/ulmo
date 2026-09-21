@@ -1,0 +1,165 @@
+MODULE AMD64StdRegisters; (* AMD64 port of I386StdRegisters — 8-byte GP registers *)
+
+   IMPORT Disciplines, Emit := AMD64Emit, FragmentedStreams,
+      Gen := AMD64OpCodeGenerator, Op := AMD64Operands,
+      Pentium := AMD64Instructions, Regs := CompilerRegisters,
+      StackAlloc := CompilerStackAllocations, Streams,
+      TmpPtrs := CompilerTemporaryPointers;
+
+   TYPE
+      SaveBlock = Disciplines.Object;
+
+      RestoreBlock = POINTER TO RestoreBlockRec;
+      RestoreBlockRec = RECORD
+	 (Disciplines.ObjectRec)
+	 next : RestoreBlock;
+      END;
+
+   TYPE
+      RegSet = POINTER TO RegSetRec;
+      RegSetRec = RECORD
+	 (Regs.RegSetRec)
+	 stream : FragmentedStreams.Stream;
+	 save : SaveBlock;
+	 restore : RestoreBlock;
+	 used : SET;
+	 tmpptrs : TmpPtrs.Ptr;
+      END;
+
+   PROCEDURE Xchg (set : Regs.RegSet; reg1, reg2 : Regs.Register);
+      VAR ops : ARRAY 2 OF Op.Operand; reg : Regs.Value;
+   BEGIN
+      ops[0] := NIL;
+      WITH set : RegSet DO
+	 ASSERT ((reg1 IN set.used) & (reg2 IN set.used));
+	 Regs.UntracedValue (reg, reg1); ops[0] := Op.RegOp (reg, 8);
+	 Regs.UntracedValue (reg, reg2); ops[1] := Op.RegOp (reg, 8);
+	 Emit.Instr (set.stream, Pentium.XCHG, 2, ops);
+      END;
+   END Xchg;
+
+   PROCEDURE Read (set : Regs.RegSet; value : Regs.Value; reg1 : Regs.Register;
+		   offset : LONGINT);
+      VAR ops : ARRAY 2 OF Op.Operand; reg : Regs.Value;
+	  end : FragmentedStreams.Label; ptr : TmpPtrs.Ptr;
+   BEGIN
+      ops[0] := NIL;
+      WITH set : RegSet DO
+	 ASSERT (reg1 IN set.used);
+	 Regs.UntracedValue (reg, reg1); ops[0] := Op.RegOp (reg, 8);
+	 Regs.UntracedValue (reg, Gen.genbp); ops[1] := Op.MemOp1 (reg, 8, offset, 0);
+	 Emit.Instr (set.stream, Pentium.MOV, 2, ops);
+	 FragmentedStreams.CreateLabel (end);
+	 FragmentedStreams.AttachLabel (set.stream, end);
+	 ptr := TmpPtrs.Close (value, end);
+	 IF (ptr # NIL) & (ptr.mode IN {Regs.addrM, Regs.ptrM}) THEN
+	    ASSERT (ptr.mode = Regs.GetMode (value));
+	    ptr.next := set.tmpptrs; set.tmpptrs := ptr;
+	 END;
+      END;
+   END Read;
+
+   PROCEDURE Write (set : Regs.RegSet; value : Regs.Value; reg1 : Regs.Register;
+		    offset : LONGINT);
+      VAR ops : ARRAY 2 OF Op.Operand; reg : Regs.Value;
+	  mode : Regs.Mode; start : FragmentedStreams.Label;
+   BEGIN
+      ops[0] := NIL;
+      WITH set : RegSet DO
+	 ASSERT (reg1 IN set.used);
+	 Regs.UntracedValue (reg, reg1); ops[1] := Op.RegOp (reg, 8);
+	 Regs.UntracedValue (reg, Gen.genbp); ops[0] := Op.MemOp1 (reg, 8, offset, 0);
+	 Emit.Instr (set.stream, Pentium.MOV, 2, ops);
+	 mode := Regs.GetMode (value);
+	 FragmentedStreams.CreateLabel (start);
+	 FragmentedStreams.AttachLabel (set.stream, start);
+	 TmpPtrs.Open (value, start, offset, mode);
+      END;
+   END Write;
+
+   PROCEDURE MarkUsed (set : Regs.RegSet; reg : Regs.Register);
+   BEGIN
+      WITH set : RegSet DO INCL (set.used, reg); END;
+   END MarkUsed;
+
+   PROCEDURE InitValue (set : Regs.RegSet; reg : Regs.Value);
+      VAR ptr : TmpPtrs.Ptr;
+   BEGIN ptr := TmpPtrs.Close (reg, NIL); END InitValue;
+
+   PROCEDURE Create (VAR set : Regs.RegSet; alloc : StackAlloc.Stack;
+		     s : FragmentedStreams.Stream);
+      VAR ret : RegSet;
+   BEGIN
+      ASSERT (s # NIL); NEW(ret); set := ret;
+      (* AMD64: 16 total registers, StdRegs has 14 (all except rsp=4 and rbp=5),
+         register size is 8 bytes *)
+      Regs.InitSet (ret, 16, Gen.StdRegs, 8, alloc, Read, Write, Xchg, InitValue, MarkUsed);
+      ret.stream := s; ret.used := {};
+      ret.tmpptrs := NIL; NEW(ret.save);
+      FragmentedStreams.IncludeObject (s, ret.save, 0, 100);
+   END Create;
+
+   PROCEDURE IncludeRestoreBlock (set : Regs.RegSet);
+      VAR restore : RestoreBlock;
+   BEGIN
+      WITH set : RegSet DO
+	 NEW(restore);
+	 FragmentedStreams.IncludeObject (set.stream, restore, 0, 100);
+	 restore.next := set.restore; set.restore := restore;
+      END;
+   END IncludeRestoreBlock;
+
+   PROCEDURE Close (set : Regs.RegSet);
+      VAR i : INTEGER; op, opreg : Op.Operand;
+	  rbp, reg : Regs.Value; code : Gen.Code;
+	  instr : Gen.Instruction; ok : BOOLEAN;
+	  mode : Gen.OpcodeMode;
+	  saves, restores : FragmentedStreams.Stream;
+	  savelen, restorelen, dummy : Streams.Count;
+	  offset : LONGINT;
+   BEGIN
+      op := NIL;
+      WITH set : RegSet DO
+	 FragmentedStreams.Create (saves);
+	 FragmentedStreams.Create (restores);
+	 i := 0;
+	 WHILE i < MAX (SET) DO
+	    IF i IN set.used * Gen.StdRegs THEN
+	       offset := StackAlloc.AllocateClosed (set.alloc, 8);  (* 8-byte per reg *)
+	       Regs.UntracedValue (reg, i);
+	       Regs.UntracedValue (rbp, Gen.genbp);
+	       op := Op.MemOp1 (rbp, 8, offset, 0);
+	       opreg := Op.RegOp (reg, 8);
+	       Emit.Instr2 (saves, Pentium.MOV, op, opreg);
+	       Emit.Instr2 (restores, Pentium.MOV, opreg, op);
+	    END;
+	    INC(i);
+	 END;
+	 FragmentedStreams.Length (saves, savelen, dummy); ASSERT (dummy = savelen);
+	 FragmentedStreams.Length (restores, restorelen, dummy); ASSERT (dummy = restorelen);
+	 ok := Streams.Seek (saves, 0, Streams.fromStart); ASSERT (ok);
+	 FragmentedStreams.SetObjectSize (set.save, savelen);
+	 FragmentedStreams.FixObject (set.save);
+	 IF savelen # 0 THEN
+	    ok := Streams.Copy (saves, set.stream, savelen); ASSERT (ok);
+	 END;
+	 set.save := NIL;
+	 WHILE set.restore # NIL DO
+	    ok := Streams.Seek (restores, 0, Streams.fromStart); ASSERT (ok);
+	    FragmentedStreams.SetObjectSize (set.restore, restorelen);
+	    FragmentedStreams.FixObject (set.restore);
+	    IF restorelen # 0 THEN
+	       ok := Streams.Copy (restores, set.stream, restorelen); ASSERT (ok);
+	    END;
+	    set.restore := set.restore.next;
+	 END;
+	 ok := Streams.Seek (set.stream, 0, Streams.fromEnd); ASSERT (ok);
+      END;
+   END Close;
+
+   PROCEDURE GetTmpPtrs (set : Regs.RegSet) : TmpPtrs.Ptr;
+   BEGIN
+      WITH set : RegSet DO RETURN set.tmpptrs; END;
+   END GetTmpPtrs;
+
+END AMD64StdRegisters.

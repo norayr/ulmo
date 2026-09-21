@@ -31,7 +31,7 @@
 MODULE SysSegments;
 
    CONST
-      maxsegments = 32;
+      maxsegments = 128;
 
    TYPE
       Address = LONGINT;

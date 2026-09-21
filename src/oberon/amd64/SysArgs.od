@@ -1,0 +1,51 @@
+(* Ulm's Oberon Library
+   AMD64 variant: AuxParameterRec fields use SYS.ADDRESS (8-byte) to match
+   the AMD64 ELF auxiliary vector format (Elf64_auxv_t: two uint64_t fields).
+*)
+
+DEFINITION SysArgs;
+
+   IMPORT SYS := SYSTEM;
+
+   (* interface to UNIX command line arguments *)
+
+   CONST
+      kb = 1024;
+      large = 32 * kb;
+
+   TYPE
+      (* $P- $O- don't trace any pointers here *)
+      ArgumentA = ARRAY large OF CHAR;
+      Argument = POINTER TO ArgumentA;
+	 (* arguments may be accessed elementwise only;
+	    every argument is 0X-terminated
+	 *)
+      ArgumentsA = ARRAY large OF Argument;
+      Arguments = POINTER TO ArgumentsA;
+	 (* elementwise access only;
+	    array is NIL-terminated
+	 *)
+      AuxParameterRec =
+	 RECORD
+	    type: SYS.ADDRESS;   (* Elf64_auxv_t.a_type: uint64_t *)
+	    value: SYS.ADDRESS;  (* Elf64_auxv_t.a_val:  uint64_t *)
+	 END;
+      AuxiliaryParameters = POINTER TO ARRAY large OF AuxParameterRec;
+      (* $P= $O= *)
+
+   VAR
+      (* command line arguments; must not be modified; argv may be NIL *)
+      argc: INTEGER;		(* number of arguments *)
+      argv: Arguments;		(* argv^[0] .. argv^[argc-1] are valid *)
+
+      (* environ parameters; environ may be NIL;
+	 `environ' may be modified but not the original environment list
+      *)
+      envc: INTEGER;		(* number of environment parameters *)
+      environ: Arguments;	(* environ^[0] .. environ^[envc-1] are valid *)
+
+      (* additional parameters provided by the kernel *)
+      auxc: INTEGER;            (* number of auxiliary parameters *)
+      auxv: AuxiliaryParameters; (* auxv^[0] .. auxv^[auxc-1] are valid *)
+
+END SysArgs.

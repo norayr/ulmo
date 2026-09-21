@@ -1,0 +1,8 @@
+DEFINITION SysMemParams;
+
+   (* system-dependent parameters for SysStorage — AMD64 version *)
+
+   CONST
+      minAlignment = 8; (* 8-byte pointer alignment required on AMD64 *)
+
+END SysMemParams.

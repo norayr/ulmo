@@ -1,0 +1,76 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2004 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   $Id: AMD64OberonC.om,v 1.2 2005/04/11 10:21:41 ehrhardt Exp $
+   ----------------------------------------------------------------------------
+   $Log: AMD64OberonC.om,v $
+   Revision 1.2  2005/04/11 10:21:41  ehrhardt
+   Formatting fixes
+
+   Revision 1.1  2004/09/06 19:24:32  borchert
+   Initial revision (AMD64 adaptation)
+
+   ----------------------------------------------------------------------------
+*)
+
+MODULE AMD64OberonContexts; (* Christian Ehrhardt *)
+
+   IMPORT Conclusions, Disciplines, Emit := AMD64Emit, FragmentedStreams,
+      AMD64FPURegisters, Regs := CompilerRegisters, RelatedEvents,
+      Res := AMD64OberonResults, StackAlloc := CompilerStackAllocations,
+      Sym := OberonSymbols;
+
+   TYPE
+      TypeList = POINTER TO TypeListRec;
+      TypeListRec =
+	 RECORD
+	    (Disciplines.ObjectRec)
+	    next: TypeList;
+	    type: Sym.Type;
+	 END;
+
+      (* These parameters to almost all GenSomeThing procedures don't change
+         while we generate a single procedure. s, rodata, module, and
+         errors doesn't change for the whole module
+      *)
+      Context = POINTER TO ContextRec;
+      ContextRec =
+	 RECORD
+	    s: FragmentedStreams.Stream;
+	    rodata: Emit.StrTable;
+	    types: Emit.FixedData;
+	    typeblk: Res.Block;
+	    typelist, blklist: TypeList;
+	    module: Sym.Ident;
+	    errors: RelatedEvents.Object;
+	    stack: StackAlloc.Stack;
+	    regs: Regs.RegSet;
+	    fpuregs: AMD64FPURegisters.RegSet;
+	    ident: Sym.Ident;
+	    level: INTEGER;
+	    unique: LONGINT;
+	 END;
+
+   PROCEDURE Unique(proc : Context) : LONGINT;
+   BEGIN
+      INC(proc.unique);
+      RETURN proc.unique;
+   END Unique;
+
+END AMD64OberonContexts.

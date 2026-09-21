@@ -1,0 +1,120 @@
+(*  AMD64 Sys.om: generated from amd64/Sys.od *)
+MODULE Sys;
+
+   CONST
+
+      (* nisyscall        =     0; *)     statfs =  137;   
+      exit =   60;        fstatfs =  138;   
+      fork =   57;        ioperm =  172;   
+      read =    0;        socketcall =   41;   
+      write =    1;        syslog =  103;   
+      open =    2;        setitimer =   38;   
+      close =    3;        getitimer =   36;   
+      waitpid =   61;        newstat =    4;   
+      creat =   85;        newlstat =    6;   
+      link =   86;        newfstat =    5;   
+      unlink =   87;        uname =   63;   
+      execve =   59;        iopl =  172;   
+      chdir =   80;        vhangup =  153;   
+      time =  201;        idle =    0;   
+      mknod =  133;        vm86old =    0;   
+      chmod =   90;        wait4 =   61;   
+      lchown =   94;        swapoff =  168;   
+      (* nisyscall        =    17; *)     sysinfo =   99;   
+      stat =    4;        ipc =   30;   
+      lseek =    8;        fsync =   74;   
+      getpid =   39;        sigreturn =   15;   
+      mount =  165;        clone =   56;   
+      oldumount =  166;        setdomainname =  171;   
+      setuid =  105;        newuname =   63;   
+      getuid =  102;        modifyldt =    0;   
+      stime =    0;        adjtimex =  159;   
+      ptrace =  101;        mprotect =   10;   
+      alarm =   37;        sigprocmask =   14;   
+      fstat =    5;        createmodule =    0;   
+      pause =   34;        initmodule =  175;   
+      utime =  132;        deletemodule =    0;   
+      (* nisyscall        =    31; *)     getkernelsyms =    0;   
+      (* nisyscall        =    32; *)     quotactl =  179;   
+      access =   21;        getpgid =  121;   
+      nice =    0;        fchdir =   81;   
+      (* nisyscall        =    35; *)     bdflush =    0;   
+      sync =  162;        sysfs =    0;   
+      kill =   62;        personality =  135;   
+      rename =   82;        (* nisyscall        =   137; *)
+      mkdir =   83;        setfsuid =  122;   
+      rmdir =   84;        setfsgid =  123;   
+      dup =   32;        llseek =    8;   
+      pipe =   22;        getdents =   78;   
+      times =  100;        select =   23;   
+      (* nisyscall        =    44; *)     flock =   73;   
+      brk =   12;        msync =   26;   
+      setgid =  106;        readv =   19;   
+      getgid =  104;        writev =   20;   
+      signal =    0;        getsid =  124;   
+      geteuid =  107;        fdatasync =   75;   
+      getegid =  108;        sysctl =  156;   
+      acct =  163;        mlock =  149;   
+      umount =  166;        munlock =  150;   
+      (* nisyscall        =    53; *)     mlockall =  151;   
+      ioctl =   16;        munlockall =  152;   
+      fcntl =   72;        schedsetparam =  142;   
+      (* nisyscall        =    56; *)     schedgetparam =  143;   
+      setpgid =  109;        schedsetscheduler =  144;   
+      (* nisyscall        =    58; *)     schedgetscheduler =  145;   
+      olduname =   63;        schedyield =   24;   
+      umask =   95;        schedgetprioritymax =  146;   
+      chroot =  161;        schedgetprioritymin =  147;   
+      ustat =  136;        schedrrgetinterval =  148;   
+      dup2 =   33;        nanosleep =   35;   
+      getppid =  110;        mremap =   25;   
+      getpgrp =  111;        setresuid =  117;   
+      setsid =  112;        getresuid =  118;   
+      sigaction =   13;        vm86 =    0;   
+      sgetmask =    0;        querymodule =    0;   
+      ssetmask =    0;        poll =    7;   
+      setreuid =  113;        nfsservctl =  180;   
+      setregid =  114;        setresgid =  119;   
+      sigsuspend =  130;        getresgid =  120;   
+      sigpending =  127;        prctl =  157;   
+      sethostname =  170;        rtsigreturn =   15;   
+      setrlimit =  160;        rtsigaction =   13;   
+      getrlimit =   97;        rtsigprocmask =   14;   
+      getrusage =   98;        rtsigpending =  127;   
+      gettimeofday =   96;        rtsigtimedwait =  128;   
+      settimeofday =  164;        rtsigqueueinfo =  129;   
+      getgroups =  115;        rtsigsuspend =  130;   
+      setgroups =  116;        pread =   17;   
+      oldselect =   23;        pwrite =   18;   
+      symlink =   88;        chown =   92;   
+      lstat =    6;        getcwd =   79;   
+      readlink =   89;        capget =  125;   
+      uselib =    0;        capset =  126;   
+      swapon =  167;        sigaltstack =  131;   
+      reboot =  169;        sendfile =   40;   
+      oldreaddir =    0;        (* nisyscall        =   188; *)
+      oldmmap =    9;        (* nisyscall        =   189; *)
+      munmap =   11;        vfork =   58;   
+      truncate =   76;        (* nisyscall        =   191; *)
+      ftruncate =   77;        mmap2 =    9;   
+      fchmod =   91;        truncate64 =   76;   
+      fchown =   93;        ftruncate64 =   77;   
+      getpriority =  140;        stat64 =    4;   
+      setpriority =  141;        lstat64 =    6;   
+      (* nisyscall        =    98; *)     fstat64 =    5;   
+
+      ncalls = 198;
+
+      namelen =   20;
+
+
+   TYPE
+      Name = ARRAY namelen OF CHAR;
+
+
+   VAR
+      name: ARRAY ncalls OF Name;
+
+
+BEGIN
+END Sys.

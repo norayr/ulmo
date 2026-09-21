@@ -462,6 +462,7 @@ MODULE Events;
 	     >= priority:  the current priority remains unchanged
       *)
    BEGIN
+      IF psys = NIL THEN RETURN END; (* not yet initialized: safe no-op *)
       IF (psys.overflow = 0) & (psys.priotop < priotabsize) THEN
 	 psys.priotab[psys.priotop] := psys.currentPriority; INC(psys.priotop);
 	 IF psys.currentPriority < priority THEN
@@ -477,6 +478,7 @@ MODULE Events;
 	 of SetPriority or AssertPriority to be restored
       *)
    BEGIN
+      IF psys = NIL THEN RETURN END; (* not yet initialized: safe no-op *)
       IF psys.overflow > 0 THEN
 	 DEC(psys.overflow);
       ELSIF psys.priotop = 0 THEN

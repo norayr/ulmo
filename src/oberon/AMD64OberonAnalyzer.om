@@ -1,0 +1,546 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2004 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   AMD64 adaptation of I386OberonAnalyzer.om
+   ----------------------------------------------------------------------------
+*)
+
+MODULE AMD64OberonAnalyzer; (* adapted from I386OberonAnalyzer by Christian Ehrhardt *)
+
+   IMPORT CompilerObjects, Disciplines, FragmentedStreams,
+      Iterators, Ob32 := Oberon64i, Objects, RelatedEvents, Scopes,
+      Sym := OberonSymbols, Sym32 := Oberon64iSymbols;
+
+   VAR
+      vardid : Disciplines.Identifier;
+      dbdid  : Disciplines.Identifier;
+      labdid : Disciplines.Identifier;
+
+   TYPE
+      VarDisc = POINTER TO VarDiscRec;
+      VarDiscRec =
+	 RECORD
+	    (Disciplines.DisciplineRec)
+	    offset : Ob32.Size;
+	    scope : Scopes.Scope;
+	    (* Dynamic arrays only. This offset points into the local
+	       variable block. Not into the parameter block.
+	    *)
+	    sizesoffset : Ob32.Size;
+	    (* procedure parameters only *)
+            ident : Sym.Ident;
+	 END;
+
+   TYPE
+      DataBlockDisc = POINTER TO DataBlockDiscRec;
+      DataBlockDiscRec =
+	 RECORD
+	    (Disciplines.DisciplineRec)
+            size, align : Ob32.Size;
+	    resoffset : Ob32.Size;
+	 END;
+
+   TYPE
+      ProcedureDisc = POINTER TO ProcedureDiscRec;
+      ProcedureDiscRec = RECORD
+         (Disciplines.DisciplineRec)
+	 label : FragmentedStreams.Label;
+	 level : INTEGER;
+      END;
+
+
+   PROCEDURE SetVarInfo (obj : Disciplines.Object; off : Ob32.Size;
+			 scope : Scopes.Scope);
+      VAR
+	 vardisc : VarDisc;
+
+   BEGIN (* SetVarInfo *)
+      vardisc := NIL;
+      IF Disciplines.Seek(obj, vardid, vardisc) THEN
+      ELSE
+	 NEW(vardisc);
+	 vardisc.id := vardid;
+	 Disciplines.Add (obj, vardisc);
+      END;
+      vardisc.offset := off;
+      vardisc.scope := scope;
+   END SetVarInfo;
+
+   PROCEDURE SetParamInfo (obj : Disciplines.Object; ident : Sym.Ident;
+			   off : Ob32.Size);
+      VAR
+	 vardisc : VarDisc;
+	 ok : BOOLEAN;
+   BEGIN
+      vardisc := NIL;
+      ok := Disciplines.Seek(obj, vardid, vardisc); ASSERT(ok);
+      vardisc.sizesoffset := off;
+      vardisc.ident := ident;
+   END SetParamInfo;
+
+
+   PROCEDURE SetProcedureInfo (proc : Sym.Ident; level : INTEGER);
+      VAR
+	 disc : ProcedureDisc;
+   BEGIN
+      disc := NIL;
+      ASSERT((proc # NIL) & (proc.class = Sym.procedureC));
+      NEW(disc);
+      disc.id := labdid;
+      FragmentedStreams.CreateLabel (disc.label);
+      disc.level := level;
+      Disciplines.Add (proc, disc);
+   END SetProcedureInfo;
+
+   PROCEDURE SetDataBlock (object : Disciplines.Object; maxoffset, align, resoffset : Ob32.Size);
+      VAR
+	 dbdisc : DataBlockDisc;
+   BEGIN (* SetDataBlock *)
+      dbdisc := NIL;
+      IF Disciplines.Seek(object, dbdid, dbdisc) THEN
+      ELSE
+	 NEW (dbdisc);
+      END;
+      ASSERT((align >= 8) & (maxoffset MOD align = 0));
+      dbdisc.id := dbdid;
+      dbdisc.size := maxoffset;
+      dbdisc.align := align;
+      dbdisc.resoffset := resoffset;
+      Disciplines.Add (object, dbdisc);
+   END SetDataBlock;
+
+   PROCEDURE ^ ProcessType (module : Sym.Ident; type : Sym.Type;
+                            errors : RelatedEvents.Object);
+
+   PROCEDURE ProcessParamList (module : Sym.Ident; type : Sym.Type;
+                               errors : RelatedEvents.Object);
+      VAR
+	 offset, size, align, paramnext, paramoffset, paramalign, resoffset : Ob32.Size;
+	 param : Sym.ParamList;
+	 dim : INTEGER;
+	 ok : BOOLEAN;
+	 tmptype : Sym.Type;
+   BEGIN
+      param := NIL;
+      IF type = NIL THEN RETURN END;
+      paramnext := 0; paramoffset := 0; paramalign := 0;
+      (* No need to process restype. Only simple types are allowed. *)
+      IF type.restype # NIL THEN
+         align := Ob32.pointerAlign;
+	 Sym32.Allocate (Ob32.pointerSize, Ob32.pointerAlign,
+			 paramnext, paramoffset, Sym32.forwardDir,
+			 type.restype.loc, errors);
+	 IF align > paramalign THEN
+	    paramalign := align;
+	 END;
+	 resoffset := paramoffset;
+      END;
+      param := type.paramlist;
+      WHILE param # NIL DO
+	 IF param.type.ident = NIL THEN
+	    ProcessType (module, param.type, errors);
+	 END;
+	 CASE param.paramkind OF
+	    | Sym.refParam:
+	       ASSERT(Ob32.int32Align <= Ob32.pointerAlign);
+	       align := Ob32.pointerAlign;
+	       CASE param.type.form OF
+	       | Sym.array:
+		  (* A reference to the array data and the number of
+		   * elements in each dynamic dimension. *)
+		  dim := 0; tmptype := param.type;
+		  WHILE tmptype.dyn DO
+		     INC(dim);
+		     tmptype := tmptype.element;
+		  END;
+		  size := Ob32.pointerSize+dim*Ob32.int32Size;
+	       | Sym.pointer:
+		  (* The reference to the pointer itself and the
+		   * static type that the pointer was declared with. *)
+		  size := 2 * Ob32.pointerSize;
+	       | Sym.record:
+		  (* The reference to the record and the type of the
+		   * record. We can't use the normal type tags because
+		   * the record might be declared statically. *)
+		  size := 2 * Ob32.pointerSize;
+	       ELSE
+		  size := Ob32.pointerSize;
+	       END;
+	       Sym32.Allocate (size, align, paramnext, paramoffset,
+			       Sym32.forwardDir, param.loc, errors);
+	       offset := paramoffset;
+	       IF align > paramalign THEN
+		  paramalign := align;
+	       END;
+	    | Sym.valueParam:
+	       IF (param.type.form = Sym.array) THEN
+		  ASSERT(Ob32.int32Align <= Ob32.pointerAlign);
+		  dim := 0; tmptype := param.type;
+		  WHILE tmptype.dyn DO
+		     tmptype := tmptype.element;
+		     INC(dim);
+		  END;
+		  size := Ob32.pointerSize + dim*Ob32.int32Size;
+		  align := Ob32.pointerAlign;
+	       ELSE
+		  size := Sym32.GetSize (module, param.type, errors);
+		  align := Sym32.GetAlign (module, param.type, errors);
+	       END;
+	       Sym32.Allocate (size, align, paramnext, paramoffset,
+			       Sym32.forwardDir, param.loc, errors);
+	       offset := paramoffset;
+	       IF align > paramalign THEN
+		  paramalign := align;
+	       END;
+	 END;
+	 SetVarInfo (param, paramoffset, NIL);
+	 param := param.next;
+      END;
+      paramnext := ABS(paramnext);
+      IF paramalign < 8 THEN
+	 paramalign := 8;
+      END;
+      IF paramnext MOD paramalign # 0 THEN
+	 INC(paramnext, paramalign-paramnext MOD paramalign);
+      END;
+      SetDataBlock (type, paramnext, paramalign, resoffset);
+   END ProcessParamList;
+
+   PROCEDURE ProcessType (module : Sym.Ident; type : Sym.Type;
+                          errors : RelatedEvents.Object);
+      VAR
+	 field : Sym.FieldList;
+   BEGIN (* ProcessType *)
+      field := NIL;
+      IF type = NIL THEN RETURN END;
+      CASE type.form OF
+      | Sym.integer, Sym.cardinal, Sym.real, Sym.boolean, Sym.char, Sym.set, Sym.byte, Sym.address:
+	 RETURN;
+      | Sym.coroutine:
+	 RETURN;
+      | Sym.array:
+	 ASSERT(type.element # NIL);
+	 IF type.element.ident # NIL THEN
+	    RETURN;
+	 END;
+	 ProcessType (module, type.element, errors);
+      | Sym.record:
+	 field := type.fields;
+	 WHILE field # NIL DO
+	    IF (field.type # NIL) & (field.type.ident = NIL) THEN
+	       ProcessType (module, field.type, errors);
+	    END;
+	    field := field.next;
+	 END;
+      | Sym.pointer:
+	 ASSERT(type.reftype # NIL);
+	 IF type.reftype.ident # NIL THEN
+	    RETURN;
+	 END;
+	 ProcessType (module, type.reftype, errors);
+      | Sym.proceduretype:
+	 (* Builtin functions are done inline *)
+	 IF ~type.builtin THEN
+	    IF type.function & (type.restype.ident = NIL) THEN
+	       ProcessType (module, type.restype, errors);
+	    END;
+	    ProcessParamList (module, type, errors);
+	 END;
+      END;
+   END ProcessType;
+
+   PROCEDURE ProcessScope (module : Sym.Ident;
+                           scope, paramscope : Scopes.Scope;
+			   errors : RelatedEvents.Object);
+      VAR
+	 it : Iterators.Iterator;
+	 ident : Sym.Ident;
+	 dir : Sym32.Direction;
+	 lev, dim : INTEGER;
+	 size, align, offset : Ob32.Size;
+	 varnext, varoffset, varalign : Ob32.Size;
+	 type : Sym.Type;
+	 param : Sym.ParamList;
+	 ok : BOOLEAN;
+	 vdisc : VarDisc;
+	 at : Sym32.Attribute;
+
+   BEGIN (* Process Scope *)
+      it := NIL;
+      IF scope = NIL THEN RETURN END;
+      lev := Scopes.Level (scope);
+      IF lev = 2 THEN
+	 (* Outmost level, i.e. global Variables *)
+	 dir := Sym32.forwardDir
+      ELSIF lev > 2 THEN
+	 (* Inner level, i.e. local Variables on the stack *)
+	 dir := Sym32.backwardDir
+      END;
+      varnext := 0; varoffset := 0; varalign := 0;
+      Scopes.GetIterator (scope, it);
+      ASSERT(it # NIL);
+      WHILE Iterators.Get (it, ident) DO
+	 ASSERT(ident # NIL);
+	 type := ident.type;
+	 IF ident.class = Sym.constC THEN
+	    IF Sym32.CheckConst(module, ident.constexpr, errors) THEN
+	       CompilerObjects.GetAttachment(ident.constexpr, at);
+	       IF at = NIL THEN
+		  type := NIL;
+	       ELSE
+		  type := at.type;
+	       END;
+	    ELSE
+	       type := NIL;
+	       Sym32.SetTypeToNIL(module, ident.constexpr);
+	    END;
+	 ELSIF ident.class = Sym.varC THEN
+	    IF type.ident = NIL THEN
+	       (* If the type has a name ProcessScope will find the
+		* declaration and process it. *)
+	       ProcessType (module, type, errors);
+	    END;
+	    size := Sym32.GetSize (module, type, errors);
+	    align := Sym32.GetAlign (module, type, errors);
+	    CASE ident.varkind OF
+	    | Sym.noParam:
+	       Sym32.Allocate (size, align, varnext, varoffset, dir,
+			       ident.loc, errors);
+	       offset := varoffset;
+	       IF align > varalign THEN
+		  varalign := align;
+	       END;
+	       SetVarInfo (ident, offset, scope);
+	    | Sym.refParam, Sym.valueParam:
+	       (* Not very much. Offsets are allocated by ProcessParamList
+		* we just transfer them to the idents. *)
+	       ok := Scopes.Lookup (paramscope, ident.name, param);
+	       ASSERT(ok);
+	       ok := Disciplines.Seek(param, vardid, vdisc);
+	       ASSERT(ok);
+	       SetVarInfo (ident, vdisc.offset, scope);
+	       offset := 0FFFFFFFH;
+	       IF ident.type.form = Sym.array THEN
+		  (* If the parameter is a dynamic array we also allocate
+		   * the sizes array. *)
+		  dim := 0; type := ident.type;
+		  WHILE type.dyn DO
+		     INC(dim);
+		     type := type.element;
+		  END;
+		  IF dim > 0 THEN
+		     size := (dim+1) * Ob32.int32Size;
+		     align := Ob32.int32Align;
+		     Sym32.Allocate (size, align, varnext, varoffset, dir,
+				     ident.loc, errors);
+		     offset := varoffset;
+		     IF align > varalign THEN
+			varalign := align;
+		     END;
+		  END;
+	       END;
+	       SetParamInfo (param, ident, offset);
+	       SetParamInfo (ident, ident, offset);
+	    (* ELSE ASSERT(FALSE); *)
+	    END;
+	 ELSIF ident.class = Sym.procedureC THEN
+	    (* NOTE: The level of procedure is the scope level of its
+	     * local variables. But lev is the scope level of the
+	     * defining ident. Hence the +1 below *)
+	    SetProcedureInfo (ident, lev+1);
+	    (* NOTE: Do this before ProcessScope to make sure that
+	     * ProcessParamList already calculated offsets for parameters.
+	     *)
+	    IF type.ident = NIL THEN
+	       ProcessType (module, type, errors);
+	    END;
+	    ProcessScope(module, ident.scope, ident.type.paramscope, errors);
+	    IF ident.body # NIL THEN
+	       Sym32.Fold(module, ident.body, errors);
+	    END;
+	 ELSIF ident.class = Sym.typeC THEN
+	    ProcessType (module, type, errors);
+	 END;
+	 (* Ensure TypeDiscipline is attached for this ident's type *)
+      END;
+      it := NIL;
+      varnext := ABS(varnext);
+      IF varalign < 8 THEN
+	 varalign := 8;
+      END;
+      IF varnext MOD varalign # 0 THEN
+	 INC(varnext, varalign-varnext MOD varalign);
+      END;
+      SetDataBlock (scope, ABS(varnext), varalign, -1);
+   END ProcessScope;
+
+   PROCEDURE Process (module : Sym.Ident; errors : RelatedEvents.Object);
+
+   BEGIN (* Process *)
+      ProcessScope (module, module.scope, NIL, errors);
+      IF module.body # NIL THEN
+	 Sym32.Fold(module, module.body, errors);
+      END;
+   END Process;
+
+   PROCEDURE ProcedureLabel (proc : Sym.Ident) : FragmentedStreams.Label;
+      VAR
+         ok : BOOLEAN;
+	 disc : Disciplines.Discipline;
+   BEGIN
+      disc := NIL;
+      ASSERT(proc.class = Sym.procedureC);
+      ok := Disciplines.Seek(proc, labdid, disc); ASSERT(ok);
+      WITH disc: ProcedureDisc DO
+         RETURN disc.label;
+      END;
+   END ProcedureLabel;
+
+   PROCEDURE ProcedureLevel (proc : Sym.Ident) : INTEGER;
+      VAR
+         ok : BOOLEAN;
+	 disc : Disciplines.Discipline;
+   BEGIN
+      disc := NIL;
+      ASSERT(proc.class = Sym.procedureC);
+      ok := Disciplines.Seek(proc, labdid, disc); ASSERT(ok);
+      WITH disc: ProcedureDisc DO
+	 RETURN disc.level;
+      END;
+   END ProcedureLevel;
+
+   PROCEDURE VarOffset (obj : Disciplines.Object) : LONGINT;
+      VAR
+         ok : BOOLEAN;
+	 disc : Disciplines.Discipline;
+   BEGIN
+      disc := NIL;
+      ok := Disciplines.Seek(obj, vardid, disc); ASSERT(ok);
+      WITH disc: VarDisc DO
+         RETURN disc.offset;
+      END;
+   END VarOffset;
+
+   PROCEDURE SetVarOffset (obj : Disciplines.Object; offset : LONGINT);
+      VAR
+         ok : BOOLEAN;
+	 disc : Disciplines.Discipline;
+   BEGIN
+      disc := NIL;
+      ok := Disciplines.Seek(obj, vardid, disc); ASSERT(ok);
+      WITH disc: VarDisc DO
+         disc.offset := offset;
+      END;
+   END SetVarOffset;
+
+
+   PROCEDURE VarScope (obj : Disciplines.Object) : Scopes.Scope;
+      VAR
+         ok : BOOLEAN;
+	 disc : Disciplines.Discipline;
+   BEGIN
+      disc := NIL;
+      ok := Disciplines.Seek(obj, vardid, disc); ASSERT(ok);
+      WITH disc: VarDisc DO
+         RETURN disc.scope;
+      END;
+   END VarScope;
+
+   PROCEDURE SizesOffset (ident : Sym.Ident) : LONGINT;
+      VAR
+         ok : BOOLEAN;
+	 disc : Disciplines.Discipline;
+   BEGIN
+      disc := NIL;
+      ASSERT(ident.type.dyn);
+      ok := Disciplines.Seek(ident, vardid, disc); ASSERT(ok);
+      WITH disc: VarDisc DO
+         RETURN disc.sizesoffset;
+      END;
+   END SizesOffset;
+
+   PROCEDURE ParamIdent (param : Sym.ParamList) : Sym.Ident;
+      VAR
+         ok : BOOLEAN;
+	 disc : Disciplines.Discipline;
+   BEGIN
+      disc := NIL;
+      ok := Disciplines.Seek(param, vardid, disc); ASSERT(ok);
+      WITH disc: VarDisc DO
+         RETURN disc.ident;
+      END;
+   END ParamIdent;
+
+   PROCEDURE DataBlockSize (module : Sym.Ident; obj : Disciplines.Object;
+                            errors : RelatedEvents.Object) : LONGINT;
+      VAR
+         ok : BOOLEAN;
+	 disc : Disciplines.Discipline;
+   BEGIN
+      disc := NIL;
+      ok := Disciplines.Seek(obj, dbdid, disc);
+(* PARAM BEGIN DELETE *)
+      IF ~ok & (obj IS Sym.Type) & (module # NIL) THEN
+         WITH obj : Sym.Type DO
+            ProcessType (module, obj, errors);
+         END;
+         ok := Disciplines.Seek(obj, dbdid, disc);
+      END;
+(* PARAM END DELETE *)
+      ASSERT(ok);
+      IF ok THEN
+	 WITH disc: DataBlockDisc DO
+	    RETURN disc.size;
+	 END;
+      END;
+   END DataBlockSize;
+
+   PROCEDURE DataBlockAlign (obj : Disciplines.Object) : LONGINT;
+      VAR
+         ok : BOOLEAN;
+	 disc : Disciplines.Discipline;
+   BEGIN
+      disc := NIL;
+      ok := Disciplines.Seek(obj, dbdid, disc); ASSERT(ok);
+      WITH disc: DataBlockDisc DO
+         RETURN disc.align;
+      END;
+   END DataBlockAlign;
+
+   PROCEDURE ResOffset (obj : Disciplines.Object) : LONGINT;
+      VAR
+         ok : BOOLEAN;
+	 disc : Disciplines.Discipline;
+   BEGIN
+      disc := NIL;
+      ok := Disciplines.Seek(obj, dbdid, disc); ASSERT(ok);
+      WITH disc: DataBlockDisc DO
+         (* We don't store the result offset in an attachment, i.e. we
+          * wouldn't notice updates. Thus we always store the result at
+          * the very start of the parameter block. *)
+         ASSERT(disc.resoffset = 0);
+         RETURN disc.resoffset;
+      END;
+   END ResOffset;
+
+BEGIN
+   vardid := Disciplines.Unique ();
+   dbdid := Disciplines.Unique ();
+   labdid := Disciplines.Unique ();
+END AMD64OberonAnalyzer.

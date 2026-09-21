@@ -1,14 +1,15 @@
-BinDir :=		$(shell pwd)/../../../bin
+ARCH ?=			i386
+BinDir :=		$(shell pwd)/../../../$(ARCH)/bin
 InstallBinDir :=	$(BinDir)
-Targets :=		oblink oberon-i386.ld
+Targets :=		oblink oberon-$(ARCH).ld
 InstalledTargets :=	$(patsubst %,$(InstallBinDir)/%,$(Targets))
-Parameters :=		BINDIR=$(BinDir)
+Parameters :=		BINDIR=$(BinDir) ARCH=$(ARCH)
 
 .PHONY:			install
 install:		$(InstalledTargets)
 $(InstallBinDir)/oblink:	oblink.sh
 			../../../substparams $(Parameters) <$< >$@
 			chmod 755 $@
-$(InstallBinDir)/oberon-i386.ld:	oberon-i386.ld
+$(InstallBinDir)/oberon-$(ARCH).ld:	oberon-$(ARCH).ld
 			mkdir -p $(InstallBinDir)
 			cp $< $@

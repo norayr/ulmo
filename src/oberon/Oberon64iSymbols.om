@@ -1,0 +1,1588 @@
+(* PLEASE DO NOT EDIT:
+   Adapted from Oberon32iSymbols.om for 64-bit (Oberon64i) target
+*)
+
+(* Ulm's Oberon Library
+   Copyright (C) 1989-1998 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   $Id$
+   ----------------------------------------------------------------------------
+   $Log$
+   ----------------------------------------------------------------------------
+*)
+
+MODULE Oberon64iSymbols;
+
+   (* various architecture-dependent extensions of data types
+      of OberonSymbols
+      64-bit variant: uses Oberon64i for pointer/address sizes (8 bytes)
+   *)
+
+   IMPORT NetIO, IEEE754Double, BaseTypes := OberonBaseTypes,
+      CompilerErrors, CompilerObjects, Disciplines, IEEE, Lex := OberonLex,
+      Ob32 := Oberon64i, Oberon64iIntegers, Oberon8Chars, OberonTypes,
+      PersistentObjects, RelatedEvents, Services, Streams,
+      Sym := OberonSymbols, SYS := SYSTEM, Texts, Write;
+
+   TYPE
+      Integer = Ob32.Integer;
+      Real = Ob32.Real;
+      Set = Ob32.Set;
+      Char = Oberon8Chars.Value;
+      Size = Ob32.Size;
+
+   CONST
+      integerConst = 0;
+      realConst = 1;
+      setConst = 2;
+      charConst = 3;
+      booleanConst = 4;
+      stringConst = 5;
+      nilConst = 6;
+      noConst = 7; (* not a constant; carries just type information *)
+   TYPE
+      ConstantKind = SHORTINT; (* integerConst .. *)
+      Attribute = POINTER TO AttributeRec;
+      AttributeRec =
+	 RECORD
+	    (CompilerObjects.AttachmentRec)
+	       (* may be attached to OberonSymbols.Attribute *)
+	    type: Sym.Type;
+	    kind: ConstantKind;
+	    intval: Integer;
+	    realval: Real;
+	    setval: Set;
+	    charval: Char;
+	    boolval: BOOLEAN;
+	    stringval: Streams.Stream;
+	 END;
+   VAR
+      attributeType: Services.Type;
+
+   CONST
+      forwardDir = 0;
+      backwardDir = 1;
+   TYPE
+      Direction = SHORTINT;
+
+   TYPE
+      FoldBuiltInProc =
+	 PROCEDURE (
+	       builtinproc: Sym.BuiltInProcedure;
+	       module: Sym.Ident;
+	       args: Sym.Attribute;
+	       VAR result: Attribute;
+	       errors: RelatedEvents.Object
+	    ) : BOOLEAN;
+	 (* return TRUE if result is non-NIL *)
+
+   TYPE
+      BuiltInDiscipline = POINTER TO BuiltInDisciplineRec;
+      BuiltInDisciplineRec =
+	 RECORD
+	    (Disciplines.DisciplineRec)
+	    fold: FoldBuiltInProc;
+	 END;
+   VAR
+      bdid: Disciplines.Identifier;
+
+   TYPE
+      FieldDiscipline = POINTER TO FieldDisciplineRec;
+      FieldDisciplineRec =
+	 RECORD
+	    (CompilerObjects.AttachmentRec)
+	    offset: Size;
+	 END;
+   VAR
+      fdtype: Services.Type;
+
+   (* AMD64-specific field offset discipline: stored in Disciplines, not
+      CompilerObjects, so it doesn't conflict with the i386 pass's attachments *)
+   TYPE
+      AMD64FieldOff = POINTER TO AMD64FieldOffRec;
+      AMD64FieldOffRec =
+	 RECORD
+	    (Disciplines.DisciplineRec)
+	    offset: Size;
+	 END;
+   VAR
+      fldid: Disciplines.Identifier;
+
+   TYPE
+      TypeDiscipline = POINTER TO TypeDisciplineRec;
+      TypeDisciplineRec =
+	 RECORD
+	    (Disciplines.DisciplineRec)
+	    type: Sym.Type;
+	       (* usually the type we are attached to; but it may
+		  be more specific in case of constants
+	       *)
+	    size, align: Size;
+	    length: Size; (* for arrays *)
+	 END;
+   VAR
+      tdiscid: Disciplines.Identifier;
+
+   VAR
+      typeType: Services.Type; (* that of Sym.Type *)
+
+   TYPE
+      TemporaryTypeDiscipline = POINTER TO TemporaryTypeDisciplineRec;
+      TemporaryTypeDisciplineRec =
+	 RECORD
+	    (Disciplines.DisciplineRec)
+	    type: Sym.Type; (* back link *)
+	    next: TemporaryTypeDiscipline;
+	       (* list of marks belonging to a module *)
+	 END;
+   VAR
+      ttdiscid: Disciplines.Identifier;
+
+   TYPE
+      ModuleDiscipline = POINTER TO ModuleDisciplineRec;
+      ModuleDisciplineRec =
+	 RECORD
+	    (Disciplines.DisciplineRec)
+	    ttdiscs: TemporaryTypeDiscipline;
+	 END;
+   VAR
+      mdiscid: Disciplines.Identifier;
+
+   (* === forward declarations ============================================ *)
+
+   PROCEDURE ^ CheckConst(module: Sym.Ident; at: Sym.Attribute;
+                          errors: RelatedEvents.Object) : BOOLEAN;
+
+   PROCEDURE ^ Align(VAR size: Size; align: Size;
+		     loc: CompilerObjects.Location;
+                     errors: RelatedEvents.Object);
+
+   PROCEDURE ^ Allocate(size, align: Size;
+                        VAR next, offset: Size; dir: Direction;
+		        loc: CompilerObjects.Location;
+		        errors: RelatedEvents.Object);
+   PROCEDURE ^ AdaptType(module: Sym.Ident; type, like: Sym.Type);
+
+   PROCEDURE ^ SetTypeToNIL(module: Sym.Ident; at: Sym.Attribute);
+
+   PROCEDURE ^ GetSize(module: Sym.Ident; type: Sym.Type;
+                       errors: RelatedEvents.Object) : Size;
+
+   (* === PO if of Attribute ============================================== *)
+
+   PROCEDURE ReadText(s: Streams.Stream; VAR text: Streams.Stream) : BOOLEAN;
+      VAR
+	 defined: BOOLEAN;
+	 length: Streams.Count;
+   BEGIN
+      IF ~NetIO.ReadBoolean(s, defined) THEN RETURN FALSE END;
+      IF ~defined THEN text := NIL; RETURN TRUE END;
+      IF ~NetIO.ReadLongInt(s, length) THEN RETURN FALSE END;
+      Texts.Open(text);
+      RETURN Streams.Copy(s, text, length) &
+             Streams.Seek(text, 0, Streams.fromStart)
+   END ReadText;
+
+   PROCEDURE WriteText(s: Streams.Stream; text: Streams.Stream) : BOOLEAN;
+      VAR
+	 length: Streams.Count;
+   BEGIN
+      IF ~NetIO.WriteBoolean(s, text # NIL) THEN RETURN FALSE END;
+      IF text = NIL THEN RETURN TRUE END;
+      RETURN Streams.Seek(text, 0, Streams.fromEnd) &
+             Streams.Tell(text, length) &
+	     Streams.Seek(text, 0, Streams.fromStart) &
+	     NetIO.WriteLongInt(s, length) &
+	     Streams.Copy(text, s, length) &
+	     Streams.Seek(text, 0, Streams.fromStart)
+   END WriteText;
+
+   PROCEDURE InternalCreateAttribute(VAR object: PersistentObjects.Object);
+      VAR
+	 at: Attribute;
+   BEGIN
+      NEW(at); PersistentObjects.Init(at, attributeType);
+      at.intval := 0; at.realval := 0.0;
+      at.setval := {}; at.boolval := FALSE; at.stringval := NIL;
+      object := at;
+   END InternalCreateAttribute;
+
+   PROCEDURE ReadAttribute(s: Streams.Stream;
+                           object: PersistentObjects.Object) : BOOLEAN;
+      VAR hiWord: Integer;
+   BEGIN
+      WITH object: Attribute DO
+	 IF ~CompilerObjects.GuardedRead(s, typeType, object.type) OR
+	       ~NetIO.ReadShortInt(s, object.kind) THEN
+	    RETURN FALSE
+	 END;
+	 CASE object.kind OF
+	 | integerConst:   IF ~NetIO.ReadLongInt(s, object.intval) OR
+	                         ~NetIO.ReadLongInt(s, hiWord) THEN
+	                      RETURN FALSE
+	                   END;
+	                   object.setval := SYS.VAL(Set, hiWord);
+	                   RETURN TRUE
+	 | realConst:      RETURN NetIO.ReadReal(s, object.realval)
+	 | setConst:       RETURN NetIO.ReadSet(s, object.setval)
+	 | charConst:      RETURN NetIO.ReadChar(s, object.charval)
+	 | booleanConst:   RETURN NetIO.ReadBoolean(s, object.boolval)
+	 | stringConst:    RETURN ReadText(s, object.stringval)
+	 | nilConst:       RETURN TRUE
+	 | noConst:        RETURN TRUE
+	 ELSE
+	    RETURN FALSE (* invalid value of kind *)
+	 END;
+      END;
+   END ReadAttribute;
+
+   PROCEDURE WriteAttribute(s: Streams.Stream;
+                            object: PersistentObjects.Object) : BOOLEAN;
+      VAR hiWord: Integer;
+   BEGIN
+      WITH object: Attribute DO
+	 IF ~CompilerObjects.Write(s, object.type) OR
+	       ~NetIO.WriteShortInt(s, object.kind) THEN
+	    RETURN FALSE
+	 END;
+	 CASE object.kind OF
+	 | integerConst:   hiWord := SYS.VAL(Integer, object.setval);
+	                   RETURN NetIO.WriteLongInt(s, object.intval) &
+	                         NetIO.WriteLongInt(s, hiWord)
+	 | realConst:      RETURN NetIO.WriteReal(s, object.realval)
+	 | setConst:       RETURN NetIO.WriteSet(s, object.setval)
+	 | charConst:      RETURN NetIO.WriteChar(s, object.charval)
+	 | booleanConst:   RETURN NetIO.WriteBoolean(s, object.boolval)
+	 | stringConst:    RETURN WriteText(s, object.stringval)
+	 | nilConst:       RETURN TRUE
+	 | noConst:        RETURN TRUE
+	 END;
+      END;
+   END WriteAttribute;
+
+   (* === PO if of FieldDiscipline ======================================== *)
+
+   PROCEDURE CreateFieldDiscipline(VAR object: PersistentObjects.Object);
+      VAR
+	 fdisc: FieldDiscipline;
+   BEGIN
+      NEW(fdisc); PersistentObjects.Init(fdisc, fdtype);
+      fdisc.offset := 0;
+      object := fdisc;
+   END CreateFieldDiscipline;
+
+   PROCEDURE ReadFieldDiscipline(s: Streams.Stream;
+                                 object: PersistentObjects.Object) : BOOLEAN;
+   BEGIN
+      WITH object: FieldDiscipline DO
+	 RETURN NetIO.ReadLongInt(s, object.offset)
+      END;
+   END ReadFieldDiscipline;
+
+   PROCEDURE WriteFieldDiscipline(s: Streams.Stream;
+                                  object: PersistentObjects.Object) : BOOLEAN;
+   BEGIN
+      WITH object: FieldDiscipline DO
+	 RETURN NetIO.WriteLongInt(s, object.offset)
+      END;
+   END WriteFieldDiscipline;
+
+   (* === TypeDiscipline creation =========================================== *)
+
+   PROCEDURE NewTypeDiscipline(VAR tdisc: TypeDiscipline);
+   BEGIN
+      NEW(tdisc);
+      tdisc.id := tdiscid;
+      tdisc.size := 0; tdisc.align := 1; tdisc.length := 0;
+   END NewTypeDiscipline;
+
+   (* === recursive calculation of size and alignment ===================== *)
+
+   PROCEDURE Max(val1, val2: Size) : Size;
+   BEGIN
+      IF val1 > val2 THEN
+	 RETURN val1
+      ELSE
+	 RETURN val2
+      END;
+   END Max;
+
+   PROCEDURE RemoveTypeMarks(module: Sym.Ident);
+      VAR
+	 mdisc: ModuleDiscipline;
+	 ttdisc: TemporaryTypeDiscipline;
+   BEGIN
+      IF Disciplines.Seek(module, mdiscid, mdisc) THEN
+	 ttdisc := mdisc.ttdiscs;
+	 WHILE ttdisc # NIL DO
+	    Disciplines.Remove(ttdisc.type, ttdiscid);
+	    ttdisc := ttdisc.next;
+	 END;
+      END;
+   END RemoveTypeMarks;
+
+   PROCEDURE GetTypeDisc(module: Sym.Ident;
+                         type: Sym.Type; VAR tdisc: TypeDiscipline;
+                         errors: RelatedEvents.Object);
+      VAR
+	 size, align: Size;
+	 bitlength: INTEGER;
+	 reftypesize: Size;
+	    (* size of referenced type; this is unneeded in this
+	       context but to be calculated for later use
+	    *)
+	 paramlist: Sym.ParamList;
+
+      PROCEDURE Mark(type: Sym.Type);
+	 (* types are marked at the begin of GetTypeDisc to avoid
+	    recursive calls due to pointer types
+	 *)
+	 VAR
+	    ttdisc: TemporaryTypeDiscipline;
+	    mdisc: ModuleDiscipline;
+      BEGIN
+	 NEW(ttdisc);
+	 ttdisc.id := ttdiscid;
+	 ttdisc.type := type;
+	 IF ~Disciplines.Seek(module, mdiscid, mdisc) THEN
+	    NEW(mdisc); mdisc.id := mdiscid; mdisc.ttdiscs := NIL;
+	 END;
+	 ttdisc.next := mdisc.ttdiscs; mdisc.ttdiscs := ttdisc;
+	 Disciplines.Add(type, ttdisc);
+	 Disciplines.Add(module, mdisc);
+      END Mark;
+
+      PROCEDURE Marked(type: Sym.Type) : BOOLEAN;
+	 VAR
+	    ttdisc: TemporaryTypeDiscipline;
+      BEGIN
+	 RETURN Disciplines.Seek(type, ttdiscid, ttdisc)
+      END Marked;
+
+      PROCEDURE IndirectlyMarked(type: Sym.Type) : BOOLEAN;
+      BEGIN
+	 LOOP
+	    IF Marked(type) THEN RETURN TRUE END;
+	    IF type.form # Sym.record THEN RETURN FALSE END;
+	    type := type.basetype;
+	    IF type = NIL THEN RETURN FALSE END;
+	 END;
+      END IndirectlyMarked;
+
+      PROCEDURE MulOp(length: Integer; size: Size) : Size;
+	 VAR
+	    i, i1, i2: Size;
+	    prod: Size;
+
+	 PROCEDURE Error;
+	    VAR
+	       es: Streams.Stream;
+	 BEGIN
+	    CompilerErrors.Open(es);
+	    CompilerErrors.At1(es, type.loc);
+	    Write.StringS(es, "exceeds maximal size");
+	    CompilerErrors.Close(es, errors);
+	 END Error;
+
+      BEGIN (* MulOp *)
+	 ASSERT((length >= 0) & (size >= 0));
+	 i1 := length; i2 := size;
+	 IF i1 > i2 THEN
+	    i := i1; i1 := i2; i2 := i;
+	 END;
+
+	 prod := 0;
+	 WHILE i1 > 0 DO
+	    IF ODD(i1) THEN
+	       IF prod <= MAX(Size) - i2 THEN
+		  INC(prod, i2);
+	       ELSE
+		  Error; RETURN 0
+	       END;
+	    END;
+	    i1 := i1 DIV 2;
+	    IF i1 > 0 THEN
+	       IF i2 <= MAX(Size) DIV 2 THEN
+		  i2 := 2 * i2;
+	       ELSE
+		  Error; RETURN 0
+	       END;
+	    END;
+	 END;
+
+	 RETURN prod
+      END MulOp;
+
+      PROCEDURE GetSizeOfArray;
+	 VAR
+	    at: Sym.Attribute;
+	    atdisc: Attribute;
+	    tdiscOfElement: TypeDiscipline;
+	    length: Integer;
+      BEGIN
+	 ASSERT(~type.dyn);
+	 at := type.length;
+	 ASSERT((at.type = NIL) OR (at.type.form = Sym.integer));
+	 IF CheckConst(module, at, errors) THEN
+	    CompilerObjects.GetAttachment(at, atdisc);
+	    ASSERT(atdisc # NIL);
+	    ASSERT(atdisc.kind = integerConst);
+	    length := atdisc.intval;
+	 ELSE
+	    length := 1;
+	 END;
+	 GetTypeDisc(module, type.element, tdiscOfElement, errors);
+	 size := tdiscOfElement.size;
+	 Align(size, tdiscOfElement.align, type.loc, errors);
+	 size := MulOp(length, size);
+	 IF Ob32.arrayAlign > tdiscOfElement.align THEN
+	    Align(size, Ob32.arrayAlign, type.loc, errors);
+	 END;
+	 IF size > 0 THEN
+	    align := Max(Ob32.arrayAlign, tdiscOfElement.align);
+	 ELSE
+	    align := 1;
+	 END;
+      END GetSizeOfArray;
+
+      PROCEDURE GetSizeOfRecord;
+	 CONST
+	    tablen = Ob32.maxalign + 1;
+	 TYPE
+	    FieldList = POINTER TO FieldListRec;
+	    FieldListRec =
+	       RECORD
+		  field: Sym.FieldList;
+		  size: Size;
+		  next: FieldList;
+	       END;
+	 VAR
+	    tdiscOfBaseType: TypeDiscipline;
+	    tdiscOfField: TypeDiscipline;
+	    offset, startOffset, maxAlign: Size;
+	    field: Sym.FieldList;
+	    sorted: ARRAY tablen OF FieldList;
+	    alignIndex: Size;
+	    member: FieldList;
+
+	 PROCEDURE InitTab;
+	    VAR
+	       i: Size;
+	 BEGIN
+	    i := 0;
+	    WHILE i < tablen DO
+	       sorted[i] := NIL; INC(i);
+	    END;
+	 END InitTab;
+
+	 PROCEDURE Add;
+	    (* adds field to sorted using tdiscOfField *)
+	    VAR
+	       entry, tmp: FieldList;
+	       align: Size;
+	 BEGIN
+	    NEW(entry); entry.field := field;
+	    entry.size := tdiscOfField.size;
+	    entry.next := NIL;
+	    align := tdiscOfField.align;
+	    ASSERT(align < tablen);
+	    IF sorted[align] = NIL THEN
+	       sorted[align] := entry;
+	    ELSE
+	       tmp := sorted[align];
+	       WHILE tmp.next # NIL DO
+	          tmp := tmp.next;
+	       END;
+	       tmp.next := entry;
+	    END;
+	 END Add;
+
+	 PROCEDURE SetOffset(field: Sym.FieldList);
+	    VAR
+	       fodisc: AMD64FieldOff;
+	 BEGIN
+	    (* Store AMD64 field offset in Disciplines to avoid conflict with
+	       the i386 pass, which uses CompilerObjects.Attach for the same fields *)
+	    IF Disciplines.Seek(field, fldid, fodisc) THEN
+	       fodisc.offset := offset;
+	    ELSE
+	       NEW(fodisc); fodisc.id := fldid; fodisc.offset := offset;
+	       Disciplines.Add(field, fodisc);
+	    END;
+	 END SetOffset;
+
+      BEGIN (* GetSizeOfRecord *)
+	 IF type.basetype # NIL THEN
+	    GetTypeDisc(module, type.basetype, tdiscOfBaseType, errors);
+	    startOffset := tdiscOfBaseType.size;
+	    maxAlign := tdiscOfBaseType.align;
+	 ELSE
+	    startOffset := 0;
+	    maxAlign := Ob32.recordAlign;
+	 END;
+	 (* Process fields in DECLARATION ORDER to preserve compatibility.
+	    Sorting by alignment (as the i386 version does) is harmless there
+	    because all i386 fields share the same alignment.  On AMD64
+	    pointers are 8 bytes and integers 4 bytes, so sorting would
+	    reorder fields and break any code that relies on declaration order. *)
+	 field := type.fields;
+	 WHILE field # NIL DO
+	    GetTypeDisc(module, field.type, tdiscOfField, errors);
+	    IF tdiscOfField.align > maxAlign THEN
+	       maxAlign := tdiscOfField.align;
+	    END;
+	    Allocate(tdiscOfField.size, tdiscOfField.align,
+	             startOffset, offset, forwardDir,
+		     type.loc, errors);
+	    SetOffset(field);
+	    field := field.next;
+	 END;
+	 size := startOffset;
+	 Align(size, Ob32.recordAlign, type.loc, errors);
+	 IF size > 0 THEN
+	    align := Max(maxAlign, Ob32.recordAlign);
+	 ELSE
+	    align := 1;
+	 END;
+      END GetSizeOfRecord;
+
+      PROCEDURE NumberOfDynDimensions(type: Sym.Type) : INTEGER;
+      BEGIN
+	 IF (type = NIL) OR ~(type.form = Sym.array) OR ~type.dyn THEN
+	    RETURN 0
+	 END;
+	 RETURN 1 + NumberOfDynDimensions(type.element)
+      END NumberOfDynDimensions;
+
+   BEGIN (* GetTypeDisc *)
+      IF Disciplines.Seek(type, tdiscid, tdisc) THEN
+         RETURN
+      END;
+      ASSERT(~Marked(type));
+      Mark(type);
+      CASE type.form OF
+      | Sym.integer, Sym.cardinal:
+	    IF type.spec = Sym.generic THEN
+	       (* Generic integer constant: treat as LONGINT *)
+	       size := Ob32.int32Size; align := Ob32.int32Align;
+	    ELSE
+	    CASE type.spec OF
+	    | Sym.standard:
+		  CASE type.stdlength OF
+		  | Sym.short:   bitlength := Ob32.shortIntLen;
+		  | Sym.medium:  bitlength := Ob32.intLen;
+		  | Sym.long:    bitlength := Ob32.longIntLen;
+		  END;
+	    | Sym.explicit:
+		  bitlength := type.bits;
+	    END;
+	    CASE bitlength OF
+	    |  8: size := Ob32.int8Size; align := Ob32.int8Align;
+	    | 16: size := Ob32.int16Size; align := Ob32.int16Align;
+	    | 32: size := Ob32.int32Size; align := Ob32.int32Align;
+	    | 64: size := Ob32.int64Size; align := Ob32.int64Align;
+	    END;
+	    END; (* ELSE for generic check *)
+      | Sym.address:
+	    size := Ob32.addressSize;
+	    align := Ob32.addressAlign;
+      | Sym.real:
+	    ASSERT(type.spec # Sym.generic);
+	    CASE type.spec OF
+	    | Sym.standard:
+		  CASE type.stdlength OF
+		  | Sym.short:   bitlength := Ob32.shortRealLen;
+		  | Sym.medium:  bitlength := Ob32.realLen;
+		  | Sym.long:    bitlength := Ob32.longRealLen;
+		  END;
+	    | Sym.explicit:
+		  bitlength := type.bits;
+	    END;
+	    CASE bitlength OF
+	    |  32: size := Ob32.real32Size;
+		   align := Ob32.real32Align;
+	    |  64: size := Ob32.real64Size;
+		   align := Ob32.real64Align;
+	    |  96: size := Ob32.real96Size;
+		   align := Ob32.real96Align;
+	    | 128: size := Ob32.real128Size;
+		   align := Ob32.real128Align;
+	    END;
+      | Sym.boolean:
+	    size := Ob32.booleanSize;
+	    align := Ob32.booleanAlign;
+      | Sym.char:
+	    size := Ob32.charSize;
+	    align := Ob32.charAlign;
+      | Sym.set:
+	    size := Ob32.setSize;
+	    align := Ob32.setAlign;
+      | Sym.byte:
+	    size := Ob32.byteSize;
+	    align := Ob32.byteAlign;
+      | Sym.coroutine:
+	    size := Ob32.coroutineSize;
+	    align := Ob32.coroutineAlign;
+      | Sym.array:
+	    IF type.dyn THEN
+	       size := Ob32.addressSize;
+	       align := Ob32.addressAlign;
+	       size := size + NumberOfDynDimensions(type) *
+			      Ob32.longIntLen;
+		  (* add size of dope vector *)
+	    ELSE
+	       GetSizeOfArray;
+	    END;
+      | Sym.record:
+	    GetSizeOfRecord;
+      | Sym.pointer:
+	    size := Ob32.pointerSize;
+	    align := Ob32.pointerAlign;
+      | Sym.proceduretype:
+	    size := Ob32.proceduretypeSize;
+	    align := Ob32.proceduretypeAlign;
+      END;
+      NewTypeDiscipline(tdisc);
+      tdisc.type := type;
+      tdisc.size := size; tdisc.align := align;
+      Disciplines.Add(type, tdisc);
+      CASE type.form OF
+      | Sym.pointer:
+	    (* type.reftype may be NIL for NIL-type (builtin type) *)
+	    IF (type.reftype # NIL) & ~IndirectlyMarked(type.reftype) THEN
+	       (* reftypesize is to be calculated as this type might
+		  be left uncalculated otherwise
+	       *)
+	       reftypesize := GetSize(module, type.reftype, errors);
+	    END;
+      | Sym.proceduretype:
+	    IF ~type.builtin THEN
+	       paramlist := type.paramlist;
+	       WHILE paramlist # NIL DO
+		  IF ~IndirectlyMarked(paramlist.type) THEN
+		     reftypesize := GetSize(module, paramlist.type, errors);
+		  END;
+		  paramlist := paramlist.next;
+	       END;
+	       IF type.function & ~IndirectlyMarked(type.restype) THEN
+		  reftypesize := GetSize(module, type.restype, errors);
+	       END;
+	    END;
+      ELSE
+      END;
+   END GetTypeDisc;
+
+   PROCEDURE CreateAttribute(VAR at: Attribute);
+   BEGIN
+      InternalCreateAttribute(at);
+   END CreateAttribute;
+
+   PROCEDURE CreateCopyAttribute(VAR new: Attribute; orig: Attribute);
+   BEGIN
+      InternalCreateAttribute(new);
+      new.type := orig.type;
+      new.kind := orig.kind;
+      CASE orig.kind OF
+      | integerConst:   new.intval := orig.intval; new.setval := orig.setval;
+      | realConst:      new.realval := orig.realval;
+      | setConst:       new.setval := orig.setval;
+      | charConst:      new.charval := orig.charval;
+      | booleanConst:   new.boolval := orig.boolval;
+      | stringConst:    new.stringval := orig.stringval;
+      | nilConst:
+      | noConst:
+      END;
+   END CreateCopyAttribute;
+
+   PROCEDURE StringCompare(relop: Lex.Symbol;
+			   at1, at2: Attribute) : BOOLEAN;
+      VAR
+	 cmp: INTEGER;
+
+      PROCEDURE Compare() : INTEGER;
+	 VAR
+	    ch1, ch2: CHAR;
+	    ok1, ok2: BOOLEAN;
+	    index: INTEGER;
+
+	 PROCEDURE Next(at: Attribute; VAR ch: CHAR) : BOOLEAN;
+	 BEGIN
+	    CASE at.kind OF
+	    | stringConst:
+		  RETURN Streams.ReadByte(at.stringval, ch)
+	    | charConst:
+		  IF index = 0 THEN
+		     ch := at.charval; RETURN TRUE
+		  ELSE
+		     RETURN FALSE
+		  END;
+	    END;
+	 END Next;
+
+      BEGIN (* Compare *)
+	 index := 0;
+	 LOOP
+	    ok1 := Next(at1, ch1);
+	    ok2 := Next(at2, ch2);
+	    INC(index);
+	    IF ~ok1 OR ~ok2 THEN EXIT END;
+	    IF ch1 # ch2 THEN
+	       RETURN ORD(ch1) - ORD(ch2)
+	    END;
+	 END;
+	 IF ok1 THEN
+	    RETURN 1      (* at1 is longer than at2 *)
+	 ELSIF ok2 THEN
+	    RETURN -1     (* at2 is longer than at1 *)
+	 ELSE
+	    RETURN 0      (* at1 and at2 are identical *)
+	 END;
+      END Compare;
+
+   BEGIN (* StringCompare *)
+      IF at1.kind = stringConst THEN
+	 Streams.SetPos(at1.stringval, 0);
+      END;
+      IF at2.kind = stringConst THEN
+	 Streams.SetPos(at2.stringval, 0);
+      END;
+      cmp := Compare();
+      CASE relop OF
+      | Lex.lst:  RETURN cmp < 0
+      | Lex.leq:  RETURN cmp <= 0
+      | Lex.eql:  RETURN cmp = 0
+      | Lex.neq:  RETURN cmp # 0
+      | Lex.geq:  RETURN cmp >= 0
+      | Lex.grt:  RETURN cmp > 0
+      END;
+   END StringCompare;
+
+   (* === initialization ================================================== *)
+
+   PROCEDURE Init;
+
+      PROCEDURE Register(VAR type: Services.Type;
+                         name, basename: ARRAY OF CHAR;
+			 create: PersistentObjects.CreateProc;
+			 read: PersistentObjects.ReadProc;
+			 write: PersistentObjects.WriteProc);
+	 VAR
+	    persif: PersistentObjects.Interface;
+      BEGIN
+	 NEW(persif);
+	 persif.create := create; persif.read := read; persif.write := write;
+	 persif.createAndRead := NIL;
+	 PersistentObjects.RegisterType(type, name, basename, persif);
+      END Register;
+
+   BEGIN (* Init *)
+      Register(attributeType, "Oberon64iSymbols.Attribute",
+	 "CompilerObjects.Attachment", InternalCreateAttribute,
+	 ReadAttribute, WriteAttribute);
+      Register(fdtype, "Oberon64iSymbols.FieldDiscipline",
+	 "CompilerObjects.Attachment", CreateFieldDiscipline,
+	 ReadFieldDiscipline, WriteFieldDiscipline);
+      bdid := Disciplines.Unique();
+      fldid := Disciplines.Unique();
+      tdiscid := Disciplines.Unique();
+
+      Services.SeekType("OberonSymbols.Type", typeType);
+      ASSERT(typeType # NIL);
+
+      ttdiscid := Disciplines.Unique();
+      mdiscid := Disciplines.Unique();
+   END Init;
+
+   (* === exported procedures ============================================= *)
+
+   PROCEDURE InitBuiltInProc(builtinproc: Sym.BuiltInProcedure;
+                             fold: FoldBuiltInProc);
+      VAR
+	 bdisc: BuiltInDiscipline;
+   BEGIN
+      NEW(bdisc); bdisc.id := bdid; bdisc.fold := fold;
+      Disciplines.Add(builtinproc, bdisc);
+   END InitBuiltInProc;
+
+   PROCEDURE GetSize(module: Sym.Ident; type: Sym.Type;
+                     errors: RelatedEvents.Object) : Size;
+      VAR
+	 tdisc: TypeDiscipline;
+   BEGIN
+      IF (type # NIL) & (type.form IN Sym.specforms) & (type.spec = Sym.generic) THEN
+      END;
+      GetTypeDisc(module, type, tdisc, errors);
+      RETURN tdisc.size
+   END GetSize;
+
+   PROCEDURE ArithmeticType(module: Sym.Ident;
+                            type1, type2: Sym.Type;
+			    errors: RelatedEvents.Object) : Sym.Type;
+      VAR
+	 type: Sym.Type;
+	 size1, size2: Size;
+   BEGIN
+      IF (type1 = NIL) OR (type2 = NIL) THEN RETURN NIL END;
+      IF type1.form = Sym.address THEN
+	 type1 := BaseTypes.longint;
+      END;
+      IF type2.form = Sym.address THEN
+	 type2 := BaseTypes.longint;
+      END;
+      (* AMD64: generic integer constants (e.g. "1000") have spec=generic;
+         replace with longint so OberonTypes.ArithmeticType can resolve the
+         result type to a concrete standard type *)
+      IF (type1 # NIL) & (type1.form IN Sym.specforms) &
+	    (type1.spec = Sym.generic) THEN
+	 type1 := BaseTypes.longint;
+      END;
+      IF (type2 # NIL) & (type2.form IN Sym.specforms) &
+	    (type2.spec = Sym.generic) THEN
+	 type2 := BaseTypes.longint;
+      END;
+      type := OberonTypes.ArithmeticType(type1, type2);
+      IF (type = NIL) OR ~(type.form IN Sym.specforms) OR
+	    (type.spec # Sym.generic) THEN
+	 RETURN type
+      END;
+      ASSERT((type1.form IN Sym.specforms) & (type1.spec # Sym.generic));
+      ASSERT((type2.form IN Sym.specforms) & (type2.spec # Sym.generic));
+      ASSERT(type1.spec # type2.spec);
+      (* we have now a mixed specs that cannot be resolved by
+         OberonTypes.ArithmeticType without any knowledge about
+	 the relationsships between the standard types (INTEGER etc)
+	 and the size-oriented types (INT16 etc)
+      *)
+      size1 := GetSize(module, type1, errors);
+      size2 := GetSize(module, type2, errors);
+      IF size1 > size2 THEN
+	 RETURN type1
+      ELSIF size1 < size2 THEN
+	 RETURN type2
+      ELSIF type1.spec = Sym.standard THEN
+	 RETURN type1
+      ELSE
+	 RETURN type2
+      END;
+   END ArithmeticType;
+
+   PROCEDURE Fold(module: Sym.Ident;
+                  at: Sym.Attribute; errors: RelatedEvents.Object);
+
+      VAR
+	 atdisc, new: Attribute;
+
+      PROCEDURE ConvertConstant(const: Sym.Attribute);
+	 VAR
+	    atdisc: Attribute;
+	    token: Lex.Token;
+      BEGIN
+	 ASSERT(const.mode = Sym.constvalAt);
+	 CompilerObjects.GetAttachment(const, atdisc);
+	 IF atdisc # NIL THEN RETURN END;
+	 InternalCreateAttribute(atdisc);
+	 atdisc.type := const.type;
+	 IF const.constval = NIL THEN
+	    (* NIL pointer/procedure constant: constval is NIL *)
+	    atdisc.kind := nilConst;
+	    CompilerObjects.Attach(module, const, atdisc);
+	    RETURN
+	 END;
+	 CASE const.constval.kind OF
+	 | Sym.emptySetConst:
+	       atdisc.kind := setConst; atdisc.setval := {};
+	 | Sym.trueConst:
+	       atdisc.kind := booleanConst; atdisc.boolval := TRUE;
+	 | Sym.falseConst:
+	       atdisc.kind := booleanConst; atdisc.boolval := FALSE;
+	 | Sym.tokenConst:
+	       token := const.constval.token;
+	       CASE token.sy OF
+	       | Lex.intconst:
+		     atdisc.kind := integerConst;
+		     Streams.SetPos(token.text, 0);
+		     IF ~Oberon64iIntegers.ReadDec(token.text, atdisc.intval,
+		                                  const.loc, errors) THEN
+			atdisc.intval := 1;
+		     END;
+	       | Lex.hexconst:
+		     atdisc.kind := integerConst;
+		     Streams.SetPos(token.text, 0);
+		     IF ~Oberon64iIntegers.ReadHex(token.text, atdisc.intval,
+		                                  const.loc, errors) THEN
+			atdisc.intval := 1;
+		     END;
+	       | Lex.realconst,
+	         Lex.longrealconst:
+		     atdisc.kind := realConst;
+		     Streams.SetPos(token.text, 0);
+		     IF ~IEEE754Double.Read(token.text, atdisc.realval,
+		                                const.loc, errors) THEN
+			atdisc.realval := 1.0;
+		     END;
+		     CASE token.sy OF
+		     | Lex.realconst:     atdisc.type := BaseTypes.real;
+		     | Lex.longrealconst: atdisc.type := BaseTypes.longreal;
+		     END;
+	       | Lex.charconst:
+		     atdisc.kind := charConst;
+		     Streams.SetPos(token.text, 0);
+		     IF ~Oberon8Chars.Read(token.text, atdisc.charval,
+		                           const.loc, errors) THEN
+			atdisc.charval := 0X;
+		     END;
+	       | Lex.string:
+		     atdisc.kind := stringConst;
+		     atdisc.stringval := token.text;
+	       | Lex.nil:
+	             atdisc.kind := nilConst;
+	       END;
+	 END;
+	 CompilerObjects.Attach(module, const, atdisc);
+      END ConvertConstant;
+
+      PROCEDURE FoldProcedureCalls;
+	 VAR
+	    proc: Sym.Attribute;
+	    bdisc: BuiltInDiscipline;
+	    prev, oldparam, param: Sym.Attribute;
+	    atdisc: Attribute;
+      BEGIN
+	 (* fold all parameters *)
+	 param := at.firstparam; prev := NIL;
+	 WHILE param # NIL DO
+	    oldparam := param; Fold(module, param, errors);
+	    IF param # oldparam THEN
+	       param.next := oldparam.next;
+	       IF prev = NIL THEN
+		  at.firstparam := param;
+	       ELSE
+		  prev.next := param;
+	       END;
+	    END;
+	    prev := param; param := param.next;
+	 END;
+
+	 (* check for built-in procedures that support folding *)
+	 proc := at.proc;
+	 IF (proc.mode IN Sym.identModes) & proc.ident.type.builtin &
+	       Disciplines.Seek(proc.ident.type.builtinproc, bdid, bdisc) &
+	       bdisc.fold(proc.ident.type.builtinproc, module, at.firstparam,
+	                  atdisc, errors) THEN
+	    CompilerObjects.Attach(module, at, atdisc);
+	 END;
+      END FoldProcedureCalls;
+
+      PROCEDURE UnaryOp(at: Sym.Attribute);
+	 VAR
+	    atdisc, new: Attribute;
+	    loc: CompilerObjects.Location;
+	    es: Streams.Stream;
+	    opsy: Lex.Symbol;
+	    op: Sym.Attribute;
+      BEGIN
+	 ASSERT(at.mode = Sym.unaryAt);
+	 opsy := at.opsy; op := at.rightop;
+	 CompilerObjects.GetAttachment(op, atdisc);
+	 ASSERT((opsy = Lex.plus) OR (opsy = Lex.minus) OR (opsy = Lex.tilde));
+	 IF atdisc = NIL THEN RETURN END;
+	 IF opsy = Lex.plus THEN
+	    CreateCopyAttribute(new, atdisc);
+	 ELSE
+	    InternalCreateAttribute(new);
+	    new.type := atdisc.type;
+	    new.kind := atdisc.kind;
+	    CASE atdisc.kind OF
+	    | integerConst:
+		  ASSERT(opsy = Lex.minus);
+		  IF atdisc.intval = MIN(Integer) THEN
+		     CompilerObjects.CreateLocation(loc, op.loc.src,
+			at.loc.begin, op.loc.end);
+		     CompilerErrors.Open(es);
+		     CompilerErrors.At1(es, loc);
+		     Write.StringS(es,
+			"constant exceeds maximal integer value");
+		     CompilerErrors.Close(es, errors);
+		  ELSE
+		     new.intval := - atdisc.intval;
+		  END;
+	    | realConst:
+		  ASSERT(opsy = Lex.minus);
+		  new.realval := - atdisc.realval;
+	    | setConst:
+		  ASSERT(opsy = Lex.minus);
+		  new.setval := - atdisc.setval;
+	    | booleanConst:
+		  ASSERT(opsy = Lex.tilde);
+		  new.boolval := ~atdisc.boolval;
+	    | noConst:
+	    END;
+	 END;
+	 CompilerObjects.Attach(module, at, new);
+      END UnaryOp;
+
+      PROCEDURE BinaryOp(at: Sym.Attribute);
+	 VAR
+	    err: BOOLEAN;
+	    es: Streams.Stream;
+	    opsy: Lex.Symbol;
+	    op1, op2: Sym.Attribute;
+	    new, atdisc1, atdisc2: Attribute;
+	    type1, type2: Sym.Type;
+
+	 PROCEDURE IntegerCompare(relop: Lex.Symbol;
+	                          i1, i2: Integer) : BOOLEAN;
+	 BEGIN
+	    CASE relop OF
+	    | Lex.lst:  RETURN i1 < i2
+	    | Lex.leq:  RETURN i1 <= i2
+	    | Lex.eql:  RETURN i1 = i2
+	    | Lex.neq:  RETURN i1 # i2
+	    | Lex.geq:  RETURN i1 >= i2
+	    | Lex.grt:  RETURN i1 > i2
+	    END;
+	 END IntegerCompare;
+
+	 PROCEDURE IntegerArithmetic(op: Lex.Symbol; i1, i2: Integer) : Integer;
+
+	    PROCEDURE AddOp(i1, i2: Integer) : Integer;
+	    BEGIN
+	       err := (i1 >= 0) & (i2 > 0) & (MAX(Integer) - i1 < i2) OR
+		      (i1 < 0) & (i2 < 0) & (i1 < MIN(Integer) - i2);
+	       RETURN i1 + i2
+	    END AddOp;
+
+	    PROCEDURE SubOp(i1, i2: Integer) : Integer;
+	    BEGIN
+	       err := (i1 >= 0) & (i2 < 0) & (i2 < i1 - MAX(Integer)) OR
+		      (i1 < -1) & (i2 > 0) & (i1 < MIN(Integer) + i2);
+	       RETURN i1 - i2
+	    END SubOp;
+
+	    PROCEDURE MulOp(i1, i2: Integer) : Integer;
+	       VAR
+		  i: Integer;
+		  minus: BOOLEAN;
+		  prod, c1, c2: Integer;
+	    BEGIN
+	       IF i1 > i2 THEN
+		  i := i1; i1 := i2; i2 := i;
+	       END;
+	       IF (i1 = MIN(Integer)) & (i2 # 1) THEN
+		  err := TRUE; RETURN MIN(Integer)
+	       END;
+	       minus := (i1 < 0) # (i2 < 0);
+
+	       c1 := ABS(i1);
+	       IF i2 >= 0 THEN
+		  c2 := - i2;
+	       ELSE
+		  c2 := i2;
+	       END;
+	       prod := 0;
+	       WHILE (c1 > 0) & ~err DO
+		  IF ODD(c1) THEN
+		     IF prod >= MIN(Integer) - c2 THEN
+			INC(prod, c2);
+		     ELSE
+			err := TRUE;
+		     END;
+		  END;
+		  c1 := c1 DIV 2;
+		  IF c1 > 0 THEN
+		     IF c2 >= MIN(Integer) DIV 2 THEN
+			c2 := 2 * c2;
+		     ELSE
+			err := TRUE;
+		     END;
+		  END;
+	       END;
+
+	       IF minus THEN
+		  RETURN prod
+	       ELSE
+		  IF prod = MIN(Integer) THEN
+		     err := TRUE;
+		     RETURN MAX(Integer)
+		  ELSE
+		     RETURN - prod
+		  END;
+	       END;
+	    END MulOp;
+
+	 BEGIN (* IntegerArithmetic *)
+	    err := FALSE;
+	    CASE op OF
+	    | Lex.plus:   RETURN AddOp(i1, i2)
+	    | Lex.minus:  RETURN SubOp(i1, i2)
+	    | Lex.times:  RETURN MulOp(i1, i2)
+	    | Lex.div:
+		  IF i2 = 0 THEN
+		     err := TRUE; RETURN 0
+		  END;
+		  RETURN i1 DIV i2
+	    | Lex.mod:
+		  IF i2 = 0 THEN
+		     err := TRUE; RETURN 0
+		  END;
+		  RETURN i1 MOD i2
+	    END;
+	 END IntegerArithmetic;
+
+      BEGIN (* BinaryOp *)
+	 ASSERT(at.mode = Sym.binaryAt);
+	 opsy := at.opsy; op1 := at.leftop; op2 := at.rightop;
+	 IF op2 = NIL THEN RETURN END;
+	 IF op1 = NIL THEN
+	    (* Singleton or forwarded set constructor: {op2} or binaryAt(comma,NIL,multi) *)
+	    IF opsy = Lex.comma THEN
+	       CompilerObjects.GetAttachment(op2, atdisc2);
+	       IF atdisc2 = NIL THEN RETURN END;
+	       IF atdisc2.kind = integerConst THEN
+		  InternalCreateAttribute(new);
+		  new.type := BaseTypes.set;
+		  new.kind := setConst;
+		  new.setval := {atdisc2.intval};
+		  CompilerObjects.Attach(module, at, new);
+	       ELSIF atdisc2.kind = setConst THEN
+		  (* op2 is already a multi-element set that has been folded *)
+		  InternalCreateAttribute(new);
+		  new.type := BaseTypes.set;
+		  new.kind := setConst;
+		  new.setval := atdisc2.setval;
+		  CompilerObjects.Attach(module, at, new);
+	       END;
+	    END;
+	    RETURN
+	 END;
+	 type1 := NIL; type2 := NIL;
+	 CompilerObjects.GetAttachment(op1, atdisc1);
+	 CompilerObjects.GetAttachment(op2, atdisc2);
+	 (* get type from attachment or from the node's declared type *)
+	 IF atdisc1 # NIL THEN type1 := atdisc1.type ELSE type1 := op1.type END;
+	 IF atdisc2 # NIL THEN type2 := atdisc2.type ELSE type2 := op2.type END;
+	 IF (atdisc1 = NIL) OR (atdisc2 = NIL) THEN
+	    (* unable to fold; if result type is generic, resolve it to allow
+	       downstream code gen to determine operand sizes correctly *)
+	    IF (at.type # NIL) & (at.type.form IN Sym.specforms) &
+		  (at.type.spec = Sym.generic) THEN
+	       InternalCreateAttribute(new);
+	       new.type := ArithmeticType(module, type1, type2, errors);
+	       new.kind := noConst;
+	       CompilerObjects.Attach(module, at, new);
+	    END;
+	    RETURN
+	 END;
+	 InternalCreateAttribute(new);
+	 err := FALSE;
+	 type1 := atdisc1.type; type2 := atdisc2.type;
+	 IF (type1 = NIL) OR (type2 = NIL) THEN RETURN END;
+	 new.type := ArithmeticType(module, type1, type2, errors);
+	 CASE opsy OF
+	 | Lex.plus, Lex.minus, Lex.times, Lex.div, Lex.mod:
+	       IF (atdisc1.kind = integerConst) &
+		     (atdisc2.kind = integerConst) THEN
+		  new.kind := integerConst;
+		  new.intval := IntegerArithmetic(opsy,
+		     atdisc1.intval, atdisc2.intval);
+	       ELSIF (atdisc1.kind = realConst) &
+		     (atdisc2.kind = realConst) THEN
+		  new.kind := realConst;
+		  CASE opsy OF
+		  | Lex.plus:  new.realval := atdisc1.realval + atdisc2.realval
+		  | Lex.minus: new.realval := atdisc1.realval - atdisc2.realval
+		  | Lex.times: new.realval := atdisc1.realval * atdisc2.realval
+		  | Lex.div:
+			IF atdisc2.realval = 0.0 THEN
+			   err := TRUE
+			ELSE
+			   new.realval := atdisc1.realval / atdisc2.realval
+			END;
+		  | Lex.mod:
+			err := TRUE;
+		  END;
+	       ELSIF (atdisc1.kind = setConst) &
+		     (atdisc2.kind = setConst) THEN
+		  new.kind := setConst;
+		  CASE opsy OF
+		  | Lex.plus:  new.setval := atdisc1.setval + atdisc2.setval
+		  | Lex.minus: new.setval := atdisc1.setval - atdisc2.setval
+		  | Lex.times: new.setval := atdisc1.setval * atdisc2.setval
+		  | Lex.div:   new.setval := atdisc1.setval / atdisc2.setval
+		  | Lex.mod:   err := TRUE;
+		  END;
+	       ELSE
+		  RETURN (* type error handled elsewhere *)
+	       END;
+	 | Lex.eql, Lex.neq, Lex.lst, Lex.leq, Lex.grt, Lex.geq:
+	       new.type := BaseTypes.boolean;
+	       IF (atdisc1.kind = integerConst) &
+		     (atdisc2.kind = integerConst) THEN
+		  new.kind := booleanConst;
+		  new.boolval := IntegerCompare(opsy,
+		     atdisc1.intval, atdisc2.intval);
+	       ELSIF (atdisc1.kind = realConst) &
+		     (atdisc2.kind = realConst) THEN
+		  new.kind := booleanConst;
+		  CASE opsy OF
+		  | Lex.eql: new.boolval := atdisc1.realval = atdisc2.realval
+		  | Lex.neq: new.boolval := atdisc1.realval # atdisc2.realval
+		  | Lex.lst: new.boolval := atdisc1.realval < atdisc2.realval
+		  | Lex.leq: new.boolval := atdisc1.realval <= atdisc2.realval
+		  | Lex.grt: new.boolval := atdisc1.realval > atdisc2.realval
+		  | Lex.geq: new.boolval := atdisc1.realval >= atdisc2.realval
+		  END;
+	       ELSIF (atdisc1.kind IN {stringConst, charConst}) &
+		     (atdisc2.kind IN {stringConst, charConst}) THEN
+		  new.kind := booleanConst;
+		  new.boolval := StringCompare(opsy, atdisc1, atdisc2);
+	       ELSIF (atdisc1.kind = booleanConst) &
+		     (atdisc2.kind = booleanConst) THEN
+		  new.kind := booleanConst;
+		  CASE opsy OF
+		  | Lex.eql: new.boolval := atdisc1.boolval = atdisc2.boolval
+		  | Lex.neq: new.boolval := atdisc1.boolval # atdisc2.boolval
+		  ELSE
+		     RETURN (* type error handled elsewhere *)
+		  END;
+	       ELSIF (atdisc1.kind = setConst) &
+		     (atdisc2.kind = setConst) THEN
+		  new.kind := booleanConst;
+		  CASE opsy OF
+		  | Lex.eql: new.boolval := atdisc1.setval = atdisc2.setval
+		  | Lex.neq: new.boolval := atdisc1.setval # atdisc2.setval
+		  ELSE
+		     RETURN (* sets don't support ordering comparisons *)
+		  END;
+	       ELSE
+		  RETURN (* non-constant or unsupported *)
+	       END;
+	 | Lex.ampersand:
+	       IF (atdisc1.kind = booleanConst) &
+		     (atdisc2.kind = booleanConst) THEN
+		  new.kind := booleanConst;
+		  new.boolval := atdisc1.boolval & atdisc2.boolval;
+	       ELSE
+		  RETURN
+	       END;
+	 | Lex.or:
+	       IF (atdisc1.kind = booleanConst) &
+		     (atdisc2.kind = booleanConst) THEN
+		  new.kind := booleanConst;
+		  new.boolval := atdisc1.boolval OR atdisc2.boolval;
+	       ELSE
+		  RETURN
+	       END;
+	 | Lex.comma, Lex.range:
+	       new.type := BaseTypes.set;
+	       IF (atdisc1.kind = integerConst) & (atdisc2.kind = integerConst) THEN
+		  new.kind := setConst;
+		  IF opsy = Lex.range THEN
+		     new.setval := {atdisc1.intval .. atdisc2.intval};
+		  ELSE
+		     new.setval := {atdisc1.intval, atdisc2.intval};
+		  END;
+	       ELSIF (atdisc1.kind = integerConst) & (atdisc2.kind = setConst) THEN
+		  ASSERT(opsy = Lex.comma);
+		  new.kind := setConst;
+		  new.setval := {atdisc1.intval} + atdisc2.setval;
+	       ELSIF (atdisc1.kind = setConst) & (atdisc2.kind = integerConst) THEN
+		  ASSERT(opsy = Lex.comma);
+		  new.kind := setConst;
+		  new.setval := atdisc1.setval + {atdisc2.intval};
+	       ELSIF (atdisc1.kind = setConst) & (atdisc2.kind = setConst) THEN
+		  ASSERT(opsy = Lex.comma);
+		  new.kind := setConst;
+		  new.setval := atdisc1.setval + atdisc2.setval;
+	       ELSE
+		  RETURN
+	       END;
+	 | Lex.in:
+	       new.type := BaseTypes.boolean;
+	       IF (atdisc1.kind = integerConst) & (atdisc2.kind = setConst) THEN
+		  new.kind := booleanConst;
+		  new.boolval := atdisc1.intval IN atdisc2.setval;
+	       ELSE
+		  RETURN
+	       END;
+	 ELSE
+	    RETURN
+	 END;
+	 IF err THEN RETURN END;
+	 CompilerObjects.Attach(module, at, new);
+      END BinaryOp;
+
+      PROCEDURE FixType(at: Sym.Attribute);
+	 (* convert a generic type into the correct type in
+	    dependence of the constant value
+	 *)
+	 CONST
+	    max8 = 127; min8 = - max8 - 1;
+	    max16 = 32767; min16 = - max16 - 1;
+	    max32 = 2147483647; min32 = - max32 - 1;
+	 VAR
+	    atdisc: Attribute;
+
+	 PROCEDURE Fits(val: Ob32.Integer; nofbytes: INTEGER) : BOOLEAN;
+	 BEGIN
+	    CASE nofbytes OF
+	    | 1:  RETURN (val >= min8) & (val <= max8)
+	    | 2:  RETURN (val >= min16) & (val <= max16)
+	    | 4:  RETURN (val >= min32) & (val <= max32)
+	    ELSE
+	       ASSERT(nofbytes > 4);
+	       RETURN TRUE
+	    END;
+	 END Fits;
+
+      BEGIN (* FixType *)
+	 IF at.type = NIL THEN RETURN END;
+	 IF ~(at.type.form IN Sym.specforms) THEN RETURN END;
+	 CompilerObjects.GetAttachment(at, atdisc);
+	 IF atdisc = NIL THEN
+	    RETURN (* node not folded (e.g. BinaryOp returned early); no type to fix *)
+	 END;
+	 IF atdisc.type = NIL THEN RETURN END;
+	 IF atdisc.type.spec # Sym.generic THEN RETURN END;
+	 IF atdisc.kind = noConst THEN
+	    ASSERT((atdisc.type = NIL) OR
+	       ~(atdisc.type.form IN Sym.specforms) OR
+	       (atdisc.type.spec # Sym.generic));
+	    RETURN
+	 END;
+	 ASSERT(atdisc.kind = integerConst);
+	 IF Fits(atdisc.intval, Ob32.int8Size) THEN
+	    atdisc.type := BaseTypes.int8;
+	 ELSIF Fits(atdisc.intval, Ob32.int16Size) THEN
+	    atdisc.type := BaseTypes.int16;
+	 ELSIF Fits(atdisc.intval, Ob32.int32Size) THEN
+	    atdisc.type := BaseTypes.int32;
+	 ELSE
+	    ASSERT(Fits(atdisc.intval, Ob32.int64Size));
+	    atdisc.type := BaseTypes.int64;
+	 END;
+      END FixType;
+
+      PROCEDURE CaseLabels(at: Sym.Attribute);
+
+	 PROCEDURE Const(at: Sym.Attribute);
+	    VAR ok: BOOLEAN;
+	 BEGIN
+	    ok := CheckConst(module, at, errors);
+	 END Const;
+
+      BEGIN (* CaseLabels *)
+	 IF at = NIL THEN RETURN END;
+	 ASSERT(at.mode IN Sym.opModes);
+	 IF at.mode = Sym.binaryAt THEN
+	    CASE at.opsy OF
+	    | Lex.comma:
+		  CaseLabels(at.leftop); CaseLabels(at.rightop);
+	    | Lex.range:
+		  Const(at.leftop); Const(at.rightop);
+	    ELSE
+	       Const(at);
+	    END;
+	 ELSE
+	    Const(at);
+	 END;
+      END CaseLabels;
+
+   BEGIN (* Fold *)
+      IF at = NIL THEN RETURN END;
+      (* Skip pure type nodes *)
+      IF at.mode = Sym.typeAt THEN RETURN END;
+      (* Skip already-folded nodes (attachment already set) *)
+      CompilerObjects.GetAttachment(at, atdisc);
+      IF atdisc # NIL THEN
+         RETURN
+      END;
+      (* For statements: traverse the chain of next statements
+         and recurse into loop/case bodies *)
+      IF at.mode IN Sym.stmtModes THEN
+	 Fold(module, at.next, errors);
+	 IF at.mode IN {Sym.whileAt, Sym.repeatAt, Sym.loopAt,
+	                Sym.singleCaseAt, Sym.withAt} THEN
+	    Fold(module, at.body, errors);
+	 END;
+      END;
+      CASE at.mode OF
+      | Sym.constvalAt:
+	    ConvertConstant(at); FixType(at);
+      | Sym.constAt:
+	    IF CheckConst(module, at.ident.constexpr, errors) THEN
+	       CompilerObjects.GetAttachment(at.ident.constexpr, atdisc);
+	       IF atdisc # NIL THEN
+		  CreateCopyAttribute(new, atdisc);
+		  CompilerObjects.Attach(module, at, new);
+	       END;
+	    END;
+      | Sym.callAt:
+	    FoldProcedureCalls;
+      | Sym.refAt, Sym.selectAt, Sym.indexAt, Sym.guardAt:
+	    Fold(module, at.designator, errors);
+	    IF at.mode = Sym.indexAt THEN
+	       Fold(module, at.index, errors);
+	    END;
+      | Sym.unaryAt:
+	    Fold(module, at.rightop, errors);
+	    UnaryOp(at); FixType(at);
+      | Sym.binaryAt:
+	    Fold(module, at.leftop, errors);
+	    Fold(module, at.rightop, errors);
+	    BinaryOp(at); FixType(at);
+      | Sym.ifAt, Sym.caseAt, Sym.whileAt, Sym.repeatAt, Sym.returnAt:
+	    Fold(module, at.expression, errors);
+	    CASE at.mode OF
+	    | Sym.ifAt:
+		  Fold(module, at.then, errors);
+		  Fold(module, at.elsifs, errors);
+		  Fold(module, at.else, errors);
+	    | Sym.caseAt:
+		  Fold(module, at.cases, errors);
+		  Fold(module, at.else, errors);
+	    ELSE
+	    END;
+      | Sym.singleCaseAt:
+	    CaseLabels(at.labels);
+      ELSE
+      END;
+   END Fold;
+
+   PROCEDURE CheckConst(module: Sym.Ident; at: Sym.Attribute;
+                        errors: RelatedEvents.Object) : BOOLEAN;
+      VAR
+	 atdisc: Attribute;
+   BEGIN
+      Fold(module, at, errors);
+      CompilerObjects.GetAttachment(at, atdisc);
+      RETURN atdisc # NIL
+   END CheckConst;
+
+   PROCEDURE GetType(at: Sym.Attribute; VAR type: Sym.Type);
+      VAR
+	 atdisc: Attribute;
+   BEGIN
+      CompilerObjects.GetAttachment(at, atdisc);
+      IF atdisc # NIL THEN
+	 type := atdisc.type;
+      ELSE
+	 type := at.type;
+      END;
+   END GetType;
+
+   PROCEDURE AdaptType(module: Sym.Ident; type, like: Sym.Type);
+   BEGIN
+      (* copy architecture-specific type information;
+	 for 64-bit this is a no-op at the symbols level
+      *)
+   END AdaptType;
+
+   PROCEDURE SetTypeToNIL(module: Sym.Ident; at: Sym.Attribute);
+      VAR
+	 atdisc: Attribute;
+   BEGIN
+      InternalCreateAttribute(atdisc);
+      atdisc.kind := nilConst;
+      atdisc.type := at.type;
+      CompilerObjects.Attach(module, at, atdisc);
+   END SetTypeToNIL;
+
+   PROCEDURE CompareConstants(cval1, cval2: Attribute) : BOOLEAN;
+   BEGIN
+      IF (cval1.kind IN {charConst, stringConst}) &
+	    (cval2.kind IN {charConst, stringConst}) THEN
+	 RETURN StringCompare(Lex.eql, cval1, cval2)
+      ELSE
+	 IF cval1.kind # cval2.kind THEN RETURN FALSE END;
+	 CASE cval1.kind OF
+	 | integerConst:  RETURN cval1.intval = cval2.intval
+	 | realConst:     RETURN cval1.realval = cval2.realval
+	 | setConst:      RETURN cval1.setval = cval2.setval
+	 | booleanConst:  RETURN cval1.boolval = cval2.boolval
+	 | nilConst:      RETURN TRUE
+	 | noConst:       RETURN FALSE
+	 END;
+      END;
+   END CompareConstants;
+
+   PROCEDURE Align(VAR size: Size; align: Size;
+		   loc: CompilerObjects.Location;
+                   errors: RelatedEvents.Object);
+   BEGIN
+      IF (align > 1) & (size MOD align # 0) THEN
+	 INC(size, align - size MOD align);
+      END;
+   END Align;
+
+   PROCEDURE Allocate(size, align: Size;
+                      VAR next, offset: Size; dir: Direction;
+		      loc: CompilerObjects.Location;
+		      errors: RelatedEvents.Object);
+   BEGIN
+      IF dir = forwardDir THEN
+	 Align(next, align, loc, errors);
+	 offset := next;
+	 INC(next, size);
+      ELSE (* backwardDir *)
+	 INC(next, size);
+	 Align(next, align, loc, errors);
+	 offset := -next;
+      END;
+   END Allocate;
+
+   PROCEDURE GetAlign(module: Sym.Ident; type: Sym.Type;
+                      errors: RelatedEvents.Object) : Size;
+      VAR
+	 tdisc: TypeDiscipline;
+   BEGIN
+      GetTypeDisc(module, type, tdisc, errors);
+      RETURN tdisc.align
+   END GetAlign;
+
+   PROCEDURE PatchSize(module: Sym.Ident; type: Sym.Type; size: Size);
+      VAR
+	 tdisc: TypeDiscipline;
+   BEGIN
+      IF Disciplines.Seek(type, tdiscid, tdisc) THEN
+	 tdisc.size := size;
+      END;
+   END PatchSize;
+
+   PROCEDURE GetOffset(module: Sym.Ident; field: Sym.FieldList) : Size;
+      VAR
+	 fodisc: AMD64FieldOff;
+   BEGIN
+      ASSERT(Disciplines.Seek(field, fldid, fodisc));
+      RETURN fodisc.offset
+   END GetOffset;
+
+   PROCEDURE PatchOffset(module: Sym.Ident; field: Sym.FieldList;
+                         offset: Size);
+      VAR
+	 fodisc: AMD64FieldOff;
+   BEGIN
+      IF Disciplines.Seek(field, fldid, fodisc) THEN
+	 fodisc.offset := offset;
+      END;
+   END PatchOffset;
+
+BEGIN
+   Init;
+END Oberon64iSymbols.

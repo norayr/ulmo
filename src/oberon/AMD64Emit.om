@@ -1,0 +1,640 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2004 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   $Id: AMD64Emit.om,v 1.1 2004/09/06 18:39:32 borchert Exp borchert $
+   ----------------------------------------------------------------------------
+   $Log: AMD64Emit.om,v $
+   Revision 1.1  2004/09/06 18:39:32  borchert
+   Initial revision (AMD64 adaptation)
+
+   ----------------------------------------------------------------------------
+*)
+
+MODULE AMD64Emit;
+
+   IMPORT Conclusions, ConstStrings, Disciplines, FragmentedStreams,
+      Gen := AMD64OpCodeGenerator, Iterators, Op := AMD64Operands,
+      Pentium := AMD64Instructions, Read, Regs := CompilerRegisters,
+      Relocations := CompilerRelocations, Streams, SYSTEM, Texts, Write;
+
+(* BEGIN HACK *)
+   VAR
+      expected : LONGINT;
+      instrCount : LONGINT;
+(* END HACK *)
+   CONST
+      jumpAlways = -1;
+      jumpDistance = -2;
+
+   CONST
+      jumpType = 1;
+      callType = 2;
+
+   TYPE
+      Jmp = POINTER TO JmpRec;
+      JmpRec = RECORD
+	 (Disciplines.ObjectRec)
+	 type   : LONGINT;   (* jumpType .. callType *)
+	 size   : INTEGER;   (* The size of the Operand *)
+	 cond   : LONGINT;   (* -2 .. 15 *)
+	 origin : FragmentedStreams.Label;
+	 dest   : FragmentedStreams.Label;
+      END;
+
+      AlignInfo = POINTER TO AlignInfoRec;
+      AlignInfoRec = RECORD
+	 (Disciplines.ObjectRec)
+	 val : INTEGER;
+	 lab : FragmentedStreams.Label;
+      END;
+
+      FixedData = POINTER TO FixedDataRec;
+      FixedDataRec = RECORD
+         (Disciplines.ObjectRec)
+	 align : LONGINT;
+	 stream : Streams.Stream;
+	 done : BOOLEAN;
+      END;
+
+      StrTable = POINTER TO StrTableRec;
+      StrTableRec = RECORD
+	 (FixedDataRec)
+	 hash : ConstStrings.Domain;
+	 offsetid : Disciplines.Identifier;
+      END;
+
+   TYPE
+      StrTableOffset = POINTER TO StrTableOffsetRec;
+      StrTableOffsetRec = RECORD
+	 (Disciplines.DisciplineRec)
+	 offset : Streams.Count;
+	 len : Streams.Count;
+      END;
+
+   PROCEDURE CreateFixedData (VAR data : FixedData);
+      VAR
+         ret : FixedData;
+   BEGIN
+      NEW(ret);
+      Texts.Open(ret.stream);
+      ret.align := 1; ret.done := FALSE;
+      data := ret;
+   END CreateFixedData;
+
+   PROCEDURE CreateStringTable (VAR rodata : StrTable);
+      VAR
+	 ret : StrTable;
+   BEGIN
+      NEW(ret);
+      Texts.Open(ret.stream);
+      ConstStrings.CreateDomain (ret.hash);
+      ret.offsetid := Disciplines.Unique ();
+      ret.align := 1; ret.done := FALSE;
+      rodata := ret;
+   END CreateStringTable;
+
+
+   PROCEDURE OpenFixedData (rodata : FixedData; VAR s : Streams.Stream);
+   BEGIN
+      ASSERT((rodata # NIL) & (rodata.stream # NIL));
+      rodata.done := TRUE;
+      s := rodata.stream;
+   END OpenFixedData;
+
+   PROCEDURE DumpOps (nops : INTEGER; ops : ARRAY OF Op.Operand);
+      VAR
+	 i : INTEGER;
+
+      PROCEDURE WriteReg (reg : Regs.Value);
+	 VAR
+	    reg1 : Gen.Register;
+      BEGIN
+	 IF reg = NIL THEN
+	    Write.String ("NIL");
+	    Write.Ln();
+	    RETURN;
+	 END;
+	 IF Regs.RegCode (reg, reg1) THEN
+	    Write.Int (reg1, 0);
+         ELSE
+	    Write.String ("on stack");
+	 END;
+	 Write.Ln ();
+      END WriteReg;
+
+   BEGIN
+      Write.String ("NO SUCH INSTRUCTION (nops = ");
+      Write.Int (nops, 0);
+      Write.String (")"); Write.Ln ();
+      i := 0;
+      WHILE i < nops DO
+	 Write.String ("Operand "); Write.Int (i, 0); Write.Ln();
+	 Write.String ("   loc = "); Write.Int (Op.Loc(ops[i]), 0); Write.Ln ();
+	 Write.String ("   reg1 = "); WriteReg (ops[i].reg1);
+	 Write.String ("   reg2 = "); WriteReg (ops[i].reg2);
+	 Write.String ("   immsz = "); Write.Int (ops[i].immsz, 0); Write.Ln ();
+	 Write.String ("   memsz = "); Write.Int (ops[i].memsz, 0); Write.Ln ();
+	 INC(i);
+      END;
+      ASSERT(Streams.Flush (Streams.stdout));
+   END DumpOps;
+
+   PROCEDURE InstrMode (s : FragmentedStreams.Stream; mnem : Gen.Mnemonic;
+		        nops : INTEGER; ops : ARRAY OF Op.Operand;
+		        modeadd : SET; morereg : Regs.Value);
+      VAR
+	 i,j : INTEGER;
+	 instr : Gen.Instruction;
+	 l : FragmentedStreams.Label;
+	 code : Gen.Code;
+	 ok : BOOLEAN;
+	 mode : SET;
+	 regs : ARRAY 10 OF Regs.Value;
+	 possible : ARRAY 10 OF SET;
+   BEGIN
+      instr := NIL;
+      i := 0; j := 0;
+      WHILE i < nops DO
+	 IF Op.IsError(ops[i]) THEN
+	    Write.String("InstrMode: error op at i="); Write.Int(i, 0);
+	    Write.String(" mnem="); Write.Int(mnem, 0); Write.Ln;
+	    ASSERT(Streams.Flush(Streams.stdout));
+	 END;
+	 ASSERT(~Op.IsError (ops[i]));
+	 IF ops[i].reg1 # NIL THEN
+	    regs[j] := ops[i].reg1;
+	    possible[j] := Regs.GetConstraint (ops[i].reg1);
+	    INC(j);
+	 END;
+	 IF ops[i].reg2 # NIL THEN
+	    regs[j] := ops[i].reg2;
+	    possible[j] := Regs.GetConstraint (ops[i].reg2);
+	    INC(j);
+	 END;
+	 INC(i);
+      END;
+      IF morereg # NIL THEN
+	 regs[j] := morereg;
+	 possible[j] := Regs.GetConstraint (morereg);
+	 INC(j);
+      END;
+      IF j > 0 THEN
+         ok := Regs.PrepareInstruction (j, regs, possible); ASSERT(ok);
+      END;
+      mode := modeadd;
+      instr := Gen.OpcodeMatch (mnem, nops, ops, mode);
+      ASSERT(modeadd * mode = modeadd);
+      IF instr = NIL THEN
+	 Write.String("NO MATCH: mnem="); Write.Int(mnem, 0); Write.Ln;
+	 DumpOps (nops, ops);
+	 Write.LnS(Streams.stdout); ASSERT(Streams.Flush(Streams.stdout));
+      END;
+      ASSERT(instr # NIL);
+      i := 0; l := NIL;
+      WHILE i < nops DO
+	 IF Op.NeedReloc (ops[i]) THEN
+	    IF (l = NIL) THEN
+	       FragmentedStreams.CreateLabel (l);
+	       FragmentedStreams.AttachLabel (s, l);
+	    END;
+	    Op.RelocInstance (ops[i], l);
+         END;
+	 INC(i);
+      END;
+      NEW(code); code.len := 0;
+      (* Write.String ("Chosen: "); *)
+      (* Write.String (instr.fmt); *)
+      (* Write.Ln; *)
+      (* DumpOps (nops, ops); *)
+
+      ASSERT(modeadd * mode = modeadd);
+      ok := Gen.EmitGeneric (instr, mode, ops, code);
+      IF ~ok THEN
+	 Write.String("EmitGeneric FAIL: mnem="); Write.Int(mnem, 0); Write.Ln;
+	 DumpOps(nops, ops);
+	 ok := Streams.Flush(Streams.stdout); ASSERT(ok);
+      END;
+      ASSERT(ok);
+(* BEGIN HACK *)
+      IF expected > 0 THEN
+	 ASSERT(code.len = expected);
+	 expected := -1;
+      END;
+(* END HACK *)
+      ok := Streams.WritePart (s, code.code, 0, code.len); ASSERT(ok);
+   END InstrMode;
+
+
+   PROCEDURE Instr (s : FragmentedStreams.Stream; mnem : Gen.Mnemonic;
+		       nops : INTEGER; ops : ARRAY OF Op.Operand);
+   BEGIN
+      InstrMode (s, mnem, nops, ops, {}, NIL);
+   END Instr;
+
+   PROCEDURE Instr0 (s : FragmentedStreams.Stream; mnem : Gen.Mnemonic);
+      VAR
+         ops : ARRAY 2 OF Op.Operand;
+   BEGIN
+      ops[0] := NIL;
+      InstrMode (s, mnem, 0, ops, {}, NIL);
+   END Instr0;
+
+   PROCEDURE Instr1 (s : FragmentedStreams.Stream; mnem : Gen.Mnemonic;
+                       op : Op.Operand);
+      VAR
+         ops : ARRAY 2 OF Op.Operand;
+   BEGIN
+      ops[0] := NIL;
+      ops[0] := op;
+      InstrMode (s, mnem, 1, ops, {}, NIL);
+   END Instr1;
+
+   PROCEDURE Instr2 (s : FragmentedStreams.Stream; mnem : Gen.Mnemonic;
+                       op1, op2 : Op.Operand);
+      VAR
+         ops : ARRAY 2 OF Op.Operand;
+   BEGIN
+      ops[0] := NIL;
+      ops[0] := op1;
+      ops[1] := op2;
+      InstrMode (s, mnem, 2, ops, {}, NIL);
+   END Instr2;
+
+   PROCEDURE Instr3 (s : FragmentedStreams.Stream; mnem : Gen.Mnemonic;
+                       op1, op2, op3 : Op.Operand);
+      VAR
+         ops : ARRAY 3 OF Op.Operand;
+   BEGIN
+      ops[0] := NIL;
+      ops[0] := op1;
+      ops[1] := op2;
+      ops[2] := op3;
+      InstrMode (s, mnem, 3, ops, {}, NIL);
+   END Instr3;
+
+   PROCEDURE JumpBase (s : FragmentedStreams.Stream; type : LONGINT;
+		       dest : FragmentedStreams.Label);
+      VAR
+	 jmp : Jmp;
+   BEGIN
+      jmp := NIL;
+      NEW(jmp);
+      ASSERT(dest # NIL);
+      jmp.type := type;
+      jmp.cond := jumpAlways;
+      jmp.dest := dest;
+      CASE type OF
+      | jumpType:
+         FragmentedStreams.IncludeObject (s, jmp, Pentium.JMPRange.min,
+	                                  Pentium.JMPRange.max);
+      | callType:
+         FragmentedStreams.IncludeObject (s, jmp, Pentium.CALLRange.min,
+	                                  Pentium.CALLRange.max);
+         jmp.size := 4;
+      END;
+      FragmentedStreams.CreateLabel (jmp.origin);
+      FragmentedStreams.AttachLabel (s, jmp.origin);
+   END JumpBase;
+
+   PROCEDURE Jump (s : FragmentedStreams.Stream;
+                   dest : FragmentedStreams.Label);
+   BEGIN
+      JumpBase (s, jumpType, dest);
+   END Jump;
+
+   PROCEDURE Call (s : FragmentedStreams.Stream;
+                   dest : FragmentedStreams.Label);
+   BEGIN
+      JumpBase (s, callType, dest);
+   END Call;
+
+   PROCEDURE CallExtern (s : FragmentedStreams.Stream;
+                         regs : Regs.RegSet;
+                         ref : Relocations.SymRef);
+      VAR
+	 target : Regs.Value;
+	 own : Regs.Owner;
+	 op : Op.Operand;
+	 reloc : Relocations.RelocRequest;
+   BEGIN
+      target := NIL;
+      (* I have no idea if this is a good idea. Let's just try it.
+       * We could also create a procedure call table. *)
+      own := Regs.GetOwner (regs);
+      Regs.CreateValue (target, regs, own, Regs.stdM);
+      Regs.LoadReg (target, Gen.StdRegs);
+      Relocations.Create (reloc, s, Relocations.addSym, ref);
+      op := Op.ImmIntFixed (0, 8 (* address *));
+      Op.RelocOpen (op, reloc);
+      Instr2 (s, Pentium.MOV, Op.RegOp (target, 8), op);
+      Instr1 (s, Pentium.CALL, Op.RegOp (target, 8));
+      Regs.DestroyOwnedValue (target, own);
+   END CallExtern;
+
+   PROCEDURE Distance (s : FragmentedStreams.Stream;
+			   origin, dest : FragmentedStreams.Label);
+      VAR
+	 jmp : Jmp;
+   BEGIN
+      ASSERT(dest # NIL);
+      NEW(jmp);
+      jmp.cond := jumpDistance;
+      jmp.origin  := origin;
+      jmp.dest := dest;
+      jmp.size := 4;
+      jmp.type := jumpType;
+      FragmentedStreams.IncludeObject (s, jmp, 4, 4 (* address *));
+   END Distance;
+
+
+   PROCEDURE Bytes (s : Streams.Stream; data, sz : LONGINT);
+      VAR
+	 out : ARRAY 32 OF BYTE;
+	 neg : BOOLEAN;
+	 i : LONGINT;
+   BEGIN
+      i := 0;
+      neg := (data < 0);
+      WHILE i < sz DO
+	 out[i] := SYSTEM.VAL(BYTE, data MOD 256);
+	 data := data DIV 256;
+	 INC(i);
+      END;
+      IF neg THEN ASSERT(data = -1) END;
+      IF ~neg THEN ASSERT(data = 0) END;
+      neg := Streams.WritePart (s, out, 0, sz); ASSERT(neg);
+   END Bytes;
+
+
+   (* Write a string to the rodata block and return the offset of the
+    * first byte. We find identical strings that are added more than
+    * once and add only a single copy.
+    * str must be a ConstString.String in the domain rodata.hash. If
+    * you don't have such a string use EmitStringStream or EmitStringArray
+    * instead.
+    *)
+
+   PROCEDURE StringBase (rodata : StrTable; str : ConstStrings.String;
+			 VAR len : Streams.Count) : Streams.Count;
+      VAR
+	 ret, dummy : Streams.Count;
+	 disc : StrTableOffset;
+   BEGIN
+      disc := NIL;
+      IF Disciplines.Seek (str, rodata.offsetid, disc) THEN
+         len := disc.len;
+	 RETURN disc.offset;
+      END;
+      ASSERT(~rodata.done);
+      Streams.GetPos (rodata.stream, ret);
+      NEW(disc);
+      disc.id := rodata.offsetid;
+      disc.offset := ret;
+      Disciplines.Add (str, disc);
+      ConstStrings.Write (rodata.stream, str);
+      Write.CharS (rodata.stream, CHR(0));
+      Streams.GetPos (rodata.stream, len);
+      len := len - ret;
+      disc.len := len;
+      RETURN ret;
+   END StringBase;
+
+   PROCEDURE StringStream (rodata : StrTable; string : Streams.Stream;
+			       VAR len : Streams.Count) : Streams.Count;
+      VAR
+	 str : ConstStrings.String;
+	 s : Streams.Stream;
+	 ch : CHAR;
+	 dummy : Streams.Count;
+   BEGIN
+      str := NIL;
+      ConstStrings.Init (s);
+      LOOP
+	 Read.CharS(string, ch);
+	 IF ch = 0X THEN
+	    EXIT;
+	 END;
+	 Write.CharS(s, ch);
+      END;
+      ConstStrings.CloseD (s, rodata.hash, str);
+      RETURN StringBase (rodata, str, len);
+   END StringStream;
+
+   PROCEDURE StringArray (rodata : StrTable; string : ARRAY OF CHAR;
+			      VAR len : Streams.Count) : Streams.Count;
+      VAR
+         str : ConstStrings.String;
+	 dummy : Streams.Count;
+   BEGIN
+      str := NIL;
+      ConstStrings.CreateD (str, rodata.hash, string);
+      RETURN StringBase (rodata, str, len);
+   END StringArray;
+
+   PROCEDURE JumpCC (s : FragmentedStreams.Stream;
+		         dest : FragmentedStreams.Label; cc : LONGINT);
+      VAR
+	 jmp : Jmp;
+   BEGIN
+      ASSERT(dest # NIL);
+      NEW(jmp);
+      jmp.cond := cc;;
+      jmp.dest := dest;
+      jmp.type := jumpType;
+      FragmentedStreams.IncludeObject (s, jmp, Pentium.JCCRange.min,
+				       Pentium.JCCRange.max);
+      FragmentedStreams.CreateLabel (jmp.origin);
+      FragmentedStreams.AttachLabel (s, jmp.origin);
+   END JumpCC;
+
+   PROCEDURE Align (s : FragmentedStreams.Stream; val : INTEGER);
+      VAR
+	 algn : AlignInfo;
+   BEGIN
+      NEW(algn);
+      algn.val := val;
+      FragmentedStreams.CreateLabel (algn.lab);
+      FragmentedStreams.AttachLabel (s, algn.lab);
+      FragmentedStreams.IncludeObject (s, algn, 0, val-1);
+   END Align;
+
+   PROCEDURE AlignFixed (data : FixedData; val : LONGINT) : LONGINT;
+      VAR
+         pos, ret : LONGINT;
+   BEGIN
+      ASSERT((data # NIL) & ~data.done & (data.stream # NIL));
+      ASSERT(val >= 0);
+      Streams.GetPos (data.stream, ret);
+      IF val = 0 THEN
+         RETURN ret;
+      END;
+      IF val > data.align THEN
+         ASSERT(val MOD data.align = 0);
+	 data.align := val;
+      ELSE
+         ASSERT(data.align MOD val = 0);
+      END;
+      Streams.GetPos (data.stream, pos);
+      WHILE pos MOD val # 0 DO
+         Write.CharS (data.stream, 0X);
+         INC(pos);
+      END;
+      RETURN pos;
+   END AlignFixed;
+
+   PROCEDURE LongFixed (data : FixedData; val : LONGINT) : LONGINT;
+      VAR
+         i, ret : LONGINT;
+	 byte : BYTE;
+   BEGIN
+      ASSERT((data # NIL) & ~data.done & (data.stream # NIL));
+      ret := AlignFixed (data, 4);
+      i := 0;
+      WHILE (i < 4) DO
+         byte := SYSTEM.VAL (BYTE, val MOD 256);
+	 val := val DIV 256;
+	 Write.ByteS (data.stream, byte);
+         INC (i);
+      END;
+      RETURN ret;
+   END LongFixed;
+
+   PROCEDURE UnfixedObjects (s : FragmentedStreams.Stream;
+			     start : FragmentedStreams.Label);
+      VAR
+         i : INTEGER;
+	 it : Iterators.Iterator;
+	 obj : Disciplines.Object;
+	 dist, mindist, maxdist : Streams.Count;
+	 ops : ARRAY 1 OF Op.Operand;
+	 dummy, totalsize : Streams.Count;
+	 startlabel : FragmentedStreams.Label;
+	 data : ARRAY 16 OF BYTE;
+	 ok : BOOLEAN;
+	 fmt : Gen.Instruction;
+	 mode : SET;
+	 mnem : Gen.Mnemonic;
+	 code : Gen.Code;
+
+   BEGIN
+      it := NIL;
+      (* Pass1: Set Object size for all jumps and alignments.
+         Alignments should be doable immediatly as all previous
+         objects are fixed. This will change once we choose a better
+         (multi path) algorithm.
+      *)
+      FragmentedStreams.GetObjectsWithUnknownSize (s, it);
+      WHILE Iterators.Get (it, obj) DO
+         IF obj IS Jmp THEN
+	    WITH obj : Jmp DO
+	       (* Distance objects and relative calls have a fixed size and
+		* shouldn't show up here. *)
+	       ASSERT(obj.cond # jumpDistance);
+	       ASSERT(obj.type # callType);
+	       FragmentedStreams.Difference (obj.origin, obj.dest,
+					     mindist, maxdist);
+               IF (maxdist <= 127) & (maxdist >= -128) THEN
+		  obj.size := 1;
+	       ELSE
+		  obj.size := 4;
+	       END;
+	       IF obj.cond = jumpAlways THEN
+		  mnem := Pentium.JMP;
+	       ELSE
+		  mnem := Pentium.JCC+obj.cond;
+	       END;
+	       ops[0] := Op.ImmIntFixed (0, obj.size);
+	       mode := {};
+	       fmt := Gen.OpcodeMatch (mnem, 1, ops, mode);
+	       NEW(code);
+	       ok := Gen.EmitGeneric (fmt, mode, ops, code); ASSERT(ok);
+	       totalsize := code.len;
+	       FragmentedStreams.SetObjectSize (obj, totalsize);
+	    END;
+         ELSIF obj IS AlignInfo THEN
+	    FragmentedStreams.Difference (start, obj(AlignInfo).lab,
+			  	        mindist, maxdist);
+            ASSERT(mindist = maxdist);
+            IF mindist = maxdist THEN
+	       totalsize := (obj(AlignInfo).val -
+			     mindist MOD obj(AlignInfo).val
+			    ) MOD obj(AlignInfo).val;
+	       FragmentedStreams.SetObjectSize (obj, totalsize);
+	       FragmentedStreams.FixObject (obj);
+	       i := 0;
+	       WHILE i < totalsize DO
+	          Instr (s, Pentium.NOP, 0, ops);
+		  INC(i);
+	       END;
+	       (* Bytes (s, 0, totalsize); *)
+	    END;
+	 ELSE
+	    (* We will also include calls and the like here *)
+	    ASSERT(obj = NIL);   (* FALSE *)
+	 END;
+      END;
+      it := NIL;
+      ASSERT(FragmentedStreams.NumberOfObjectsWithUnknownSize (s) = 0);
+      (* Pass 2:  Fill in the objects. *)
+      FragmentedStreams.GetUnfixedObjects (s, it);
+      WHILE Iterators.Get (it, obj) DO
+	 IF (obj IS Jmp) & (obj(Jmp).size > 0) THEN
+	    WITH obj : Jmp DO
+	       FragmentedStreams.Difference (obj.origin, obj.dest, dist, dummy);
+	       ASSERT(dummy = dist);
+	       ops[0] := Op.ImmIntFixed (dist, obj.size);
+	       FragmentedStreams.FixObject (obj);
+(* BEGIN HACK *)
+	       FragmentedStreams.GetSizeRange (obj, dist, dummy);
+	       expected := dummy; ASSERT(expected >= 0);
+	       ASSERT(expected = dummy);
+(* END HACK *)
+	       IF obj.cond = jumpDistance THEN
+		  Op.GetImmData (ops[0], data, obj.size);
+		  ok := Streams.WritePart (s, data, 0, obj.size);
+(* BEGIN HACK *)
+		  ASSERT(obj.size = expected);
+(* END HACK *)
+		  ASSERT(ok);
+	       ELSIF obj.cond = jumpAlways THEN
+	          CASE obj.type OF
+		  | jumpType:
+		     Instr (s, Pentium.JMP, 1, ops);
+                  | callType:
+		     Instr (s, Pentium.CALL, 1, ops);
+                  END;
+	       ELSE
+	          ASSERT(obj.type = jumpType);
+		  Instr (s, Pentium.JCC+obj.cond, 1, ops);
+	       END;
+            END;
+         ELSE
+	    ASSERT(~(obj IS AlignInfo)); (* These have been fixed above. *)
+	    ASSERT(obj = NIL);
+         END;
+      END;
+      it := NIL;
+      ASSERT(FragmentedStreams.NumberOfUnfixedObjects (s) = 0);
+   END UnfixedObjects;
+
+BEGIN
+(* BEGIN HACK *)
+   expected := -1;
+(* END HACK *)
+END AMD64Emit.

@@ -1,4 +1,5 @@
-BinDir :=		../../../bin
+ARCH ?=			i386
+BinDir :=		../../../$(ARCH)/bin
 InstallBinDir :=	$(BinDir)
 Targets :=		genobrts
 InstalledTargets :=	$(patsubst %,$(InstallBinDir)/%,$(Targets))

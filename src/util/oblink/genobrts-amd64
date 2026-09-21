@@ -1,0 +1,281 @@
+#!/usr/bin/env perl
+
+# AMD64 (x86_64) variant of genobrts.
+# Generates the startup assembly for Oberon programs compiled for AMD64.
+#
+# Differences from the i386 version:
+#   - 64-bit registers (rax, rbx, rsp, rbp, ...)
+#   - Syscalls via `syscall` instruction (rdi/rsi/rdx = args, rax = number)
+#   - sys_brk = 12, sys_rt_sigreturn = 15, sys_gettid = 186
+#   - Stack entries are 8 bytes wide; argc is a 64-bit value on the stack
+#   - SysArgs_argc is INTEGER (32-bit movl); pointers are 64-bit (movq)
+#   - AuxParameterRec fields are 8 bytes each (SYS.ADDRESS)
+#   - Oberon calling convention: stack-based, params allocated by caller
+#     with subq/addq; parameter block layout matches AMD64OberonAnalyzer
+#   - SysSegments.Register(addr, size: SYS.ADDRESS; mode: SHORTINT):
+#     param block 24 bytes (addr@0, size@8, mode@16)
+#   - Storage.AllocateStack(VAR ptr: Address; size: Size; mode: SHORTINT):
+#     param block 16 bytes (ptr_ref@0, size@8, mode@12)
+#   - Storage.end is Address (SYS.ADDRESS, 8 bytes) → movq
+#   - Storage.left is Size (LONGINT, 4 bytes) → movl
+
+use strict;
+use warnings;
+use Fcntl;
+use IO::File;
+
+my @rtmodules = qw(
+   Coroutines
+   Process
+   RTErrors
+   Storage
+   SysArgs
+   SysInterrupts
+   SysModules
+   SysSegments
+);
+
+my @unixmodules = qw(
+   UnixClock
+   UnixFiles
+   UnixProcess
+   UnixTimezones
+);
+
+my $sysmain = "SysMain";
+my $sysstorage = "SysStorage";
+my @allmodules = sort(@rtmodules, @unixmodules, $sysmain, $sysstorage);
+
+my $cmdname = $0; $cmdname =~ s{.*/}{};
+my $usage = "Usage: $cmdname (-r | [-o start.s] {module})\n";
+
+my $outfile;
+while (@ARGV > 0 && $ARGV[0] =~ m{^-}) {
+   my $arg = shift @ARGV;
+   last if $arg eq "--";
+   if ($arg eq "-o") {
+      die $usage if @ARGV == 0;
+      $outfile = shift @ARGV;
+   } elsif ($arg eq "-r") {
+      foreach my $module (@allmodules) {
+	 print $module, "\n";
+      }
+      exit 0;
+   } else {
+      die $usage;
+   }
+}
+die $usage if @ARGV == 0;
+my @core = @ARGV;
+
+my $out;
+if (defined $outfile) {
+   $out = new IO::File $outfile, O_WRONLY|O_CREAT|O_TRUNC, 0666
+      or die "$cmdname: unable to create $outfile: $!\n"
+} else {
+   $out = \*STDOUT;
+}
+
+# Signal return stub (AMD64: sys_rt_sigreturn = 15)
+my $HEADER = <<'END_OF_HEADER';
+.global _rt__sigreturn
+_rt__sigreturn:
+	movq $15, %rax
+	syscall
+	xorq %rax, %rax
+	movq (%rax), %rax
+.global _entry
+_entry:
+END_OF_HEADER
+
+# AMD64 runtime init: read argc/argv/environ/auxv from the initial stack.
+# At _entry: [%rsp] = argc (64-bit), then argv[0..argc-1], NULL, envp, NULL, auxv.
+# SysArgs_argc  is INTEGER    (32-bit) → movl
+# SysArgs_argv, _environ, _auxv are POINTER (64-bit) → movq
+# brk(0) via syscall (rax=12, rdi=0) to get current program break.
+# Reserve ~1 MB of heap: round up to next 64 KB boundary.
+# Storage_end  is Address (SYS.ADDRESS, 64-bit) → movq
+# Storage_left is Size    (LONGINT, 32-bit)      → movl
+my $RTINIT = <<'END_OF_RTINIT';
+	movq (%rsp), %rax
+	movl %eax, SysArgs_argc(%rip)
+	leaq 8(%rsp), %rbx
+	movq %rbx, SysArgs_argv(%rip)
+	leaq 8(%rbx, %rax, 8), %rax
+	movq %rax, SysArgs_environ(%rip)
+envloop:
+	cmpq $0, (%rax)
+	je envend
+	addq $8, %rax
+	jmp envloop
+envend:
+	addq $8, %rax
+	movq %rax, SysArgs_auxv(%rip)
+	xorq %rdi, %rdi
+	movq $12, %rax
+	syscall
+	movq %rax, %rbx
+	addq $0x40ffff, %rbx
+	andq $-65536, %rbx
+	movq %rbx, %rdi
+	movq $12, %rax
+	syscall
+	movq %rax, Storage_end(%rip)
+	movl $0x100000, Storage_left(%rip)
+END_OF_RTINIT
+
+# MEMINIT: register known memory segments with SysSegments, then
+# initialise the storage allocator and allocate the main coroutine stack.
+#
+# SysSegments.Register(addr: SYS.ADDRESS; size: SYS.ADDRESS; mode: SHORTINT)
+#   Param block: 24 bytes (addr@0, size@8, mode@16); align = 8.
+#   mode values: -1 = stack (growing down), 0 = fixed, 1 = heap (growing up)
+#
+# Storage.AllocateStack(VAR ptr: Address; size: Size; mode: SHORTINT)
+#   VAR ptr:  refParam → 8-byte pointer to output slot  @param offset 0
+#   size:     LONGINT (4 bytes)                          @param offset 8
+#   mode:     SHORTINT (1 byte)                          @param offset 12
+#   Param block: 16 bytes total (align to 8).
+#   Output slot (8 bytes) allocated separately on the stack.
+#
+# After AllocateStack, set up signal alternate stack via sys_sigaltstack
+#   (AMD64 syscall 131): struct { void *ss_sp; int ss_flags; pad; size_t ss_size }
+#   Args passed in registers: rdi = &ss struct, rsi = NULL.
+my $MEMINIT = <<'END_OF_MEMINIT';
+	movq SysArgs_auxv(%rip), %rbx
+	movq $0x1000, %rsi
+	xorq %rdi, %rdi
+_auxvloop:
+	cmpq $0, (%rbx)
+	je _endauxvloop
+	cmpq $0x21, (%rbx)
+	jne _auxvbase
+	movq 8(%rbx), %rdi
+	jmp _nextauxv
+_auxvbase:
+	cmpq $3, (%rbx)
+	jne _nextauxv
+	movq 8(%rbx), %rsi
+_nextauxv:
+	addq $16, %rbx
+	jmp _auxvloop
+_endauxvloop:
+	movq %rsi, %rcx
+	andq $-4096, %rsi
+	cmpq $0, %rsi
+	jne _skip3
+	movq $0x1000, %rsi
+	xorq %rcx, %rcx
+_skip3:
+	cmpq $0, %rcx
+	je _nophdr
+	movq 0x28(%rcx), %rax
+	addq %rsi, %rax
+	addq $0xfff, %rax
+	andq $-4096, %rax
+	subq %rsi, %rax
+	jmp _havebinsize
+_nophdr:
+	movq $0x100000, %rax
+_havebinsize:
+	subq $24, %rsp
+	movq %rsi, 0(%rsp)
+	movq %rax, 8(%rsp)
+	movb $0, 16(%rsp)
+	call SysSegments_Register
+	addq $24, %rsp
+	subq $24, %rsp
+	movq $0, 0(%rsp)
+	movq $0x10000, 8(%rsp)
+	movb $0, 16(%rsp)
+	call SysSegments_Register
+	addq $24, %rsp
+	movq Storage_end(%rip), %rax
+	subq $0x100000, %rax
+	subq $24, %rsp
+	movq %rax, 0(%rsp)
+	movq $0x100000, 8(%rsp)
+	movb $0, 16(%rsp)
+	call SysSegments_Register
+	addq $24, %rsp
+	subq $24, %rsp
+	movq $-1, 0(%rsp)
+	movq %rsp, %rdx
+	addq $0x0fffffff, %rdx
+	andq $-268435456, %rdx
+	movq %rdx, %rax
+	subq %rsp, %rax
+	andq $-4096, %rax
+	addq $0x00100000, %rax
+	movq %rax, 8(%rsp)
+	movq %rdx, 0(%rsp)
+	movb $-1, 16(%rsp)
+	call SysSegments_Register
+	addq $24, %rsp
+	cmpq $0, %rdi
+	je _skip2
+	cmpq %rsp, %rdi
+	jae _skip2
+	cmpq Storage_end(%rip), %rsi
+	jae _dosysinfo
+	cmpq %rsi, %rdi
+	jb _dosysinfo
+	jmp _skip2
+_dosysinfo:
+	subq $24, %rsp
+	movq %rdi, 0(%rsp)
+	movq $0x1000, 8(%rsp)
+	movb $0, 16(%rsp)
+	call SysSegments_Register
+	addq $24, %rsp
+_skip2:
+	call SysStorage___init
+	subq $24, %rsp
+	movq $0, 16(%rsp)
+	leaq 16(%rsp), %rax
+	movq %rax, 0(%rsp)
+	movl $0x10000, 8(%rsp)
+	movb $0, 12(%rsp)
+	call Storage_AllocateStack
+	movq 16(%rsp), %rax
+	addq $24, %rsp
+	subq $24, %rsp
+	movq %rax, 0(%rsp)
+	movl $0, 8(%rsp)
+	movq $0x10000, 16(%rsp)
+	movq %rsp, %rdi
+	xorq %rsi, %rsi
+	movq $131, %rax
+	syscall
+	addq $24, %rsp
+END_OF_MEMINIT
+
+my $EXIT = <<'END_OF_EXIT';
+	call Process_Terminate
+	hlt
+END_OF_EXIT
+
+sub call_startup {
+   my ($out, $module) = @_;
+   print $out "\tcall ${module}___startup\n";
+}
+
+sub call_init {
+   my ($out, $module) = @_;
+   print $out "\tcall ${module}___init\n";
+}
+
+print $out $HEADER;
+foreach my $module (@rtmodules, @unixmodules, $sysstorage, $sysmain, @core) {
+   call_startup($out, $module);
+}
+print $out $RTINIT;
+foreach my $module (@rtmodules) {
+   call_init($out, $module);
+}
+print $out $MEMINIT;
+foreach my $module (@unixmodules, $sysmain) {
+   call_init($out, $module);
+}
+print $out $EXIT;
+$out->close or die "$cmdname: unable to finish output\n";

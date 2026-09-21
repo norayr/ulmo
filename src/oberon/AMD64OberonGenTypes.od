@@ -1,0 +1,93 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2004 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   AMD64 adaptation of I386OberonGenTypes.od
+   ----------------------------------------------------------------------------
+*)
+
+DEFINITION AMD64OberonGenTypes; (* Christian Ehrhardt, AMD64 adaptation *)
+
+   IMPORT CompilerObjects, ConstStrings, Disciplines, FragmentedStreams,
+      Op := AMD64Operands, PC := AMD64OberonContexts,
+      Regs := CompilerRegisters, Sym := OberonSymbols;
+
+   CONST
+      sizeoff = 0;
+      moduleoff = 8;
+      typenooff = 16;
+      hierlenoff = 20;
+      pointeroff = 32;
+
+      sentinel = MIN (LONGINT);
+
+   (* Create the symbol name that references the Tag of the global Variables *)
+   PROCEDURE CreateGTAGName (VAR name : ConstStrings.String);
+
+   (* Call these function at the start and end of each block. *)
+   PROCEDURE BlockStart (proc : PC.Context; type : Sym.Type);
+   PROCEDURE BlockEnd (proc : PC.Context; type : Sym.Type);
+
+   (* The return value is the offset of the type tag in the type tag
+    * block of the module that declares the type. *)
+   PROCEDURE GenType (proc : PC.Context; type : Sym.Type);
+
+   (* Generate a type tag for a procedure. *)
+   PROCEDURE GenTagForBlock (proc : PC.Context; pident : Sym.Ident);
+
+   (* Generate an immediate Operand with the Type Tag for type. *)
+   PROCEDURE GenTag (proc : PC.Context; type : Sym.Type) : Op.Operand;
+
+   (* Generate the list of all Blocks (BlockListRec) *)
+   PROCEDURE GenBlockList (proc : PC.Context);
+
+   (* Generate the module Record *)
+   PROCEDURE GenModuleTag (proc : PC.Context);
+
+   (* Generate a Memory Operand that points to the type description of type *)
+   PROCEDURE GenTagRef (proc : PC.Context; type : Sym.Type) : Op.Operand;
+
+   (* Mark all exported Types for GenAllTypes *)
+   PROCEDURE MarkExportedTypes (proc : PC.Context);
+
+   (* Generate type Tags for all types on the list. *)
+   PROCEDURE GenAllTypes (proc : PC.Context);
+
+   (* Initialize local pointers on the stack *)
+   PROCEDURE InitLocalPointers (proc : PC.Context; pident : Sym.Ident);
+
+   PROCEDURE MaxTag (proc : PC.Context; tag : Regs.Value;
+          type : Sym.Type; caller : Regs.Owner; reuse : BOOLEAN) : Regs.Value;
+
+   PROCEDURE SetTmpTag (obj : Disciplines.Object; tag : Regs.Value);
+   PROCEDURE GetTmpTag (obj : Disciplines.Object) : Regs.Value;
+   PROCEDURE RemoveTmpTag (obj : Disciplines.Object) : Regs.Value;
+
+   PROCEDURE TypeGuard (proc : PC.Context; tag : Regs.Value; static : Sym.Type;
+			truelab : FragmentedStreams.Label;
+			loc : CompilerObjects.Location);
+
+   PROCEDURE StaticTypeGuard (proc : PC.Context; base, ext : Sym.Type;
+                              loc : CompilerObjects.Location; warn : BOOLEAN)
+			      : BOOLEAN;
+
+   PROCEDURE AssignmentTypeGuard (proc : PC.Context; base, ext : Regs.Value;
+                                  loc : CompilerObjects.Location);
+
+
+END AMD64OberonGenTypes.

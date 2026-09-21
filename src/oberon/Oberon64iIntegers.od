@@ -1,0 +1,16 @@
+DEFINITION Oberon64iIntegers;
+
+   IMPORT CompilerObjects, Oberon64i, RelatedEvents, Streams;
+
+   TYPE
+      Value = Oberon64i.Integer;
+
+   PROCEDURE ReadDec(s: Streams.Stream; VAR intval: Value;
+                     loc: CompilerObjects.Location;
+		     errors: RelatedEvents.Object) : BOOLEAN;
+
+   PROCEDURE ReadHex(s: Streams.Stream; VAR intval: Value;
+                     loc: CompilerObjects.Location;
+		     errors: RelatedEvents.Object) : BOOLEAN;
+
+END Oberon64iIntegers.

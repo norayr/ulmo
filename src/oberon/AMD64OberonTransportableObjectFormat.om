@@ -1,0 +1,169 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2004 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   $Id: AMD64OberonT.om,v 1.1 2005/04/11 09:46:23 ehrhardt Exp $
+   ----------------------------------------------------------------------------
+   $Log: AMD64OberonT.om,v $
+   Revision 1.1  2005/04/11 09:46:23  ehrhardt
+   Initial revision (AMD64 adaptation)
+
+   ----------------------------------------------------------------------------
+*)
+
+MODULE AMD64OberonTransportableObjectFormat;
+
+   (* generate transportable ASCII texts from AMD64OberonResults *)
+
+   IMPORT CompilerObjects, CompilerRelocations, ConstStrings,
+      AMD64OberonResults, Iterators, ModularizedStructures, PersistentTexts,
+      Read, RelatedEvents, Streams, Write;
+
+   (* following code has been partially derived from ToLink.om
+      by Christian Ehrhardt
+   *)
+
+   PROCEDURE WriteCode(s: Streams.Stream; text: PersistentTexts.Text;
+                       errors: RelatedEvents.Object) : BOOLEAN;
+      CONST
+	 indent = "       ";
+      VAR
+	 i: INTEGER;
+	 texts: Streams.Stream;
+	 ch: CHAR;
+   BEGIN
+      IF text = NIL THEN RETURN TRUE END;
+      IF ~PersistentTexts.Open(texts, text, errors) THEN RETURN FALSE END;
+      RelatedEvents.Forward(texts, errors);
+      Write.StringS(s, indent);
+      i := 0; Read.CharS(texts, ch);
+      LOOP
+	 IF texts.count = 0 THEN EXIT END;
+	 IF i > 15 THEN
+	    i := 0;
+	    Write.LnS(s);
+	    Write.StringS(s, indent);
+	 END;
+	 INC(i);
+	 Write.IntS(s, ORD(ch), 4);
+	 Read.CharS(texts, ch);
+      END;
+      Write.LnS(s);
+      RETURN TRUE
+   END WriteCode;
+
+   PROCEDURE WriteSym(s: Streams.Stream;
+                      sym: AMD64OberonResults.Symbol;
+		      modname: ConstStrings.String);
+   BEGIN
+      Write.StringS(s, "SYM: "); ConstStrings.Write(s, modname);
+      Write.CharS(s, "_"); ConstStrings.Write(s, sym.name);
+      Write.CharS(s, " "); Write.IntS(s, sym.offset, 0);
+      Write.LnS(s);
+   END WriteSym;
+
+   PROCEDURE WriteReloc(s: Streams.Stream; reloc: AMD64OberonResults.Reloc);
+   BEGIN
+      IF reloc.type = CompilerRelocations.noReloc THEN
+	 RETURN
+      END;
+      Write.StringS(s, "RELOC: ");
+      CASE reloc.type OF
+      | CompilerRelocations.addSym: Write.StringS(s, "ADD ");
+      | CompilerRelocations.setSym: Write.StringS(s, "SET ");
+      END;
+      Write.IntS(s, reloc.offset, 0); Write.CharS(s, " ");
+      Write.IntS(s, reloc.size, 0); Write.CharS(s, " ");
+      ConstStrings.Write(s, reloc.symref.modname); Write.CharS(s, "_");
+      ConstStrings.Write(s, reloc.symref.symname); Write.LnS(s);
+   END WriteReloc;
+
+   PROCEDURE WriteBlock(s: Streams.Stream;
+                        block: AMD64OberonResults.Block;
+			modname: ConstStrings.String;
+			errors: RelatedEvents.Object) : BOOLEAN;
+      VAR
+	 it: Iterators.Iterator;
+	 sym: AMD64OberonResults.Symbol;
+	 reloc: AMD64OberonResults.Reloc;
+   BEGIN
+      Write.LineS(s, "NEW BLOCK");
+      AMD64OberonResults.GetSymbols(it, block);
+      WHILE Iterators.Get(it, sym) DO
+	 WriteSym(s, sym, modname);
+      END;
+      AMD64OberonResults.GetRelocs(it, block);
+      WHILE Iterators.Get(it, reloc) DO
+	 WriteReloc(s, reloc);
+      END;
+      IF AMD64OberonResults.read IN block.mode THEN
+	 Write.CharS(s, "r");
+      ELSE
+	 Write.CharS(s, "-");
+      END;
+      IF AMD64OberonResults.write IN block.mode THEN
+	 Write.CharS(s, "w");
+      ELSE
+	 Write.CharS(s, "-");
+      END;
+      IF AMD64OberonResults.execute IN block.mode THEN
+	 Write.CharS(s, "x");
+      ELSE
+	 Write.CharS(s, "-");
+      END;
+      Write.IntS(s, block.datalen, 10);
+      Write.IntS(s, block.memlen, 10);
+      Write.IntS(s, block.align, 10);
+      Write.LnS(s);
+      Write.LineS(s, "{");
+      IF ~WriteCode(s, block.data, errors) THEN RETURN FALSE END;
+      Write.LineS(s, "}");
+      RETURN TRUE
+   END WriteBlock;
+
+   PROCEDURE Gen(out: Streams.Stream;
+                 header: CompilerObjects.Header;
+		 text: PersistentTexts.Text;
+		 errors: RelatedEvents.Object) : BOOLEAN;
+      VAR
+	 table: ModularizedStructures.ObjectTable;
+	 result: AMD64OberonResults.Result;
+	 block: AMD64OberonResults.Block;
+	 outerrorcnt: INTEGER;
+   BEGIN
+      outerrorcnt := out.errors;
+      RelatedEvents.Save(out);
+      RelatedEvents.Forward(out, errors);
+      ModularizedStructures.CreateTable(table);
+      IF ~CompilerObjects.ConvertTextToObject(text, table, header,
+                                              result, errors) THEN
+	 RETURN FALSE
+      END;
+      block := result.blocks;
+      WHILE block # NIL DO
+	 IF ~WriteBlock(out, block, result.name, errors) THEN
+	    RETURN FALSE
+	 END;
+	 block := block.next;
+      END;
+      Write.LineS(out, "END");
+      RelatedEvents.Restore(out);
+      RETURN outerrorcnt = out.errors
+   END Gen;
+
+END AMD64OberonTransportableObjectFormat.

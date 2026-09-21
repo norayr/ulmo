@@ -1,0 +1,93 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2004 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   $Id: AMD64OberonR.od,v 1.1 2004/09/06 17:27:44 borchert Exp $
+   ----------------------------------------------------------------------------
+   $Log: AMD64OberonR.od,v $
+   Revision 1.1  2004/09/06 17:27:44  borchert
+   Initial revision (AMD64 adaptation)
+
+   ----------------------------------------------------------------------------
+*)
+
+DEFINITION AMD64OberonResults; (* Christian Ehrhardt *)
+
+   IMPORT CompilerObjects, ConstStrings, Disciplines, Iterators,
+      PersistentObjects, PersistentTexts, Relocations := CompilerRelocations;
+
+   TYPE
+      BlockType = SET;  (* read ... execute *)
+
+   CONST
+      read    = 0;
+      write   = 1;
+      execute = 2;
+
+   TYPE
+      Block = POINTER TO BlockRec;
+      Reloc = POINTER TO RelocRec;
+      Result = POINTER TO ResultRec;
+      Symbol = POINTER TO SymbolRec;
+
+      BlockRec = RECORD
+	 (Disciplines.ObjectRec);
+	 next : Block;
+	 res  : Result;
+	 mode : BlockType;
+         data : PersistentTexts.Text;
+	 datalen, memlen : LONGINT;   (* ASSERT memlen >= datalen *)
+	 align : LONGINT;
+      END;
+
+      RelocRec = RECORD
+	 (Disciplines.ObjectRec)
+	 next : Reloc;
+	 block : Block;
+	 type : Relocations.RelocType;
+	 offset, size : LONGINT;
+	 symref : Relocations.SymRef;
+      END;
+
+      SymbolRec = RECORD
+	 (Disciplines.ObjectRec)
+	 next : Symbol;
+	 block : Block;
+	 name : ConstStrings.String;
+	 offset : LONGINT;
+      END;
+
+      ResultRec = RECORD
+	 (CompilerObjects.ObjectRec)
+	 name : ConstStrings.String;
+	 blocks : Block;
+	 syms : Symbol;
+	 relocs : Reloc;
+      END;
+
+      PROCEDURE Create(VAR res : CompilerObjects.Object);
+      PROCEDURE AddBlock (res : Result; mode : BlockType; VAR block : Block);
+      PROCEDURE AddSymbol (block : Block; name : ConstStrings.String;
+			   offset : LONGINT);
+      PROCEDURE AddReloc (block : Block; type : Relocations.RelocType;
+			  offset,size:LONGINT; ref : Relocations.SymRef);
+      PROCEDURE GetSymbols (VAR it : Iterators.Iterator; block : Block);
+      PROCEDURE GetRelocs (VAR it : Iterators.Iterator; block : Block);
+
+
+END AMD64OberonResults.

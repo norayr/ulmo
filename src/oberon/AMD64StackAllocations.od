@@ -1,0 +1,14 @@
+DEFINITION AMD64StackAllocations;
+
+   IMPORT FragmentedStreams, Regs := CompilerRegisters,
+      StackAlloc := CompilerStackAllocations;
+
+   TYPE
+      Stack = POINTER TO StackRec;
+      StackRec = RECORD (StackAlloc.StackRec) END;
+
+   PROCEDURE Create (VAR stack : Stack; s : FragmentedStreams.Stream;
+		     baseoff, align : LONGINT; dir : StackAlloc.Direction);
+   PROCEDURE Close (stack : Stack);
+
+END AMD64StackAllocations.

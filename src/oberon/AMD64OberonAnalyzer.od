@@ -1,0 +1,22 @@
+DEFINITION AMD64OberonAnalyzer; (* AMD64 adaptation of I386OberonAnalyzer *)
+
+   IMPORT Disciplines, FragmentedStreams, RelatedEvents, Scopes,
+      Sym := OberonSymbols, Types;
+
+   PROCEDURE Process(module: Sym.Ident; errors: RelatedEvents.Object);
+
+   (* these two functions mustn't be called for external procedures! *)
+   PROCEDURE ProcedureLabel(proc : Sym.Ident) : FragmentedStreams.Label;
+   PROCEDURE ProcedureLevel(proc : Sym.Ident) : INTEGER;
+
+   PROCEDURE VarOffset(obj: Disciplines.Object) : LONGINT;
+   PROCEDURE SetVarOffset(obj: Disciplines.Object; offset : LONGINT);
+   PROCEDURE VarScope(obj: Disciplines.Object) : Scopes.Scope;
+   PROCEDURE SizesOffset(ident: Sym.Ident) : LONGINT;
+   PROCEDURE ParamIdent(param: Sym.ParamList) : Sym.Ident;
+   PROCEDURE DataBlockSize(module: Sym.Ident; obj: Disciplines.Object;
+                           errors: RelatedEvents.Object) : LONGINT;
+   PROCEDURE DataBlockAlign(obj: Disciplines.Object) : LONGINT;
+   PROCEDURE ResOffset(obj: Disciplines.Object) : LONGINT;
+
+END AMD64OberonAnalyzer.

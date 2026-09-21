@@ -1,0 +1,167 @@
+(* AMD64-specific SysStat:
+   On AMD64, the kernel struct stat is 144 bytes (not 64).
+   Field order differs from i386: st_nlink precedes st_mode.
+   We bypass SysConversions entirely and use direct field assignment.
+   Each 8-byte kernel field is modeled as two consecutive 4-byte LONGINTs.
+*)
+MODULE SysStat;
+
+   IMPORT RelatedEvents, Sys, SYS := SYSTEM, SysErrors, SysTypes;
+
+   CONST
+      (* file mode:
+         bit 0 = 1<<0   bit 31 = 1<<31
+
+                                user  group other
+         3       1  1111   11
+         1  ...  6  5432   109   876   543   210
+	 +--------+------+-----+-----+-----+-----+
+	 | unused | type | sst | rwx | rwx | rwx |
+	 +--------+------+-----+-----+-----+-----+
+      *)
+
+      type = {12..15};
+      prot = {0..8};
+
+      (* file types; example: (stat.mode * type = dir) *)
+      reg = {15};		(* regular *)
+      dir = {14};		(* directory *)
+      chr = {13};		(* character special *)
+      fifo = {12};		(* fifo *)
+      blk = {13..14};		(* block special *)
+      symlink = {13, 15};	(* symbolic link *)
+      socket = {14, 15};	(* socket *)
+
+      (* special *)
+      setuid = 11;		(* set user id on execution *)
+      setgid = 10;		(* set group id on execution *)
+      savetext = 9;		(* save swapped text even after use *)
+
+      (* protection *)
+      uread = 8;		(* read permission owner *)
+      uwrite = 7;		(* write permission owner *)
+      uexec = 6;		(* execute/search permission owner *)
+      gread = 5;		(* read permission group *)
+      gwrite = 4;		(* write permission group *)
+      gexec = 3;		(* execute/search permission group *)
+      oread = 2;		(* read permission other *)
+      owrite = 1;		(* write permission other *)
+      oexec = 0;		(* execute/search permission other *)
+
+      (* example for "r-xr-x---": (read + exec) * (owner + group) *)
+      owner = {uread, uwrite, uexec};
+      group = {gread, gwrite, gexec};
+      other = {oread, owrite, oexec};
+      read = {uread, gread, oread};
+      write = {uwrite, gwrite, owrite};
+      exec = {uexec, gexec, oexec};
+      rwx = prot;
+
+   TYPE
+      StatRec =			(* result of stat(2) and fstat(2) *)
+	 RECORD
+	    device: SysTypes.Device;
+	    inode: SysTypes.Inode;
+	    mode: SET;
+	    nlinks: INTEGER;
+	    uid: INTEGER;
+	    gid: INTEGER;
+	    rdev: SysTypes.Device;
+	    size: SysTypes.Offset;
+	    blksize: LONGINT;
+	    blocks: LONGINT;
+	    atime: SysTypes.Time;
+	    mtime: SysTypes.Time;
+	    ctime: SysTypes.Time;
+	 END;
+
+      (* Mirrors AMD64 kernel struct stat exactly (144 bytes).
+         Each 8-byte kernel field = two 4-byte LONGINTs (lo=bits 0-31, hi=bits 32-63).
+         Field ordering matches AMD64 kernel layout, NOT Oberon StatRec order. *)
+      UnixStat64Rec =
+	 RECORD
+	    devlo, devhi:         LONGINT;  (* offset   0: st_dev  (uint64) *)
+	    inolo, inohi:         LONGINT;  (* offset   8: st_ino  (uint64) *)
+	    nlinklo, nlinkhi:     LONGINT;  (* offset  16: st_nlink (uint64) *)
+	    mode:                 INTEGER;  (* offset  24: st_mode  (uint32) *)
+	    uid:                  INTEGER;  (* offset  28: st_uid   (uint32) *)
+	    gid:                  INTEGER;  (* offset  32: st_gid   (uint32) *)
+	    pad0:                 INTEGER;  (* offset  36: __pad0   (uint32) *)
+	    rdevlo, rdevhi:       LONGINT;  (* offset  40: st_rdev  (uint64) *)
+	    sizelo, sizehi:       LONGINT;  (* offset  48: st_size  (int64) *)
+	    blksizelo, blksizehi: LONGINT;  (* offset  56: st_blksize (long) *)
+	    blockslo, blockshi:   LONGINT;  (* offset  64: st_blocks  (long) *)
+	    atimelo, atimehi:     LONGINT;  (* offset  72: st_atim.tv_sec  *)
+	    atimenslo, atimenshi: LONGINT;  (* offset  80: st_atim.tv_nsec *)
+	    mtimelo, mtimehi:     LONGINT;  (* offset  88: st_mtim.tv_sec  *)
+	    mtimenslo, mtimenshi: LONGINT;  (* offset  96: st_mtim.tv_nsec *)
+	    ctimelo, ctimehi:     LONGINT;  (* offset 104: st_ctim.tv_sec  *)
+	    ctimenslo, ctimenshi: LONGINT;  (* offset 112: st_ctim.tv_nsec *)
+	    un1lo, un1hi:         LONGINT;  (* offset 120: __unused[0] *)
+	    un2lo, un2hi:         LONGINT;  (* offset 128: __unused[1] *)
+	    un3lo, un3hi:         LONGINT;  (* offset 136: __unused[2] *)
+	 END;
+
+   PROCEDURE CopyBuf(VAR src: UnixStat64Rec; VAR dst: StatRec);
+   BEGIN
+      dst.device  := SYS.VAL(INTEGER, src.devlo);
+      dst.inode   := src.inolo;
+      dst.mode    := SYS.VAL(SET, src.mode);
+      dst.nlinks  := SYS.VAL(INTEGER, src.nlinklo);
+      dst.uid     := src.uid;
+      dst.gid     := src.gid;
+      dst.rdev    := SYS.VAL(INTEGER, src.rdevlo);
+      dst.size    := src.sizelo;
+      dst.blksize := src.blksizelo;
+      dst.blocks  := src.blockslo;
+      dst.atime   := src.atimelo;
+      dst.mtime   := src.mtimelo;
+      dst.ctime   := src.ctimelo;
+   END CopyBuf;
+
+   PROCEDURE Stat(path: ARRAY OF CHAR; VAR buf: StatRec;
+		  errors: RelatedEvents.Object) : BOOLEAN;
+      VAR
+	 d0, d1: INTEGER;
+	 origbuf: UnixStat64Rec;
+   BEGIN
+      IF SYS.UNIXCALL(Sys.newstat, d0, d1, SYS.ADR(path), SYS.ADR(origbuf)) THEN
+	 CopyBuf(origbuf, buf);
+	 RETURN TRUE
+      ELSE
+	 SysErrors.Raise(errors, d0, Sys.newstat, path);
+	 RETURN FALSE
+      END;
+   END Stat;
+
+   PROCEDURE Lstat(path: ARRAY OF CHAR; VAR buf: StatRec;
+		   errors: RelatedEvents.Object) : BOOLEAN;
+      VAR
+	 d0, d1: INTEGER;
+	 origbuf: UnixStat64Rec;
+   BEGIN
+      IF SYS.UNIXCALL(Sys.newlstat, d0, d1, SYS.ADR(path), SYS.ADR(origbuf)) THEN
+	 CopyBuf(origbuf, buf);
+	 RETURN TRUE
+      ELSE
+	 SysErrors.Raise(errors, d0, Sys.newlstat, path);
+	 RETURN FALSE
+      END;
+   END Lstat;
+
+   PROCEDURE Fstat(fd: SysTypes.File; VAR buf: StatRec;
+		   errors: RelatedEvents.Object) : BOOLEAN;
+      VAR
+	 d0, d1: INTEGER;
+	 origbuf: UnixStat64Rec;
+   BEGIN
+      IF SYS.UNIXCALL(Sys.newfstat, d0, d1, fd, SYS.ADR(origbuf)) THEN
+	 CopyBuf(origbuf, buf);
+	 RETURN TRUE
+      ELSE
+	 SysErrors.Raise(errors, d0, Sys.newfstat, "");
+	 RETURN FALSE
+      END;
+   END Fstat;
+
+END SysStat.

@@ -1,0 +1,58 @@
+(* AMD64 SysSegments: 8-byte address/size fields matching SysStorage's types.
+   Register skips high-address segments (stack) to avoid sign-extension issues
+   in SysStorage's LONGINT-based arithmetic. *)
+MODULE SysSegments;
+
+   IMPORT SYS := SYSTEM;
+
+   CONST
+      maxsegments = 128;
+
+   TYPE
+      Address = SYS.UNTRACEDADDRESS;
+      Size = SYS.UNTRACEDADDRESS;
+      Mode = SHORTINT;
+      Segment =
+	 RECORD
+	    addr: Address;
+	    size: Size;
+	    mode: Mode;
+	 END;
+   VAR
+      segments: ARRAY maxsegments OF Segment;
+      nextslot: INTEGER;
+
+   PROCEDURE PanicExit;
+   BEGIN
+      HALT(255); LOOP END;
+   END PanicExit;
+
+   PROCEDURE Register(addr: Address; size: Size; mode: Mode);
+      (* Skip segments with addr >= 2GB to avoid sign-extension problems
+         when SysStorage reads them as signed LONGINT. *)
+   BEGIN
+      IF SYS.VAL(LONGINT, addr) < 0 THEN RETURN END;
+      IF nextslot = maxsegments THEN PanicExit END;
+      segments[nextslot].addr := addr;
+      segments[nextslot].size := size;
+      segments[nextslot].mode := mode;
+      INC(nextslot);
+   END Register;
+
+   PROCEDURE NumberOfSegments() : INTEGER;
+   BEGIN
+      RETURN nextslot
+   END NumberOfSegments;
+
+   PROCEDURE GetSegment(segmentIndex: INTEGER; VAR segment: Segment);
+   BEGIN
+      IF (segmentIndex >= 0) & (segmentIndex < nextslot) THEN
+	 segment := segments[segmentIndex];
+      ELSE
+	 PanicExit;
+      END;
+   END GetSegment;
+
+BEGIN
+   nextslot := 0;
+END SysSegments.

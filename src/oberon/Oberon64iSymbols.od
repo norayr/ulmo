@@ -1,0 +1,100 @@
+(* Adapted from Oberon32iSymbols.od for 64-bit (Oberon64i) target *)
+
+DEFINITION Oberon64iSymbols;
+
+   (* various architecture-dependent extensions of data types
+      of OberonSymbols
+      64-bit variant: uses Oberon64i for pointer/address sizes (8 bytes)
+   *)
+
+   IMPORT CompilerObjects, Oberon64i, Oberon8Chars, RelatedEvents, Streams,
+      Sym := OberonSymbols;
+
+   CONST
+      integerConst = 0;
+      realConst = 1;
+      setConst = 2;
+      charConst = 3;
+      booleanConst = 4;
+      stringConst = 5;
+      nilConst = 6;
+      noConst = 7; (* not a constant; carries just type information *)
+   TYPE
+      ConstantKind = SHORTINT; (* integerConst .. *)
+      Attribute = POINTER TO AttributeRec;
+      AttributeRec =
+	 RECORD
+	    (CompilerObjects.AttachmentRec)
+	       (* may be attached to OberonSymbols.Attribute *)
+	    type: Sym.Type;
+	    kind: ConstantKind;
+	    intval: Oberon64i.Integer;
+	    realval: Oberon64i.Real;
+	    setval: Oberon64i.Set;
+	    charval: Oberon8Chars.Value;
+	    boolval: BOOLEAN;
+	    stringval: Streams.Stream;
+	 END;
+
+   CONST
+      forwardDir = 0;
+      backwardDir = 1;
+   TYPE
+      Direction = SHORTINT;
+
+   TYPE
+      FoldBuiltInProc =
+	 PROCEDURE (
+	       builtinproc: Sym.BuiltInProcedure;
+	       module: Sym.Ident;
+	       args: Sym.Attribute;
+	       VAR result: Attribute;
+	       errors: RelatedEvents.Object
+	    ) : BOOLEAN;
+	 (* return TRUE if result is non-NIL *)
+
+   PROCEDURE InitBuiltInProc(builtinproc: Sym.BuiltInProcedure;
+                             fold: FoldBuiltInProc);
+
+   PROCEDURE CreateAttribute(VAR at: Attribute);
+   PROCEDURE CreateCopyAttribute(VAR new: Attribute; orig: Attribute);
+
+   PROCEDURE Fold(module: Sym.Ident;
+                  at: Sym.Attribute; errors: RelatedEvents.Object);
+
+   PROCEDURE CheckConst(module: Sym.Ident; at: Sym.Attribute;
+                        errors: RelatedEvents.Object) : BOOLEAN;
+
+   PROCEDURE GetType(at: Sym.Attribute; VAR type: Sym.Type);
+   PROCEDURE RemoveTypeMarks(module: Sym.Ident);
+
+   PROCEDURE ArithmeticType(module: Sym.Ident;
+                            type1, type2: Sym.Type;
+			    errors: RelatedEvents.Object) : Sym.Type;
+
+   PROCEDURE AdaptType(module: Sym.Ident; type, like: Sym.Type);
+      (* copy architecture-specific type information from like
+	 to type; this is useful for constants
+      *)
+
+   PROCEDURE SetTypeToNIL(module: Sym.Ident; at: Sym.Attribute);
+
+   PROCEDURE CompareConstants(cval1, cval2: Attribute) : BOOLEAN;
+
+   PROCEDURE Align(VAR size: Oberon64i.Size; align: Oberon64i.Size;
+		   loc: CompilerObjects.Location;
+                   errors: RelatedEvents.Object);
+   PROCEDURE Allocate(size, align: Oberon64i.Size;
+                      VAR next, offset: Oberon64i.Size; dir: Direction;
+		      loc: CompilerObjects.Location;
+		      errors: RelatedEvents.Object);
+   PROCEDURE GetSize(module: Sym.Ident; type: Sym.Type;
+                     errors: RelatedEvents.Object) : Oberon64i.Size;
+   PROCEDURE GetAlign(module: Sym.Ident; type: Sym.Type;
+                      errors: RelatedEvents.Object) : Oberon64i.Size;
+   PROCEDURE PatchSize(module: Sym.Ident; type: Sym.Type; size: Oberon64i.Size);
+   PROCEDURE GetOffset(module: Sym.Ident; field: Sym.FieldList) : Oberon64i.Size;
+   PROCEDURE PatchOffset(module: Sym.Ident; field: Sym.FieldList;
+                         offset: Oberon64i.Size);
+
+END Oberon64iSymbols.

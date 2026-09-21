@@ -48,11 +48,21 @@ DEFINITION Disciplines;
 	    id: Identifier; (* should be unique for all types of disciplines *)
 	 END;
 
+      DisciplineList = POINTER TO DisciplineListRec;
+      DisciplineListRec =
+	 RECORD
+	    discipline: Discipline;
+	    id: Identifier; (* copied from discipline.id *)
+	    next: DisciplineList;
+	 END;
+
       Object = POINTER TO ObjectRec;
       ObjectRec =
 	 RECORD
 	    (Objects.ObjectRec)
-	    (* contains set of disciplines *)
+	    disclist: DisciplineList; (* set of disciplines — renamed from "list" to avoid
+	       conflict with extensions like PersistentDisciplines.ObjectRec that also
+	       define a "list" field; exposes size so AMD64 computes correct offsets *)
 	 END;
 
    PROCEDURE Unique() : Identifier;

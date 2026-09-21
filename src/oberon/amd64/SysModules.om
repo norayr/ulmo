@@ -1,0 +1,79 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-1994 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   AMD64 variant: field offsets updated for 64-bit pointer size (8 bytes).
+   All pointer and Address fields are 8 bytes; nofblocks (INTEGER) is at
+   offset 56 in ModuleRec, offset 32 in BlockListRec.
+   ----------------------------------------------------------------------------
+*)
+
+MODULE SysModules;
+
+   IMPORT Types, SYS := SYSTEM;
+
+   TYPE
+      (* $P- don't trace any pointers *)
+      (* names are read-only and 0X-terminated *)
+      Name = (* $O- *) POINTER TO ARRAY 1024 OF CHAR (* $O= *);
+      Address = Types.Address;
+
+      BlockList = (* $O- *) POINTER TO BlockListRec (* $O= *);
+      BlockListRec =
+	 RECORD
+	    next: BlockList; (* in memory order *)
+	    begin, end: Address; (* of program text *)
+	    tag: Address; (* pointer list only *)
+	    name: Name; (* name of procedure (or module) *)
+	 END;
+
+      Module = (* $O- *) POINTER TO ModuleRec (* $O= *);
+      ModuleRec =
+	 RECORD
+	    next: Module; (* in linkage order *)
+	    name: Name;
+	    init: PROCEDURE;
+	    begin, end: Address; (* of program text *)
+	    vars: Address; (* global variables *)
+	    blocks: BlockList; (* procedures and module body *)
+	    nofblocks: INTEGER; (* number of blocks *)
+	 END;
+      (* $P= *)
+
+   VAR
+      modules: Module;
+      tm : Module;
+      tb : BlockList;
+
+   PROCEDURE ReverseModuleList;
+      (* initially, the list of modules is constructed in reversed order *)
+      VAR
+	 module, next: Module;
+   BEGIN
+      module := modules;
+      modules := NIL;
+      WHILE module # NIL DO
+	 next := module.next;
+	 module.next := modules;
+	 modules := module;
+	 module := next;
+      END;
+   END ReverseModuleList;
+
+BEGIN
+   (* Check compiler assumptions about offsets -- AMD64 (8-byte pointers) *)
+   tm := NIL; tb := NIL;
+   ASSERT (SYS.ADR (tm.next) = 0);
+   ASSERT (SYS.ADR (tm.name) = 8);
+   ASSERT (SYS.ADR (tm.init) = 16);
+   ASSERT (SYS.ADR (tm.begin) = 24);
+   ASSERT (SYS.ADR (tm.end) = 32);
+   ASSERT (SYS.ADR (tm.vars) = 40);
+   ASSERT (SYS.ADR (tm.blocks) = 48);
+   ASSERT (SYS.ADR (tm.nofblocks) = 56);
+   ASSERT (SYS.ADR (tb.next) = 0);
+   ASSERT (SYS.ADR (tb.begin) = 8);
+   ASSERT (SYS.ADR (tb.end) = 16);
+   ASSERT (SYS.ADR (tb.tag) = 24);
+   ASSERT (SYS.ADR (tb.name) = 32);
+   ReverseModuleList;
+END SysModules.

@@ -95,7 +95,7 @@ MODULE Coroutines;
 	 (* coroutine currently active *)
 
       (* private components *)
-      tagloc: LONGINT;
+      tagloc: SYS.ADDRESS;
 
 BEGIN
    (* Check Compiler Assertions *)
@@ -116,10 +116,10 @@ BEGIN
 
    (* coroutines prefer coroutine records to be static *)
    main := SYS.VAL(Coroutine,
-      SYS.VAL (LONGINT, SYS.ADR(mainrec)) + SYS.SIZE(CoroutineTag));
+      SYS.VAL (SYS.ADDRESS, SYS.ADR(mainrec)) + SYS.SIZE(CoroutineTag));
    (* patch tag field of main *)
-   tagloc := SYS.VAL(LONGINT, main) - SYS.SIZE(CoroutineTag);
-   SYS.PUT(tagloc, SYS.VAL(LONGINT, tag));
+   tagloc := SYS.VAL(SYS.ADDRESS, main) - SYS.SIZE(CoroutineTag);
+   SYS.PUT(tagloc, SYS.VAL(SYS.ADDRESS, tag));
    current := main;
 
    defaultsize := 8192;

@@ -1,0 +1,19 @@
+DEFINITION AMD64StdRegisters;
+
+   IMPORT Disciplines, FragmentedStreams,
+      Gen := AMD64OpCodeGenerator,
+      Regs := CompilerRegisters,
+      StackAlloc := CompilerStackAllocations,
+      TmpPtrs := CompilerTemporaryPointers;
+
+   TYPE
+      RegSet = POINTER TO RegSetRec;
+      RegSetRec = RECORD (Regs.RegSetRec) END;
+
+   PROCEDURE Create (VAR set : Regs.RegSet; alloc : StackAlloc.Stack;
+                     s : FragmentedStreams.Stream);
+   PROCEDURE IncludeRestoreBlock (set : Regs.RegSet);
+   PROCEDURE Close (set : Regs.RegSet);
+   PROCEDURE GetTmpPtrs (set : Regs.RegSet) : TmpPtrs.Ptr;
+
+END AMD64StdRegisters.

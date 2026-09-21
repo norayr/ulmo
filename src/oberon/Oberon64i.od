@@ -1,0 +1,70 @@
+DEFINITION Oberon64i;
+
+   (* Architecture-dependent parameters for AMD64 (x86-64).
+      Integers (SHORTINT, INTEGER, LONGINT) are 32-bit as on i386.
+      Pointers and ADDRESSes are 64-bit.
+   *)
+
+   IMPORT SYS := SYSTEM, Types;
+
+   CONST
+      archname = "64i";
+
+   TYPE
+      Integer = Types.Int32;
+   CONST
+      integerLen = 32;
+      maxIntegerLenOnTarget = 64;
+
+   TYPE
+      Real = REAL;
+
+   TYPE
+      Set = SET;
+   CONST
+      setLen = 32;
+      maxSetLenOnTarget = 32;
+
+   CONST
+      shortIntLen = 8;
+      intLen = 32;
+      longIntLen = 32;
+
+      shortRealLen = 32;
+      realLen = 64;
+      longRealLen = 64;
+
+   TYPE
+      Size = LONGINT;
+   CONST
+      maxsize = MAX(LONGINT);
+      minoffset = - maxsize - 1;
+      maxalign = 16;
+
+   CONST
+      int8Size = 1;          int8Align = 1;
+      int16Size = 2;        int16Align = 2;
+      int32Size = 4;        int32Align = 4;
+      int64Size = 8;        int64Align = 8;
+
+      real32Size = 4;      real32Align = 4;
+      real64Size = 8;      real64Align = 8;
+      real96Size = 12;      real96Align = 8;
+      real128Size = 16;    real128Align = 16;
+
+      booleanSize = 1;    booleanAlign = 1;
+      addressSize = 8;    addressAlign = 8;
+      pointerSize = 8;    pointerAlign = 8;
+      charSize = 1;          charAlign = 1;
+      setSize = 4;            setAlign = 4;
+      byteSize = 1;          byteAlign = 1;
+
+      coroutineSize = 8;
+      coroutineAlign = 8;
+      proceduretypeSize = 8;
+      proceduretypeAlign = 8;
+
+      recordAlign = 8;
+      arrayAlign = 8;
+
+END Oberon64i.

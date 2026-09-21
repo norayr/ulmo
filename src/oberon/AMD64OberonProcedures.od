@@ -1,0 +1,26 @@
+DEFINITION AMD64OberonProcedures;
+
+   (* built-in procedures for AMD64: math functions *)
+
+   IMPORT Sym := OberonSymbols;
+
+   CONST
+      sqrt = 0;
+      sin = 1;
+      cos = 2;
+
+   TYPE
+      StdProc = SHORTINT; (* sqrt .. cos *)
+
+   TYPE
+      StdProcedure = POINTER TO StdProcedureRec;
+      StdProcedureRec =
+	 RECORD
+	    (Sym.BuiltInProcedureRec)
+	    stdproc: StdProc;
+	 END;
+
+   VAR
+      sqrtF, sinF, cosF : Sym.Ident;
+
+END AMD64OberonProcedures.

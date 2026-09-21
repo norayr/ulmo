@@ -23,7 +23,15 @@
 # LIBDIR defaults to BINDIR/../lib; override with -L or OBERON_LIBDIR env var.
 
 BINDIR=@BINDIR@
+ARCH=@ARCH@
 LIBDIR="${OBERON_LIBDIR:-${BINDIR}/../lib}"
+
+case "$ARCH" in
+  i386)  OBJARCH=I386;  LDARCH=elf_i386;   ASFLAGS="-32";  LDSCRIPT="$BINDIR/oberon-i386.ld"  ;;
+  amd64) OBJARCH=AMD64; LDARCH=elf_x86_64; ASFLAGS="--64"; LDSCRIPT="$BINDIR/oberon-amd64.ld" ;;
+  *)     echo "ulmo: unknown arch: $ARCH" >&2; exit 1 ;;
+esac
+
 cmdname=`basename $0`
 
 usage() {
@@ -94,7 +102,10 @@ fi
 #  Step 1: run the Oberon compiler for all source files
 # ulmoc compiles each file and all transitive dependencies, writing .obj
 # files to the current directory.  (Cached deps are reused on re-runs.)
-if ! $BINDIR/ulmoc $iflags "$@"; then
+# Include CWD so ulmoc finds any .od stubs we created above.
+archflag=""
+[ "$ARCH" != "i386" ] && archflag="-a $ARCH"
+if ! $BINDIR/ulmoc $archflag -I . $iflags "$@"; then
    exit 1
 fi
 
@@ -107,7 +118,7 @@ for sourcefile in $sources; do
 
    case "$suffix" in
    om|mod)
-      objfile="${modname}-mod-I386.obj"
+      objfile="${modname}-mod-${OBJARCH}.obj"
       if [ ! -f "$objfile" ]; then
          echo "$cmdname: expected $objfile not found" >&2
          exit 1
@@ -117,10 +128,10 @@ for sourcefile in $sources; do
          $BINDIR/obtofgen -o "$toffile" "$objfile" || exit 1
          echo "$cmdname: $sourcefile -> $toffile"
       else
-         toffile="${modname}-mod-I386.tof"
+         toffile="${modname}-mod-${OBJARCH}.tof"
          ofile="${modname}.o"
          $BINDIR/obtofgen -o "$toffile" "$objfile" || exit 1
-         $BINDIR/tof2elf -o "$ofile" "$toffile" || { rm -f "$toffile"; exit 1; }
+         $BINDIR/tof2elf -arch $ARCH -o "$ofile" "$toffile" || { rm -f "$toffile"; exit 1; }
          rm -f "$toffile"
          echo "$cmdname: $sourcefile -> $ofile"
          obj_files="$obj_files $ofile"
@@ -149,31 +160,31 @@ if [ ! -f "$libo" ]; then
 fi
 
 # Auto-discover dependency .o files.
-# ulmoc compiled all transitive dependencies to mod-I386.obj.  Any module
+# ulmoc compiled all transitive dependencies to mod-${OBJARCH}.obj.  Any module
 # not already in libo.a must be linked explicitly — convert those to .o now.
 libo_modules=`ar t "$libo" 2>/dev/null | sed 's/\.o$//'`
-for obj in ./*-mod-I386.obj; do
+for obj in ./*-mod-${OBJARCH}.obj; do
    [ -f "$obj" ] || continue
-   mod=`basename "$obj" -mod-I386.obj`
+   mod=`basename "$obj" -mod-${OBJARCH}.obj`
    # Skip if already in libo.a
    echo "$libo_modules" | grep -qx "$mod" && continue
    # Skip if we already produced this .o from an explicit source above
    echo "$obj_files" | grep -qw "${mod}.o" && continue
-   toffile="${mod}-mod-I386.tof"
+   toffile="${mod}-mod-${OBJARCH}.tof"
    ofile="${mod}.o"
    $BINDIR/obtofgen -o "$toffile" "$obj" || exit 1
-   $BINDIR/tof2elf -o "$ofile" "$toffile" || { rm -f "$toffile"; exit 1; }
+   $BINDIR/tof2elf -arch $ARCH -o "$ofile" "$toffile" || { rm -f "$toffile"; exit 1; }
    rm -f "$toffile"
    echo "$cmdname: dep $mod -> $ofile"
    obj_files="$obj_files $ofile"
 done
 
-start_s=`mktemp /tmp/ulmo_startXXXXXX.s`
-start_o=`mktemp /tmp/ulmo_startXXXXXX.o`
-trap "rm -f $start_s $start_o" 0 1 2 15
+start_s="${out_file}.__start.s"
+start_o="${out_file}.__start.o"
+trap "rm -f ${start_s} ${start_o}" 0 1 2 15
 
 $BINDIR/genobrts "$main_module" > "$start_s" || exit 1
-as -32 -o "$start_o" "$start_s" || exit 1
-ld -T "$BINDIR/oberon-i386.ld" -m elf_i386 \
+as $ASFLAGS -o "$start_o" "$start_s" || exit 1
+ld -T "$LDSCRIPT" -m $LDARCH \
    -o "$out_file" "$start_o" $obj_files "$libo" || exit 1
 echo "$cmdname: linked -> $out_file"

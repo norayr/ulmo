@@ -75,6 +75,7 @@ MODULE SysModules;
       modules: Module;
       tm : Module;
       tb : BlockList;
+      ps : INTEGER;   (* pointer/address size: 4 on i386, 8 on AMD64 *)
 
    PROCEDURE ReverseModuleList;
       (* initially, the list of modules is constructed in reversed order *)
@@ -92,20 +93,23 @@ MODULE SysModules;
    END ReverseModuleList;
 
 BEGIN
-   (* Check Compiler assumtions about offsets *)
+   (* Check Compiler assumptions about offsets.
+      All pointer/address/procedure fields are SYS.SIZE(SYS.ADDRESS) bytes
+      (= 4 on i386, 8 on AMD64).  Use portable expressions. *)
+   ps := SHORT(SYS.SIZE(SYS.ADDRESS));
    tm := NIL; tb := NIL;
-   ASSERT (SYS.ADR (tm.next) = 0);
-   ASSERT (SYS.ADR (tm.name) = 4);
-   ASSERT (SYS.ADR (tm.init) = 8);
-   ASSERT (SYS.ADR (tm.begin) = 12);
-   ASSERT (SYS.ADR (tm.end) = 16);
-   ASSERT (SYS.ADR (tm.vars) = 20);
-   ASSERT (SYS.ADR (tm.blocks) = 24);
-   ASSERT (SYS.ADR (tm.nofblocks) = 28);
-   ASSERT (SYS.ADR (tb.next) = 0);
-   ASSERT (SYS.ADR (tb.begin) = 4);
-   ASSERT (SYS.ADR (tb.end) = 8);
-   ASSERT (SYS.ADR (tb.tag) = 12);
-   ASSERT (SYS.ADR (tb.name) = 16);
+   ASSERT (SYS.ADR (tm.next)       = 0);
+   ASSERT (SYS.ADR (tm.name)       = 1 * ps);
+   ASSERT (SYS.ADR (tm.init)       = 2 * ps);
+   ASSERT (SYS.ADR (tm.begin)      = 3 * ps);
+   ASSERT (SYS.ADR (tm.end)        = 4 * ps);
+   ASSERT (SYS.ADR (tm.vars)       = 5 * ps);
+   ASSERT (SYS.ADR (tm.blocks)     = 6 * ps);
+   ASSERT (SYS.ADR (tm.nofblocks)  = 7 * ps);
+   ASSERT (SYS.ADR (tb.next)       = 0);
+   ASSERT (SYS.ADR (tb.begin)      = 1 * ps);
+   ASSERT (SYS.ADR (tb.end)        = 2 * ps);
+   ASSERT (SYS.ADR (tb.tag)        = 3 * ps);
+   ASSERT (SYS.ADR (tb.name)       = 4 * ps);
    ReverseModuleList;
 END SysModules.

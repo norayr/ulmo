@@ -1,0 +1,2246 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2005 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   AMD64 adaptation of I386LinuxOberonBuiltIns.om
+   ----------------------------------------------------------------------------
+*)
+
+MODULE AMD64LinuxOberonBuiltIns; (* Christian Ehrhardt, AMD64 adaptation *)
+
+   IMPORT CodeGen := AMD64ObCodeGen, CompilerErrors, CompilerObjects,
+      ConstStrings, Emit := AMD64Emit, EmitErrors := AMD64OberonEmitErrors,
+      FragmentedStreams, Gen := AMD64OpCodeGenerator,
+      GenTypes := AMD64OberonGenTypes, AMD64BuiltIns := AMD64ObBuiltIns,
+      AMD64FPURegisters, AMD64OberonProcedures,
+      OA := AMD64OberonAnalyzer, Ob32 := Oberon64i, OberonStdProcedures,
+      OberonUlmProcedures, Op := AMD64Operands, PC := AMD64OberonContexts,
+      AMD64 := AMD64Instructions, Regs := CompilerRegisters, RelatedEvents,
+      Reloc := CompilerRelocations, Res := AMD64OberonResults,
+      StackAlloc := CompilerStackAllocations, Streams, Sym := OberonSymbols,
+      Sym32 := Oberon64iSymbols,
+      TmpPtrs := CompilerTemporaryPointers, UnixOberonProcedures, Write;
+
+   CONST
+      sysexit = 60;
+      sysfork = 57;
+      syssigaction = 13;  (* sys_rt_sigaction *)
+
+      pagesize = 4096;
+
+      crrecordlen = 32;
+      contextsize = crrecordlen - 8;
+
+      (* Coroutine Record (AMD64):
+       * CoroutineRec = RECORD
+       *    interrupts : LONGINT;   (* 4 bytes at offset 0 *)
+       *    started    : LONGINT;   (* 4 bytes at offset 4 *)
+       *    rbp        : ADDRESS;   (* 8 bytes at offset 8  *)
+       *    rsp        : ADDRESS;   (* 8 bytes at offset 16 *)
+       *    rip        : ADDRESS;   (* 8 bytes at offset 24 *)
+       * END;
+       *)
+      crints       = 0;
+      crstarted    = 4;
+      crbaseoffset = 8;
+      crtopoffset  = 16;
+      creipoffset  = 24;
+
+   CONST
+      (* AMD64 Linux rt_sigaction struct layout (each field 8 bytes):
+       *   sa_handler  : ADDRESS;
+       *   sa_flags    : LONGINT (padded to 8);
+       *   sa_restorer : ADDRESS (inline stub; SA_RESTORER required on AMD64);
+       *   sa_mask     : sigset_t (8 bytes);
+       * Total: 4 * 8 = 32 bytes = sigactwords QWORDs
+       *)
+      sigsetbytes = 8;
+      sigactwords = 4;
+      sigflags = 00C000004H;   (* SA_ONSTACK | SA_SIGINFO | SA_RESTORER *)
+
+   CONST
+      dummytagsize = 36;
+         (* AMD64 dummy tag size = basetypeOffset(32) + sentinel(4) = 36 bytes.
+            The compiler-generated type descriptor has an 8-byte-aligned module
+            pointer (4 bytes size + 4 bytes pad + 8 bytes module + 4 typeno +
+            4 hierlen + 8 pad = 32 bytes header), then a 4-byte sentinel.
+            OLD value was 20 (5 LONGINTs = i386 layout); wrong on AMD64 because
+            ExamineObject reads hierlen at offset 20 (basetypeOffset-12) and
+            expects the sentinel at offset 32 (basetypeOffset). *)
+
+   VAR
+      reg2param : ARRAY 8 OF Op.Register;
+
+   TYPE
+      ProcContext = PC.Context;
+
+   PROCEDURE FixupLoc(at : Sym.Attribute) : CompilerObjects.Location;
+   BEGIN
+      WHILE at.loc = NIL DO
+	 IF at.leftop # NIL THEN
+	    at := at.leftop;
+	 ELSIF at.rightop # NIL THEN
+	    at := at.rightop;
+         ELSE
+            RETURN NIL
+	 END;
+      END;
+      RETURN at.loc;
+   END FixupLoc;
+
+   PROCEDURE SetMode(reg : Regs.Value; type : Sym.Type);
+      VAR
+         new : Regs.Mode;
+   BEGIN
+      new := Regs.stdM;
+      CASE type.form OF
+      | Sym.pointer:
+         IF type.taggedptr THEN
+            new := Regs.ptrM;
+         END;
+      | Sym.address:
+         IF type.traced THEN
+            new := Regs.addrM;
+         END;
+      ELSE
+      END;
+      Regs.SetMode(reg, new);
+   END SetMode;
+
+   PROCEDURE RegCommit(set : Regs.RegSet; val : Regs.Value);
+   BEGIN
+      TmpPtrs.Commit(val);
+   END RegCommit;
+
+   (* Simplified AMD64 Allocate: always uses Storage.AllocateWithTag slow path.
+    * (No CMPXCHG16B fast path.)
+    *)
+   PROCEDURE Allocate(proc : PC.Context; at : Sym.Attribute;
+                       paramreg : Regs.Value; size : Op.Operand;
+		       tag : Regs.Value; own : Regs.Owner);
+      VAR
+         lhs : Op.Operand;
+	 ref : Reloc.SymRef;
+	 reg, sizereg : Regs.Value;
+	 sizeadd : INTEGER;
+	 req : Reloc.RelocRequest;
+	 dummytag : BOOLEAN;
+   BEGIN
+      dummytag := tag = NIL;
+      sizeadd := 8; (* TAG pointer = 8 bytes on AMD64 *)
+      IF dummytag THEN
+         INC(sizeadd, dummytagsize);
+      END;
+      (* All registers must be committed before a potential GC. *)
+      Regs.Foreach(proc.regs, RegCommit);
+      Regs.EnterLevel(proc.regs);
+      reg := paramreg;
+      IF paramreg = NIL THEN
+	 lhs := CodeGen.GenDesignator(proc, at, Gen.StdRegs, own);
+	 lhs.memsz := 8;
+	 Regs.CreateValue(reg, proc.regs, own, Regs.addrM);
+	 Regs.LoadReg(reg, Gen.StdRegs);
+	 Emit.Instr2(proc.s, AMD64.LEA, Op.RegOp(reg, 8), lhs);
+	 Regs.DestroyOwnedValue(lhs.reg1, own);
+	 Regs.DestroyOwnedValue(lhs.reg2, own);
+      END;
+      CASE Op.Loc(size) OF
+      | Op.immediate, Op.immediateDyn:
+         ASSERT((size.data # NIL) & (size.data.kind = Op.integerConst));
+         Emit.Instr1(proc.s, AMD64.PUSH,
+	    Op.ImmInt(size.data.intval + sizeadd));
+      | Op.memory:
+         Regs.CreateValue(sizereg, proc.regs, own, Regs.stdM);
+	 Regs.LoadReg(sizereg, Gen.StdRegs);
+	 Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(sizereg, 4), size);
+	 Emit.Instr2(proc.s, AMD64.ADD, Op.RegOp(sizereg, 4),
+	              Op.ImmInt(sizeadd));
+         Emit.Instr1(proc.s, AMD64.PUSH, Op.RegOp(sizereg, 8));
+	 Regs.DestroyOwnedValue(sizereg, own);
+      | Op.register:
+	 Emit.Instr2(proc.s, AMD64.ADD, size, Op.ImmInt(sizeadd));
+         Emit.Instr1(proc.s, AMD64.PUSH, size);
+      END;
+      IF dummytag THEN
+	 Emit.Instr1(proc.s, AMD64.PUSH, Op.ImmInt(0));
+      ELSE
+	 Emit.Instr1(proc.s, AMD64.PUSH, Op.RegOp(tag, 8));
+      END;
+      Emit.Instr1(proc.s, AMD64.PUSH, Op.RegOp(reg, 8));
+      IF paramreg = NIL THEN
+	 Regs.DestroyOwnedValue(reg, own);
+      END;
+      NEW(ref);
+      ConstStrings.Create(ref.modname, "Storage");
+      ConstStrings.Create(ref.symname, "AllocateWithTag");
+      Emit.CallExtern(proc.s, proc.regs, ref);
+      Regs.UntracedValue(reg, Gen.gensp);
+      Emit.Instr2(proc.s, AMD64.ADD, Op.RegOp(reg, 8),
+                   Op.ImmInt(24));
+      Regs.LeaveLevel(proc.regs);
+      Regs.DoneLevel(proc.regs);
+   END Allocate;
+
+
+   PROCEDURE GenBuiltIn(proc : ProcContext; at : Sym.Attribute;
+			 possible : SET; caller : Regs.Owner) : Op.Operand;
+      VAR
+	 lhs, rhs, syscallnr, result, errno : Op.Operand;
+	 op, opreg, dope, op2, sizeop, tagop, lenop, lenop2 : Op.Operand;
+	 param, tmp : Sym.Attribute;
+	 rset : SET;
+	 noerr, lab, lab2, beyond, start : FragmentedStreams.Label;
+	 cs : Streams.Stream;
+	 i, j, scale : INTEGER;
+	 own : Regs.Owner;
+	 reg1 : Gen.Register;
+	 diffreg, reg, reg2, tag, lenreg, tmpreg, crreg, crtop, crbase, sizereg, sp, bp : Regs.Value;
+	 ctxt : CodeGen.BoolContext;
+	 regarr : ARRAY 10 OF Regs.Value;
+	 possibles : ARRAY 10 OF SET;
+	 ok : BOOLEAN;
+	 type : OberonStdProcedures.StdProc;
+	 typ, typ2 : Sym.Type;
+	 var : CodeGen.VarDesc;
+	 attype : Sym.Type;
+	 req : Reloc.RelocRequest;
+	 ref : Reloc.SymRef;
+	 sym, mod : ConstStrings.String;
+	 pl : Sym.ParamList;
+	 val, base, dim, size, len, len2, offset2, offset : LONGINT;
+	 params : ARRAY 7 OF Sym.Attribute;
+	 errors : BOOLEAN;
+	 instr : Gen.Mnemonic;
+
+      PROCEDURE ToReg(reg1 : Gen.Register; VAR op : Op.Operand;
+		       caller : Regs.Owner);
+	 VAR
+	    reg : Regs.Value;
+	    opreg : Op.Operand;
+      BEGIN
+         reg := NIL;
+	 CASE Op.Loc(op) OF
+	 | Op.register:
+	    ASSERT(op.reg1 # NIL);
+	    Regs.LoadReg(op.reg1, {reg1});
+	    Regs.AddConstraint(op.reg1, {reg1});
+	    RETURN;
+         | Op.immediate:
+	    ASSERT(op.immsz = 4);
+         | Op.immediateDyn:
+	    ASSERT(op.immsz <= 4);
+	 END;
+	 ASSERT(op.reg1 = NIL);
+	 Regs.CreateValue(reg, proc.regs, caller, Regs.stdM);
+	 Regs.LoadReg(reg, {reg1});
+	 Regs.AddConstraint(reg, {reg1});
+	 opreg := Op.RegOp(reg, 4);
+	 Emit.Instr2(proc.s, AMD64.MOV, opreg, op);
+	 op := opreg;
+      END ToReg;
+
+      PROCEDURE CheckVar(op : Op.Operand; at : Sym.Attribute;
+                          VAR errors : BOOLEAN);
+      BEGIN
+	 IF Op.Loc(op) # Op.memory THEN
+	    CompilerErrors.Raise(proc.errors, FixupLoc(at), "variable expected");
+	    errors := TRUE;
+	 END;
+      END CheckVar;
+
+      PROCEDURE CheckArg(at : Sym.Attribute; VAR errors : BOOLEAN);
+         VAR
+	    type : Sym.Type;
+      BEGIN
+         type := NIL;
+         Sym32.GetType(at, type);
+	 IF ~(type.form IN {Sym.set, Sym.pointer, Sym.integer, Sym.cardinal, Sym.address, Sym.proceduretype}) THEN
+	    CompilerErrors.Raise(proc.errors, FixupLoc(at),
+				  "integer or address expected");
+	    errors := TRUE;
+	 END;
+      END CheckArg;
+
+   BEGIN
+      lhs := NIL; rhs := NIL;
+      ASSERT(at.proc.type.builtin);
+      own := Regs.GetOwner(proc.regs);
+      IF at.proc.type.builtinproc IS UnixOberonProcedures.StdProcedure THEN
+	 CASE at.proc.type.builtinproc(UnixOberonProcedures.StdProcedure).stdproc OF
+	 | UnixOberonProcedures.unixcall:
+	    errors := FALSE;
+	    rset := {Gen.genax};
+	    ASSERT(at.paramcnt <= 9);
+	    ASSERT(at.paramcnt >= 3);
+            param := at.firstparam; ASSERT(param # NIL);
+	    i := 0;
+	    WHILE param # NIL DO
+	       CheckArg(param, errors);
+	       params[i] := param;
+	       param := param.next;
+	       INC(i);
+	       IF i = 1 THEN
+	          CheckArg(param, errors);
+		  param := param.next; ASSERT(param # NIL); (* result d0 *)
+		  CheckArg(param, errors);
+		  param := param.next;
+	       END;
+	    END;
+	    ASSERT(i = at.paramcnt - 2);
+	    (* On AMD64 all args go into registers (reg2param[0..6]),
+	     * no special genbp stack trick needed. *)
+	    WHILE i > 0 DO
+	       DEC(i);
+	       op := CodeGen.GenExpr(proc, params[i], TRUE,
+		                         {reg2param[i]}, own);
+	       IF ~Op.IsError(op) THEN
+		  ToReg(reg2param[i], op, own);
+                  SetMode(op.reg1, params[i].type);
+		  regarr[i] := op.reg1;
+		  possibles[i] := {reg2param[i]};
+	       ELSE
+		  errors := TRUE;
+	       END;
+	    END;
+	    IF errors THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN Op.Error();
+	    END;
+	    i := at.paramcnt - 2;
+	    ok := Regs.PrepareInstruction(i, regarr, possibles); ASSERT(ok);
+	    Emit.Instr0(proc.s, AMD64.SYSCALL);
+	    i := 1;
+	    WHILE (i < at.paramcnt - 2) & (i < 7) DO
+	       Regs.DestroyOwnedValue(regarr[i], own);
+	       INC(i);
+	    END;
+            Regs.SetMode(regarr[0], Regs.stdM);
+	    IF (at.firstparam.next.mode IN Sym.designatorModes) THEN
+	       result := CodeGen.GenDesignator(proc, at.firstparam.next,
+					Gen.StdRegs, own);
+	       CheckVar(result, at.firstparam.next, errors);
+	    ELSE
+	       errors := TRUE;
+	    END;
+	    IF errors OR Op.IsError(result) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN Op.Error();
+	    END;
+	    syscallnr := Op.RegOp(regarr[0], 4);
+	    Emit.Instr2(proc.s, AMD64.MOV, result, syscallnr);
+	    Emit.Instr2(proc.s, AMD64.CMP, result, Op.ImmInt(-1023));
+	    FragmentedStreams.CreateLabel(beyond);
+            Emit.JumpCC(proc.s, beyond, AMD64.JC-AMD64.JCC);
+	    Emit.Instr1(proc.s, AMD64.NEG, result);
+	    Emit.Instr0(proc.s, AMD64.CLC);
+	    FragmentedStreams.AttachLabel(proc.s, beyond);
+	    Regs.DestroyOwnedValue(regarr[0], own);
+	    Regs.DestroyOwnedValue(result.reg1, own);
+	    Regs.DestroyOwnedValue(result.reg2, own);
+	    RETURN Op.CCOp(AMD64.JC-AMD64.JCC);
+	 | UnixOberonProcedures.unixfork:
+	    ASSERT(at.paramcnt = 1);
+	    ASSERT(at.firstparam # NIL);
+	    Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(reg, {Gen.genax});
+	    Regs.AddConstraint(reg, {Gen.genax});
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, 8),
+	                 Op.ImmInt(sysfork));
+	    Emit.Instr0(proc.s, AMD64.SYSCALL);
+	    op := CodeGen.GenDesignator(proc, at.firstparam, Gen.StdRegs, own);
+	    IF Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN op;
+	    END;
+	    Emit.Instr2(proc.s, AMD64.MOV, op, Op.RegOp(reg, 4));
+            Emit.Instr2(proc.s, AMD64.CMP, Op.RegOp(reg, 4), Op.ImmInt(0));
+	    Regs.DestroyOwnedValue(op.reg1, own);
+	    Regs.DestroyOwnedValue(op.reg2, own);
+	    Regs.DestroyOwnedValue(reg, own);
+	    RETURN Op.CCOp(AMD64.JNL-AMD64.JCC);
+	 | UnixOberonProcedures.unixsignal:
+	    (* We allow an additional 5th parameter for the signal mask. *)
+	    errors := FALSE;
+	    ASSERT(at.paramcnt IN {4, 5});
+	    param := at.firstparam;
+	    ASSERT(param # NIL);
+	    op := CodeGen.GenExpr(proc, param, TRUE, {reg2param[1]}, own);
+	    CheckArg(param, errors);
+	    IF errors OR Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN Op.Error();
+	    END;
+	    IF Op.Loc(op) IN {Op.immediate, Op.immediateDyn} THEN
+	       Regs.CreateValue(regarr[0], proc.regs, own, Regs.stdM);
+	       Regs.LoadReg(regarr[0], {reg2param[1]});
+	       Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(regarr[0], 4), op);
+               SetMode(regarr[0], param.type);
+	    ELSE
+	       ASSERT(Op.Loc(op) = Op.register);
+	       regarr[0] := op.reg1;
+	    END;
+            Regs.AddConstraint(regarr[0], {reg2param[1]});
+	    possibles[0] := {reg2param[1]};
+	    param := param.next;
+	    ASSERT(param # NIL);
+	    Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(reg, Gen.StdRegs);
+	    Emit.Instr2(proc.s, AMD64.XOR, Op.RegOp(reg, 4),
+	                 Op.RegOp(reg, 4));
+	    op2 := Op.ImmIntFixed(sigflags, 4);
+	    IF at.paramcnt > 4 THEN
+	       op2 := CodeGen.GenExpr(proc, param.next.next.next, TRUE,
+	                               Gen.StdRegs, own);
+	       CheckArg(param.next.next.next, errors);
+	       IF errors OR Op.IsError(op2) THEN
+	          Regs.DestroyOwnerOnError(proc.regs, own);
+		  RETURN Op.Error();
+	       END;
+	    END;
+	    (* Push sa_mask zeros: sigactwords-3 = 1 QWORD for AMD64 *)
+	    i := 0;
+	    WHILE i < sigactwords - 3 DO
+	       INC(i);
+	       Emit.Instr1(proc.s, AMD64.PUSH, Op.RegOp(reg, 8));
+	    END;
+	    Regs.DestroyOwnedValue(reg, own);
+	    (* Emit an inline sys_rt_sigreturn stub (jumped over at runtime).
+	     * SA_RESTORER is required on AMD64 with AVX/AVX-512: without it
+	     * the kernel cannot set up the signal frame (SI_KERNEL SIGSEGV). *)
+	    FragmentedStreams.CreateLabel(beyond);
+	    FragmentedStreams.CreateLabel(start);
+	    Emit.Jump(proc.s, start);
+	    FragmentedStreams.AttachLabel(proc.s, beyond);
+	    Regs.UntracedValue(reg, Gen.genax);
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, 8), Op.ImmInt(15));
+	    Emit.Instr0(proc.s, AMD64.SYSCALL);
+	    Emit.Instr0(proc.s, AMD64.HLT);
+	    ConstStrings.Init(cs);
+	    Write.StringS(cs, "__sigreturn_stub_");
+	    Write.IntS(cs, PC.Unique(proc), 0);
+	    ConstStrings.Close(cs, mod);
+	    Reloc.NewSymbol(proc.s, mod, beyond);
+	    FragmentedStreams.AttachLabel(proc.s, start);
+	    (* Push sa_restorer = address of inline __sigreturn_stub *)
+	    NEW(ref);
+	    IF proc.module.origname # NIL THEN
+	       ref.modname := proc.module.origname;
+	    ELSE
+	       ref.modname := proc.module.name;
+	    END;
+	    ref.symname := mod;
+	    Reloc.Create(req, proc.s, Reloc.addSym, ref);
+	    op := Op.ImmIntFixed(0, 8);
+	    Op.RelocOpen(op, req);
+	    Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(reg, Gen.StdRegs);
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, 8), op);
+	    Emit.Instr1(proc.s, AMD64.PUSH, Op.RegOp(reg, 8));
+	    Regs.DestroyOwnedValue(reg, own);
+	    (* Push sa_flags *)
+	    Emit.Instr1(proc.s, AMD64.PUSH, op2);
+	    Regs.DestroyOwnedValue(op2.reg1, own);
+	    Regs.DestroyOwnedValue(op2.reg2, own);
+	    (* Push sa_handler via inline C-to-Oberon trampoline.
+	     * Linux calls the handler with C convention: rdi=signo, rsi=siginfo ptr,
+	     * rdx=ucontext ptr.  The Oberon procedure expects a param block on the
+	     * stack.  Emit a trampoline that bridges the calling convention gap.
+	     *)
+	    op := CodeGen.GenExpr(proc, param, TRUE, Gen.StdRegs, own);
+	    CheckArg(param, errors);
+	    IF errors OR Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN Op.Error();
+	    END;
+	    (* Jump over the trampoline body so it is not executed inline. *)
+	    FragmentedStreams.CreateLabel(lab);   (* trampolineLabel   *)
+	    FragmentedStreams.CreateLabel(lab2);  (* afterTrampolineLabel *)
+	    Emit.Jump(proc.s, lab2);
+	    (* ---- trampoline body ---- *)
+	    FragmentedStreams.AttachLabel(proc.s, lab);
+	    (* subq $24, %rsp  — allocate 24-byte Oberon param block *)
+	    Regs.UntracedValue(sp, Gen.gensp);
+	    Emit.Instr2(proc.s, AMD64.SUB, Op.RegOp(sp, 8), Op.ImmInt(24));
+	    (* movl %edi, 0(%rsp)  — signo (4 bytes) *)
+	    Regs.UntracedValue(reg, Gen.gendi);
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.MemOp1(sp, 4, 0, 0), Op.RegOp(reg, 4));
+	    (* movq %rsi, 8(%rsp)  — siginfo* (8 bytes) *)
+	    Regs.UntracedValue(reg, Gen.gensi);
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.MemOp1(sp, 8, 8, 0), Op.RegOp(reg, 8));
+	    (* movq %rdx, 16(%rsp) — ucontext* (8 bytes) *)
+	    Regs.UntracedValue(reg, Gen.gendx);
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.MemOp1(sp, 8, 16, 0), Op.RegOp(reg, 8));
+	    (* movq handler, %rax; callq *%rax  — call the Oberon procedure *)
+	    Regs.UntracedValue(reg, Gen.genax);
+	    IF Op.Loc(op) = Op.immediateDyn THEN
+	       op.immsz := 8;
+	    END;
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, 8), op);
+	    Regs.DestroyOwnedValue(op.reg1, own);
+	    Emit.Instr1(proc.s, AMD64.CALL, Op.RegOp(reg, 8));
+	    (* addq $24, %rsp  — restore stack *)
+	    Regs.UntracedValue(sp, Gen.gensp);
+	    Emit.Instr2(proc.s, AMD64.ADD, Op.RegOp(sp, 8), Op.ImmInt(24));
+	    (* ret *)
+	    Emit.Instr0(proc.s, AMD64.RET);
+	    (* Register the trampoline as a local symbol so we can reference it *)
+	    ConstStrings.Init(cs);
+	    Write.StringS(cs, "__sig_trampoline_");
+	    Write.IntS(cs, PC.Unique(proc), 0);
+	    ConstStrings.Close(cs, sym);
+	    Reloc.NewSymbol(proc.s, sym, lab);
+	    (* ---- end trampoline body ---- *)
+	    FragmentedStreams.AttachLabel(proc.s, lab2);
+	    (* Build an immediateDyn referencing the trampoline address *)
+	    NEW(ref);
+	    IF proc.module.origname # NIL THEN
+	       ref.modname := proc.module.origname;
+	    ELSE
+	       ref.modname := proc.module.name;
+	    END;
+	    ref.symname := sym;
+	    Reloc.Create(req, proc.s, Reloc.addSym, ref);
+	    op2 := Op.ImmIntFixed(0, 8);
+	    Op.RelocOpen(op2, req);
+	    (* AMD64 has no push-imm64 instruction; use MOV r64,imm64 + PUSH r64 *)
+	    Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(reg, Gen.StdRegs);
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, 8), op2);
+	    Emit.Instr1(proc.s, AMD64.PUSH, Op.RegOp(reg, 8));
+	    Regs.DestroyOwnedValue(reg, own);
+	    (* newact = RSP (points to sa_handler = start of new sigaction) *)
+	    Regs.UntracedValue(reg, Gen.gensp);
+	    Regs.CreateValue(regarr[1], proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(regarr[1], {reg2param[2]});
+	    Regs.AddConstraint(regarr[1], {reg2param[2]});
+	    possibles[1] := {reg2param[2]};
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(regarr[1], 8),
+	                 Op.RegOp(reg, 8));
+	    (* oldact = RSP - sigactwords*8 *)
+	    Emit.Instr2(proc.s, AMD64.SUB, Op.RegOp(reg, 8),
+	                 Op.ImmInt(sigactwords * 8));
+	    Regs.CreateValue(regarr[2], proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(regarr[2], {reg2param[3]});
+	    Regs.AddConstraint(regarr[2], {reg2param[3]});
+	    possibles[2] := {reg2param[3]};
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(regarr[2], 8),
+	                 Op.RegOp(reg, 8));
+	    Regs.CreateValue(regarr[3], proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(regarr[3], {reg2param[4]});
+	    Regs.AddConstraint(regarr[3], {reg2param[4]});
+	    possibles[3] := {reg2param[4]};
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(regarr[3], 8),
+	                 Op.ImmInt(sigsetbytes));
+	    Regs.CreateValue(regarr[4], proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(regarr[4], {Gen.genax});
+	    Regs.AddConstraint(regarr[4], {Gen.genax});
+	    possibles[4] := {Gen.genax};
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(regarr[4], 8),
+	                 Op.ImmInt(syssigaction));
+	    ok := Regs.PrepareInstruction(5, regarr, possibles); ASSERT(ok);
+	    Emit.Instr0(proc.s, AMD64.SYSCALL);
+	    Regs.DestroyOwnedValue(regarr[0], own); (* signo *)
+	    Regs.DestroyOwnedValue(regarr[1], own); (* newact *)
+	    Regs.DestroyOwnedValue(regarr[2], own); (* oldact *)
+	    Regs.DestroyOwnedValue(regarr[3], own); (* sigset_t bytes *)
+	    Regs.RemoveConstraint(regarr[4]);
+	    param := param.next; ASSERT(param # NIL);
+	    Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(reg, Gen.StdRegs);
+	    Regs.UntracedValue(reg2, Gen.gensp);
+            Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, 8),
+	                 Op.MemOp1(reg2, 8, 0, 0));
+	    Emit.Instr2(proc.s, AMD64.ADD, Op.RegOp(reg2, 8),
+	                 Op.ImmInt(2*8*sigactwords));
+	    op := CodeGen.GenDesignator(proc, param, Gen.StdRegs, own);
+	    CheckArg(param, errors);
+	    IF errors OR Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN Op.Error();
+	    END;
+	    Emit.Instr2(proc.s, AMD64.MOV, op, Op.RegOp(reg, 8));
+	    Regs.DestroyOwnedValue(op.reg1, own);
+	    Regs.DestroyOwnedValue(op.reg2, own);
+	    Regs.DestroyOwnedValue(reg, own);
+            param := param.next; ASSERT(param # NIL);
+	    op := CodeGen.GenDesignator(proc, param, Gen.StdRegs, own);
+	    CheckArg(param, errors);
+	    IF errors OR Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN Op.Error();
+	    END;
+	    op.memsz := 4;
+	    Emit.Instr2(proc.s, AMD64.MOV, op, Op.RegOp(regarr[4], 4));
+	    Regs.DestroyOwnedValue(op.reg1, own);
+	    Regs.DestroyOwnedValue(op.reg2, own);
+	    Emit.Instr2(proc.s, AMD64.CMP, Op.RegOp(regarr[4], 4), Op.ImmInt(-1023));
+	    Regs.DestroyOwnedValue(regarr[4], own);
+	    RETURN Op.CCOp(AMD64.JC-AMD64.JCC);
+	 END; (* CASE stdproc OF *)
+      ELSIF at.proc.type.builtinproc IS AMD64OberonProcedures.StdProcedure THEN
+	 ASSERT(at.paramcnt = 1);
+	 param := at.firstparam; ASSERT(param # NIL);
+	 op := CodeGen.GenExpr(proc, param, FALSE, Gen.StdRegs, own);
+	 IF Op.IsError(op) THEN
+	    Regs.DestroyOwnerOnError(proc.regs, own);
+	    RETURN op;
+	 END;
+	 op := CodeGen.LoadFPUReg(proc, op, param.type.form, op.memsz, own);
+	 CASE at.proc.type.builtinproc(AMD64OberonProcedures.StdProcedure).stdproc OF
+	 | AMD64OberonProcedures.sqrt:
+	    instr := AMD64.FSQRT;
+	 | AMD64OberonProcedures.sin:
+	    instr := AMD64.FSIN;
+	 | AMD64OberonProcedures.cos:
+	    instr := AMD64.FCOS;
+	 END;
+	 AMD64FPURegisters.Instr1(proc.s, instr, op);
+	 RETURN op;
+      ELSIF at.proc.type.builtinproc IS OberonStdProcedures.StdProcedure THEN
+	 type := at.proc.type.builtinproc(OberonStdProcedures.StdProcedure).stdproc;
+	 CASE type OF
+	 | OberonStdProcedures.abs:
+	    op := CodeGen.GenExpr(proc, at.firstparam, TRUE, possible, own);
+	    IF Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN op
+	    END;
+	    CASE Op.Loc(op) OF
+	    | Op.immediate, Op.immediateDyn:
+	       ASSERT(op.data # NIL);
+	       CASE op.data.kind OF
+	       | Op.integerConst:
+		  IF op.data.intval < 0 THEN
+		     op.data.intval := - op.data.intval;
+		  END;
+               | Op.realConst:
+		  IF op.data.realval < 0 THEN
+		     op.data.realval := - op.data.realval;
+		  END;
+	       END;
+            | Op.register:
+	       (* GNU SUPEROPT output *)
+	       Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+	       Regs.LoadReg(reg, Gen.StdRegs);
+	       opreg := Op.RegOp(reg, 4(* INTEGER *));
+	       Emit.Instr2(proc.s, AMD64.MOV, opreg, op);
+	       Emit.Instr2(proc.s, AMD64.SAR, opreg, Op.ImmIntFixed(31, 1));
+	       Emit.Instr2(proc.s, AMD64.ADD, op, opreg);
+	       Emit.Instr2(proc.s, AMD64.XOR, op, opreg);
+	       Regs.DestroyOwnedValue(reg, own);
+	       Regs.Chown(op.reg1, caller);
+	    | Op.fpuRegister:
+	       AMD64FPURegisters.Instr1(proc.s, AMD64.FABS, op);
+	    END;
+	    RETURN op;
+	 | OberonStdProcedures.adr:
+	    ASSERT(possible # {});
+	    op := CodeGen.GenDesignator(proc, at.firstparam, possible, own);
+	    IF Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN op
+	    END;
+	    ASSERT(Op.Loc(op) = Op.memory);
+	    IF (op.reg1 # NIL) & (op.reg2 = NIL) & (op.disp = 0) &
+	       (op.dispsz = 0) THEN
+	       Regs.Chown(op.reg1, caller);
+               op := Op.RegOp(op.reg1, 8(* address *));
+               Regs.SetMode(op.reg1, Regs.addrM);
+	       RETURN op;
+            END;
+	    IF (op.reg1 = NIL) & (op.reg2 # NIL) &
+	       (op.disp = 0) & (op.dispsz = 0) THEN
+               Op.Scale(op, scale);
+               IF scale = 1 THEN
+		  Regs.Chown(op.reg2, caller);
+	          op := Op.RegOp(op.reg2, 8(* address *));
+                  Regs.SetMode(op.reg1, Regs.addrM);
+		  RETURN op;
+               END;
+            END;
+	    IF (op.reg1 # NIL) & Regs.RegCode(op.reg1, reg1) &
+	       (reg1 IN possible) THEN
+	       reg := op.reg1;
+            ELSIF (op.reg2 # NIL) & Regs.RegCode(op.reg2, reg1) &
+	       (reg1 IN possible) THEN
+	       reg := op.reg2;
+            ELSE
+	       Regs.CreateValue(reg, proc.regs, own, Regs.addrM);
+	       Regs.LoadReg(reg, possible);
+	    END;
+	    opreg := Op.RegOp(reg, 8(* address *));
+	    Regs.Chown(reg, caller);
+	    op.memsz := 8;
+	    Emit.Instr2(proc.s, AMD64.LEA, opreg, op);
+	    IF op.reg1 # reg THEN
+	       Regs.DestroyOwnedValue(op.reg1, own);
+	    END;
+	    IF op.reg2 # reg THEN
+	       Regs.DestroyOwnedValue(op.reg2, own);
+	    END;
+	    RETURN opreg;
+	 | OberonStdProcedures.ash, OberonStdProcedures.lsh,
+	   OberonStdProcedures.rot:
+	    param := at.firstparam;
+	    ASSERT((param # NIL) & (param.next # NIL));
+	    ASSERT(param.type.form IN {Sym.integer, Sym.cardinal, Sym.address, Sym.set});
+	    rhs := CodeGen.GenExpr(proc, param.next, TRUE, {Gen.gencx}, own);
+	    IF Op.IsError(rhs) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN rhs
+	    END;
+	    IF Op.Loc(rhs) IN {Op.immediate, Op.immediateDyn} THEN
+	       ASSERT(rhs.data.kind = Op.integerConst);
+               CASE type OF
+	       | OberonStdProcedures.lsh:
+	          IF ABS(rhs.data.intval) > 31 THEN
+		     RETURN Op.ImmInt(0);
+		  END;
+	       | OberonStdProcedures.rot:
+	          rhs.data.intval := rhs.data.intval MOD 32;
+	       | OberonStdProcedures.ash:
+	          IF rhs.data.intval > 31 THEN
+		     RETURN Op.ImmInt(0);
+		  ELSIF rhs.data.intval < - 31 THEN
+		     rhs.data.intval := -31;
+		  END;
+	       END;
+	       op := CodeGen.GenExpr(proc, param, TRUE, possible, caller);
+	       IF Op.IsError(op) THEN
+		  Regs.DestroyOwnerOnError(proc.regs, own);
+		  RETURN op
+	       END;
+	       IF Op.Loc(op) IN { Op.immediate, Op.immediateDyn} THEN
+	          Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+		  Regs.LoadReg(reg, possible);
+		  Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, 4), op);
+		  op := Op.RegOp(reg, 4);
+	       END;
+	       op2 := Op.ImmIntFixed(ABS(rhs.data.intval), 1);
+	       IF rhs.data.intval < 0 THEN
+		  CASE type OF
+		  | OberonStdProcedures.ash:
+		     Emit.Instr2(proc.s, AMD64.SAR, op, op2);
+		  | OberonStdProcedures.lsh:
+		     Emit.Instr2(proc.s, AMD64.SHR, op, op2);
+		  | OberonStdProcedures.rot:
+		     Emit.Instr2(proc.s, AMD64.ROR, op, op2);
+		  END;
+	       ELSE
+		  CASE type OF
+		  | OberonStdProcedures.ash:
+		     Emit.Instr2(proc.s, AMD64.SAL, op, op2);
+		  | OberonStdProcedures.lsh:
+		     Emit.Instr2(proc.s, AMD64.SHL, op, op2);
+		  | OberonStdProcedures.rot:
+		     Emit.Instr2(proc.s, AMD64.ROL, op, op2);
+		  END;
+	       END;
+	       Regs.Chown(op.reg1, caller);
+	       RETURN op;
+	    END;
+	    ASSERT(possible # {});
+	    rset := possible - {Gen.gencx};
+	    IF rset = {} THEN
+	       rset := Gen.StdRegs - {Gen.gencx};
+	    END;
+	    Regs.AddConstraint(rhs.reg1, {Gen.gencx});
+	    op := CodeGen.GenExpr(proc, param, TRUE, rset, caller);
+	    IF Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN op
+	    END;
+	    IF Op.Loc(op) IN { Op.immediate, Op.immediateDyn} THEN
+	       Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+	       Regs.LoadReg(reg, rset);
+	       Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, 4), op);
+	       op := Op.RegOp(reg, 4);
+	    END;
+	    CASE type OF
+	    | OberonStdProcedures.rot:
+	       Emit.Instr2(proc.s, AMD64.AND, rhs, Op.ImmInt(31));
+	       rhs.memsz := 1;
+	       Emit.Instr2(proc.s, AMD64.ROL, op, rhs);
+	    | OberonStdProcedures.lsh, OberonStdProcedures.ash:
+	       FragmentedStreams.CreateLabel(lab);
+	       FragmentedStreams.CreateLabel(beyond);
+	       Emit.Instr2(proc.s, AMD64.CMP, rhs, Op.ImmInt(0));
+	       Emit.JumpCC(proc.s, beyond, AMD64.JZ-AMD64.JCC);
+	       Emit.JumpCC(proc.s, lab, AMD64.JG-AMD64.JCC);
+	       Regs.EnterLevel(proc.regs);
+	       Emit.Instr1(proc.s, AMD64.NEG, rhs);
+	       FragmentedStreams.CreateLabel(lab2);
+	       Emit.Instr2(proc.s, AMD64.CMP, rhs, Op.ImmInt(32));
+	       Emit.JumpCC(proc.s, lab2, AMD64.JB - AMD64.JCC);
+	       Regs.EnterLevel(proc.regs);
+	       CASE type OF
+	       | OberonStdProcedures.lsh:
+		  Emit.Instr2(proc.s, AMD64.SHR, op, Op.ImmInt(1));
+	       | OberonStdProcedures.ash:
+                  Emit.Instr2(proc.s, AMD64.SAR, op, Op.ImmInt(1));
+	       END;
+	       Emit.Instr2(proc.s, AMD64.MOV, rhs, Op.ImmInt(31));
+	       Regs.LeaveLevel(proc.regs);
+	       Regs.DoneLevel(proc.regs);
+	       FragmentedStreams.AttachLabel(proc.s, lab2);
+	       CASE type OF
+	       | OberonStdProcedures.lsh:
+		  Emit.Instr2(proc.s, AMD64.SHR, op, Op.RegOp(rhs.reg1, 1));
+	       | OberonStdProcedures.ash:
+                  Emit.Instr2(proc.s, AMD64.SAR, op, Op.RegOp(rhs.reg1, 1));
+	       END;
+               Regs.LeaveLevel(proc.regs);
+	       Regs.DoneLevel(proc.regs);
+	       Emit.Jump(proc.s, beyond);
+
+	       FragmentedStreams.AttachLabel(proc.s, lab);
+
+	       Regs.EnterLevel(proc.regs);
+	       FragmentedStreams.CreateLabel(lab2);
+	       Emit.Instr2(proc.s, AMD64.CMP, rhs, Op.ImmInt(32));
+	       Emit.JumpCC(proc.s, lab2, AMD64.JB - AMD64.JCC);
+	       Regs.EnterLevel(proc.regs);
+	       CASE type OF
+	       | OberonStdProcedures.lsh:
+		  Emit.Instr2(proc.s, AMD64.SHL, op, Op.ImmInt(1));
+	       | OberonStdProcedures.ash:
+                  Emit.Instr2(proc.s, AMD64.SAL, op, Op.ImmInt(1));
+	       END;
+	       Emit.Instr2(proc.s, AMD64.MOV, rhs, Op.ImmInt(31));
+	       Regs.LeaveLevel(proc.regs);
+	       Regs.DoneLevel(proc.regs);
+	       FragmentedStreams.AttachLabel(proc.s, lab2);
+	       CASE type OF
+	       | OberonStdProcedures.lsh:
+		  Emit.Instr2(proc.s, AMD64.SHL, op, Op.RegOp(rhs.reg1, 1));
+	       | OberonStdProcedures.ash:
+                  Emit.Instr2(proc.s, AMD64.SAL, op, Op.RegOp(rhs.reg1, 1));
+	       END;
+               Regs.LeaveLevel(proc.regs);
+	       Regs.DoneLevel(proc.regs);
+	       FragmentedStreams.AttachLabel(proc.s, beyond);
+	    END;
+	    Regs.DestroyOwnedValue(rhs.reg1, own);
+
+	    Regs.LoadReg(op.reg1, possible);
+	    ASSERT(op.reg2 = NIL);
+            SetMode(op.reg1, at.type);
+	    Regs.Chown(op.reg1, caller);
+	    RETURN Op.RegOp(op.reg1, 4);
+	 | OberonStdProcedures.assert:
+	    ASSERT((at.paramcnt = 1) OR (at.paramcnt = 2));
+	    ASSERT(at.firstparam # NIL);
+	    NEW(ctxt);
+	    ctxt.target := NIL;
+	    ctxt.setaction := CodeGen.setNever;
+	    ctxt.neg := FALSE;
+	    ctxt.falselab := NIL;
+	    FragmentedStreams.CreateLabel(ctxt.truelab);
+	    CodeGen.GenBool(proc, at.firstparam, ctxt);
+	    Regs.EnterLevel(proc.regs);
+	    IF at.firstparam.next # NIL THEN
+	       op := CodeGen.GenExpr(proc, at.firstparam.next, TRUE, Gen.StdRegs, own);
+	    ELSE
+	       op := Op.ImmInt(0);
+	    END;
+	    EmitErrors.Assertion(proc, at.loc, op);
+	    Regs.DestroyOwnedValue(op.reg1, own);
+	    Regs.LeaveLevel(proc.regs);
+	    Regs.DoneLevel(proc.regs);
+	    FragmentedStreams.AttachLabel(proc.s, ctxt.truelab);
+	    RETURN NIL;
+	 | OberonStdProcedures.bit:
+	    ASSERT(at.paramcnt = 2);
+	    param := at.firstparam;
+	    lhs := CodeGen.GenDesignator(proc, param, Gen.StdRegs, own);
+	    IF Op.IsError(lhs) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN lhs
+	    END;
+	    rhs := CodeGen.GenExpr(proc, param.next, TRUE, Gen.StdRegs, own);
+	    IF Op.IsError(rhs) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN rhs
+	    END;
+            IF Op.Loc(rhs) = Op.register THEN
+	       FragmentedStreams.CreateLabel(noerr);
+	       Emit.Instr2(proc.s, AMD64.CMP, rhs, Op.ImmInt(32));
+	       Emit.JumpCC(proc.s, noerr, AMD64.JB-AMD64.JCC);
+	       Regs.EnterLevel(proc.regs);
+	       EmitErrors.RangeCheck(proc, at.loc, rhs, Op.ImmInt(31));
+	       Regs.LeaveLevel(proc.regs);
+	       Regs.DoneLevel(proc.regs);
+	       FragmentedStreams.AttachLabel(proc.s, noerr);
+            END;
+	    Emit.Instr2(proc.s, AMD64.BT, lhs, rhs);
+	    Regs.DestroyOwnedValue(rhs.reg1, own);
+	    Regs.DestroyOwnedValue(lhs.reg1, own);
+	    Regs.DestroyOwnedValue(lhs.reg2, own);
+	    RETURN Op.CCOp(AMD64.JC-AMD64.JCC);
+	 | OberonStdProcedures.cap:
+	    ASSERT((at.paramcnt = 1) & (at.firstparam # NIL));
+	    op := CodeGen.GenExpr(proc, at.firstparam, TRUE, possible, own);
+	    IF Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN op
+	    END;
+            CASE Op.Loc(op) OF
+	    | Op.immediate:
+	       ASSERT(op.data.kind = Op.charConst);
+	       op.data.charval := CAP(op.data.charval);
+	    | Op.register:
+	       Emit.Instr2(proc.s, AMD64.AND, op, Op.ImmInt(255-32));
+	    END;
+	    IF op.reg1 # NIL THEN
+	       Regs.Chown(op.reg1, caller);
+	    END;
+	    RETURN op;
+	 | OberonStdProcedures.chr:
+	    ASSERT((at.paramcnt = 1) & (at.firstparam # NIL));
+	    rset := possible * Gen.LowByteRegs;
+	    IF rset = {} THEN
+	       rset := Gen.LowByteRegs;
+	    END;
+	    op := CodeGen.GenExpr(proc, at.firstparam, TRUE, rset, own);
+	    IF Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN op
+	    END;
+            CASE Op.Loc(op) OF
+	    | Op.immediate, Op.immediateDyn:
+	       ASSERT(op.data.kind = Op.integerConst);
+	       IF (op.data.intval > 255) OR (op.data.intval < 0) THEN
+		  CompilerErrors.Raise(proc.errors, FixupLoc(at.firstparam),
+				       "constant out of range");
+                  Regs.DestroyOwnerOnError(proc.regs, own);
+		  RETURN Op.Error();
+               ELSE
+		  RETURN Op.ImmChar(CHR(op.data.intval));
+	       END;
+	    | Op.register:
+	       IF op.memsz > 1 THEN
+	          IF op.memsz >= 4 THEN
+		     op.memsz := 4;
+                  ELSE
+		     Regs.AddConstraint(op.reg1, Gen.LowByteRegs);
+		  END;
+		  Emit.Instr2(proc.s, AMD64.CMP, op, Op.ImmInt(255));
+		  FragmentedStreams.CreateLabel(noerr);
+		  Emit.JumpCC(proc.s, noerr, AMD64.JNA-AMD64.JCC);
+		  Regs.EnterLevel(proc.regs);
+		  EmitErrors.RangeCheck(proc, at.loc, op, Op.ImmInt(255));
+		  Regs.LeaveLevel(proc.regs);
+		  Regs.DoneLevel(proc.regs);
+		  FragmentedStreams.AttachLabel(proc.s, noerr);
+		  Regs.RemoveConstraint(op.reg1);
+	       END;
+	       Regs.Chown(op.reg1, caller);
+               Regs.SetMode(op.reg1, Regs.stdM);
+	       RETURN Op.RegOp(op.reg1, 1);
+	    END;
+	 | OberonStdProcedures.copy:
+	    (* Like a string assignment but open arrays are allowed *)
+	    ASSERT((at.paramcnt = 2) & (at.firstparam # NIL));
+	    param := at.firstparam;
+	    ASSERT((param.next # NIL) & (param.next.type.form = Sym.array) &
+	            (param.next.type.element.form = Sym.char));
+	    Regs.CreateValue(lenreg, proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(lenreg, {Gen.gencx});
+	    Regs.AddConstraint(lenreg, {Gen.gencx});
+	    lhs := CodeGen.GenDesignator(proc, param.next, Gen.StdRegs, own);
+	    IF Op.IsError(lhs) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN NIL;
+	    END;
+	    IF param.next.type.dyn THEN
+	       tmp := param.next;
+	       offset := 0;
+	       WHILE tmp.mode = Sym.indexAt DO
+		  INC(offset);
+		  tmp := tmp.designator;
+	       END;
+	       NEW(var);
+	       var.mode := CodeGen.stackM;
+	       var.ident := tmp.ident;
+	       lenop := CodeGen.GenVar(proc, var, FALSE, Gen.StdRegs, own);
+	       INC(lenop.disp, Ob32.pointerSize + offset * Ob32.int32Size);
+	       lenop.memsz := Ob32.int32Size; (* AMD64: dimension values are int32 *)
+	       Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(lenreg, 4), lenop);
+	       Regs.DestroyOwnedValue(lenop.reg1, own);
+	       Regs.DestroyOwnedValue(lenop.reg2, own);
+	       lenop := Op.RegOp(lenreg, 4);
+	    ELSE
+	       len := Sym32.GetSize(proc.module, param.next.type, proc.errors);
+	       lenop := Op.ImmInt(len);
+	    END;
+	    rhs := CodeGen.GenExpr(proc, param, FALSE, Gen.StdRegs, own);
+	    IF Op.IsError(rhs) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN NIL;
+	    END;
+	    CASE Op.Loc(rhs) OF
+	    | Op.immediate, Op.immediateDyn:
+	       (* Character constant assigned to string *)
+	       lhs.memsz := 1; rhs.immsz := 1;
+	       Emit.Instr2(proc.s, AMD64.MOV, lhs, rhs);
+	       INC(lhs.disp);
+	       CASE Op.Loc(lenop) OF
+	       | Op.register:
+		  FragmentedStreams.CreateLabel(beyond);
+		  Emit.Instr2(proc.s, AMD64.CMP, lenop, Op.ImmInt(1));
+		  Emit.JumpCC(proc.s, beyond, AMD64.JE-AMD64.JCC);
+		  Emit.Instr2(proc.s, AMD64.MOV, lhs, Op.ImmInt(0));
+		  FragmentedStreams.AttachLabel(proc.s, beyond);
+	       | Op.immediateDyn:
+		  IF len > 1 THEN
+		     Emit.Instr2(proc.s, AMD64.MOV, lhs, Op.ImmInt(0));
+		  END;
+	       END;
+	       (* We don't call GenStringOp in this branch, i.e. we
+	        * have to destroy registers. *)
+	       Regs.DestroyOwnedValue(lhs.reg1, own);
+	       Regs.DestroyOwnedValue(lhs.reg2, own);
+	       Regs.DestroyOwnedValue(lenop.reg1, own);
+	       Regs.DestroyOwnedValue(lenop.reg2, own);
+	       IF lenreg # lenop.reg1 THEN
+                  Regs.DestroyOwnedValue(lenreg, own);
+	       END;
+	    | Op.memory:
+	       IF param.type.dyn THEN
+		  IF Op.Loc(lenop) = Op.immediateDyn THEN
+		     Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(lenreg, 4),
+				  lenop);
+		     lenop := Op.RegOp(lenreg, 4);
+		  END;
+		  ASSERT(Op.Loc(lenop) = Op.register);
+		  tmp := param;
+		  offset := 0;
+		  WHILE tmp.mode = Sym.indexAt DO
+		     INC(offset);
+		     tmp := tmp.designator;
+		  END;
+		  NEW(var);
+		  var.mode := CodeGen.stackM;
+		  var.ident := tmp.ident;
+		  lenop2 := CodeGen.GenVar(proc, var, FALSE, Gen.StdRegs, own);
+		  INC(lenop2.disp, Ob32.pointerSize + offset * Ob32.int32Size);
+		  lenop2.memsz := Ob32.int32Size; (* AMD64: dimension values are int32 *)
+		  FragmentedStreams.CreateLabel(beyond);
+		  Emit.Instr2(proc.s, AMD64.CMP, lenop, lenop2);
+		  Emit.JumpCC(proc.s, beyond, AMD64.JL-AMD64.JCC);
+		  Emit.Instr2(proc.s, AMD64.MOV, lenop, lenop2);
+		  FragmentedStreams.AttachLabel(proc.s, beyond);
+		  Regs.DestroyOwnedValue(lenop2.reg1, own);
+		  Regs.DestroyOwnedValue(lenop2.reg2, own);
+	       ELSE
+		  len2 := Sym32.GetSize(proc.module, param.type, proc.errors);
+                  CASE Op.Loc(lenop) OF
+		  | Op.immediateDyn:
+		     lenop := Op.RegOp(lenreg, 4);
+		     IF len2 <= len THEN
+		        len := len2;
+		     END;
+		     Emit.Instr2(proc.s, AMD64.MOV, lenop, Op.ImmInt(len));
+		  | Op.register:
+		     FragmentedStreams.CreateLabel(beyond);
+		     Emit.Instr2(proc.s, AMD64.CMP, lenop, Op.ImmInt(len2));
+                     Emit.JumpCC(proc.s, beyond, AMD64.JL-AMD64.JCC);
+		     Emit.Instr2(proc.s, AMD64.MOV, lenop, Op.ImmInt(len2));
+		     FragmentedStreams.AttachLabel(proc.s, beyond);
+		  END;
+	       END;
+	       ASSERT(Op.Loc(lenop) = Op.register);
+	       Emit.Instr1(proc.s, AMD64.DECR, lenop);
+	       CodeGen.GenStringOp(proc, AMD64.MOVS, {Gen.rep}, lhs,
+	                            rhs, lenop, 1, FALSE, own);
+	       Regs.UntracedValue(reg, Gen.gendi);
+	       Emit.Instr2(proc.s, AMD64.MOV, Op.MemOp1(reg, 1, 0, 0),
+	                    Op.ImmInt(0));
+	    END;
+	    RETURN NIL;
+	 | OberonStdProcedures.dec, OberonStdProcedures.inc:
+	    param := at.firstparam;
+	    ASSERT(param # NIL);
+	    op := CodeGen.GenDesignator(proc, param, Gen.StdRegs, own);
+	    IF Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN op
+	    END;
+	    IF at.paramcnt > 1 THEN
+	       rset := Gen.StdRegs;
+	       IF op.memsz = 1 THEN
+		  rset := Gen.LowByteRegs;
+	       END;
+	       ASSERT(at.paramcnt = 2);
+	       ASSERT(param.next # NIL);
+	       rhs := CodeGen.GenExpr(proc, param.next, TRUE, rset, own);
+	       IF Op.IsError(rhs) THEN
+                  Regs.DestroyOwnerOnError(proc.regs, own);
+		  RETURN rhs
+	       END;
+               IF Op.Loc(rhs) IN {Op.immediate, Op.immediateDyn} THEN
+		  ASSERT(rhs.data.kind = Op.integerConst);
+		  IF op.memsz < rhs.immsz THEN
+		     CompilerErrors.Raise(proc.errors, FixupLoc(param.next),
+					   "constant out of range");
+                     Regs.DestroyOwnerOnError(proc.regs, own);
+		     RETURN NIL;
+		  END;
+	       ELSE
+                  rhs.memsz := op.memsz;
+	       END;
+	       IF rhs.reg1 # NIL THEN
+                  Regs.AddConstraint(rhs.reg1, rset);
+               END;
+	       CASE type OF
+	       | OberonStdProcedures.dec:
+		  Emit.Instr2(proc.s, AMD64.SUB, op, rhs);
+	       | OberonStdProcedures.inc:
+		  Emit.Instr2(proc.s, AMD64.ADD, op, rhs);
+               END;
+               Regs.DestroyOwnedValue(rhs.reg1, own);
+            ELSE
+	       CASE type OF
+	       | OberonStdProcedures.dec:
+	          Emit.Instr1(proc.s, AMD64.DECR, op);
+	       | OberonStdProcedures.inc:
+	          Emit.Instr1(proc.s, AMD64.INCR, op);
+               END;
+	    END;
+            Regs.DestroyOwnedValue(op.reg1, own);
+            Regs.DestroyOwnedValue(op.reg2, own);
+	    RETURN NIL;
+	 | OberonStdProcedures.entier:
+	    param := at.firstparam; ASSERT(param # NIL);
+	    ASSERT(at.paramcnt = 1);
+	    ASSERT(param.type.form = Sym.real);
+	    rhs := CodeGen.GenExpr(proc, param, TRUE, Gen.StdRegs, own);
+	    IF Op.Loc(rhs) IN { Op.immediate, Op.immediateDyn } THEN
+	       IF rhs.data.kind = Op.realConst THEN
+		  RETURN Op.ImmInt(ENTIER(rhs.data.realval));
+	       END;
+	    END;
+	    IF Op.Loc(rhs) # Op.fpuRegister THEN
+	       rhs := CodeGen.LoadFPUReg(proc, rhs, param.type.form,
+	       				  rhs.memsz, own);
+	    END;
+	    ASSERT(Op.Loc(rhs) = Op.fpuRegister);
+	    offset := StackAlloc.Allocate(proc.stack, 4, 4, FALSE);
+	    Regs.UntracedValue(reg, Gen.genbp);
+	    (* Storing twice is as fast as copying and doesn't require
+	       a register. *)
+	    Emit.Instr1(proc.s, AMD64.FNSTCW, Op.MemOp1(reg, 2, offset, 0));
+	    Emit.Instr1(proc.s, AMD64.FNSTCW, Op.MemOp1(reg, 2, offset+2, 0));
+	    Emit.Instr2(proc.s, AMD64.ORI, Op.MemOp1(reg, 2, offset, 0),
+	    		 Op.ImmInt(0C00H));
+	    Emit.Instr2(proc.s, AMD64.XOR, Op.MemOp1(reg, 2, offset, 0),
+	    		 Op.ImmInt(0800H));
+	    Emit.Instr1(proc.s, AMD64.FLDCW, Op.MemOp1(reg, 2, offset, 0));
+	    Regs.CreateValue(reg2, proc.regs, own, Regs.stdM);
+	    Regs.SaveReg(reg2);
+	    ok := Regs.StackOffset(reg2, offset2);
+	    AMD64FPURegisters.StoreInt(rhs.reg1, proc.s, Op.MemOp1(reg, 4, offset2, 0));
+	    Emit.Instr1(proc.s, AMD64.FLDCW, Op.MemOp1(reg, 2, offset+2, 0));
+	    StackAlloc.Free(proc.stack, offset);
+	    Regs.Chown(reg2, caller);
+	    RETURN Op.RegOp(reg2, 4);
+	 | OberonStdProcedures.excl, OberonStdProcedures.incl:
+	    param := at.firstparam; ASSERT(param # NIL);
+	    ASSERT((at.paramcnt = 2) & (param.next # NIL));
+            rhs := CodeGen.GenExpr(proc, param.next, TRUE, Gen.StdRegs, own);
+	    IF Op.IsError(rhs) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN rhs
+	    END;
+	    lhs := CodeGen.GenDesignator(proc, param, Gen.StdRegs, own);
+	    IF Op.IsError(lhs) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN lhs
+	    END;
+            CASE Op.Loc(rhs) OF
+	    | Op.immediate, Op.immediateDyn:
+	       ASSERT(rhs.data.kind = Op.integerConst);
+	       CASE type OF
+	       | OberonStdProcedures.incl:
+		  rhs := Op.ImmInt(ASH(1, rhs.data.intval));
+	       | OberonStdProcedures.excl:
+		  (* NOTE: ~(1<<x) = -1 - (1<<x) *)
+		  rhs := Op.ImmInt(-1 - ASH(1, rhs.data.intval));
+	       END;
+	    | Op.register:
+	       FragmentedStreams.CreateLabel(noerr);
+	       Regs.AddConstraint(rhs.reg1, {Gen.gencx});
+	       Emit.Instr2(proc.s, AMD64.CMP, rhs, Op.ImmInt(31));
+	       Emit.JumpCC(proc.s, noerr, AMD64.JNA-AMD64.JCC);
+	       Regs.EnterLevel(proc.regs);
+	       EmitErrors.RangeCheck(proc, at.loc, rhs, Op.ImmInt(31));
+	       Regs.LeaveLevel(proc.regs);
+	       Regs.DoneLevel(proc.regs);
+	       FragmentedStreams.AttachLabel(proc.s, noerr);
+	       rhs.memsz := 1;
+	       Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+	       Regs.LoadReg(reg, Gen.StdRegs);
+	       opreg := Op.RegOp(reg, 4(* SET *));
+	       Emit.Instr2(proc.s, AMD64.MOV, opreg, Op.ImmInt(1));
+	       Emit.Instr2(proc.s, AMD64.SAL, opreg, rhs);
+	       Regs.DestroyOwnedValue(rhs.reg1, own);
+	       Regs.DestroyOwnedValue(rhs.reg2, own);
+	       IF type = OberonStdProcedures.excl THEN
+		  Emit.Instr1(proc.s, AMD64.NOT, opreg);
+	       END;
+	       rhs := opreg;
+            END;
+	    CASE type OF
+	    | OberonStdProcedures.incl:
+	       Emit.Instr2(proc.s, AMD64.ORI, lhs, rhs);
+	    | OberonStdProcedures.excl:
+	       Emit.Instr2(proc.s, AMD64.AND, lhs, rhs);
+	    END;
+	    Regs.DestroyOwnedValue(rhs.reg1, own);
+	    Regs.DestroyOwnedValue(lhs.reg1, own);
+	    Regs.DestroyOwnedValue(lhs.reg2, own);
+	    RETURN NIL;
+	 | OberonStdProcedures.get:
+	    param := at.firstparam;
+	    ASSERT((at.paramcnt = 2) & (param # NIL) & (param.next # NIL));
+	    Sym32.GetType(param.next, attype);
+	    size := Sym32.GetSize(proc.module, attype, proc.errors);
+	    lhs := CodeGen.GenDesignator(proc, param.next, Gen.StdRegs, own);
+	    IF Op.IsError(lhs) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN lhs
+	    END;
+	    (* On AMD64 pointer/address is 8 bytes; allow size up to 8 *)
+	    ASSERT((size <= 4) OR ((size = 8) & (attype.form IN {Sym.real,
+	                           Sym.address, Sym.pointer})));
+	    lhs.memsz := size;
+	    rhs := CodeGen.GenExpr(proc, param, TRUE, Gen.StdRegs, own);
+	    CASE Op.Loc(rhs) OF
+	    | Op.immediate, Op.immediateDyn:
+	       ASSERT(rhs.data.kind = Op.integerConst);
+	       op2 := Op.MemOp0(size, rhs.data.intval, 0);
+	    | Op.register:
+	       ASSERT(rhs.reg1 # NIL);
+	       op2 := Op.MemOp1(rhs.reg1, size, 0, 0);
+	    END;
+	    Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+	    IF size <= 1 THEN
+	       Regs.LoadReg(reg, Gen.LowByteRegs);
+	       Regs.AddConstraint(reg, Gen.LowByteRegs);
+	    ELSE
+	       Regs.LoadReg(reg, Gen.StdRegs);
+	    END;
+	    opreg := Op.RegOp(reg, size);
+	    Emit.Instr2(proc.s, AMD64.MOV, opreg, op2);
+	    Emit.Instr2(proc.s, AMD64.MOV, lhs, opreg);
+	    Regs.DestroyOwnedValue(lhs.reg1, own);
+	    Regs.DestroyOwnedValue(lhs.reg2, own);
+	    Regs.DestroyOwnedValue(rhs.reg1, own);
+	    Regs.DestroyOwnedValue(reg, own);
+	    RETURN NIL;
+	 | OberonStdProcedures.halt:
+	    ASSERT(at.paramcnt = 1);
+	    param := at.firstparam; ASSERT(param # NIL);
+	    op := CodeGen.GenExpr(proc, param, TRUE, Gen.StdRegs, own);
+	    IF Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN NIL;
+	    END;
+	    IF Op.Loc(op) IN {Op.immediate, Op.immediateDyn} THEN
+	       Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+	       Regs.LoadReg(reg, Gen.StdRegs);
+	       Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, 4), op);
+	       op := Op.RegOp(reg, 4);
+	    END;
+	    (* AMD64 ULM calling convention: push arg, call extern *)
+	    Emit.Instr1(proc.s, AMD64.PUSH, Op.RegOp(op.reg1, 8));
+	    Regs.DestroyOwnedValue(op.reg1, own);
+	    NEW(ref);
+	    ConstStrings.Create(ref.modname, "Process");
+	    ConstStrings.Create(ref.symname, "Exit");
+	    Emit.CallExtern(proc.s, proc.regs, ref);
+	    RETURN NIL;
+	 (* | OberonStdProcedures.inc: See OberonStdProcedures.dec *)
+	 (* | OberonStdProcedures.incl: See OberonStdProcedure.excl *)
+	 | OberonStdProcedures.len:
+	    ASSERT(at.paramcnt IN {1,2});
+	    param := at.firstparam; ASSERT(param # NIL);
+	    ASSERT(param.type.form = Sym.array);
+	    rhs := Op.ImmInt(0);
+	    IF param.next # NIL THEN
+	       rhs := CodeGen.GenExpr(proc, param.next, TRUE,
+	                               Gen.StdRegs, own);
+	    END;
+	    IF ~(Op.Loc(rhs) IN {Op.immediate, Op.immediateDyn}) THEN
+	       ASSERT(param.next # NIL);
+	       CompilerErrors.Raise(proc.errors, FixupLoc(param),
+		  "implementation restriction: constant expresion expected");
+	       (* XXX Implementation restriction should be fixed. *)
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN Op.Error();
+	    END;
+	    val := rhs.data.intval;
+	    base := 0; tmp := NIL;
+	    IF param.type.dyn THEN
+	       tmp := param;
+	       WHILE tmp.mode = Sym.indexAt DO
+                  tmp := tmp.designator;
+		  INC(base);
+	       END;
+               ASSERT(tmp.mode = Sym.varAt);
+	    END;
+	    dim := -1;
+	    Sym32.GetType(param, typ);
+	    WHILE typ.dyn DO
+	       INC(dim);
+	       typ := typ.element;
+	    END;
+	    IF val > dim THEN  (* The array is of fixed length *)
+	       Sym32.GetType(param, typ);
+	       WHILE val > 0 DO
+                  DEC(val);
+		  typ := typ.element;
+		  IF ~(typ.form = Sym.array) THEN
+		     CompilerErrors.Raise(proc.errors, FixupLoc(param),
+		        "dimension out of range");
+		  END;
+	       END;
+	       ASSERT(typ.length # NIL);
+	       rhs := CodeGen.GenExpr(proc, typ.length, TRUE,
+	                               possible, caller);
+	       ASSERT(Op.Loc(rhs) IN {Op.immediate, Op.immediateDyn});
+	       RETURN rhs;
+	    ELSE
+	       NEW(var);
+	       var.mode := CodeGen.stackM;
+	       var.ident := tmp.ident;
+	       dope := CodeGen.GenVar(proc, var, FALSE, Gen.StdRegs, caller);
+	       INC(dope.disp, Ob32.pointerSize+(base+val)*Ob32.int32Size);
+	       reg := dope.reg1;
+	       IF (reg = NIL) OR ~Regs.Traced(reg) THEN
+		  reg := dope.reg2;
+	       END;
+	       IF (reg = NIL) OR ~Regs.Traced(reg) THEN
+		  Regs.CreateValue(reg, proc.regs, caller, Regs.stdM);
+		  Regs.LoadReg(reg, possible);
+	       END;
+	       opreg := Op.RegOp(reg, 4);
+	       dope.memsz := Ob32.int32Size; (* dimension count is 4-byte integer *)
+	       Emit.Instr2(proc.s, AMD64.MOV, opreg, dope);
+	       IF dope.reg1 # reg THEN
+		  Regs.DestroyOwnedValue(dope.reg1, caller);
+	       END;
+	       IF dope.reg2 # reg THEN
+		  Regs.DestroyOwnedValue(dope.reg2, caller);
+	       END;
+	       RETURN opreg;
+	    END;
+	 | OberonStdProcedures.long:
+	    (* With the current implementation there is no need to
+	     * do any type conversions for LONG *)
+	    ASSERT(at.paramcnt = 1);
+	    param := at.firstparam; ASSERT(param # NIL);
+	    op := CodeGen.GenExpr(proc, param, TRUE, possible, caller);
+	    IF Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN op
+	    END;
+            CASE Op.Loc(op) OF
+	    | Op.immediate:
+	       ASSERT(op.immsz = 4);
+            | Op.immediateDyn:
+	       ASSERT(op.immsz <= 4);
+            | Op.register:
+               ASSERT(op.memsz = 4);
+	    END;
+	    RETURN op;
+	 (* | OberonStdProcedures.lsh: See OberonStdProcedures.ash *)
+	 (* | OberonStdProcedures.max, OberonStdProcedures.min:
+	    Handled by Oberon32iBuiltIns *)
+	 | OberonStdProcedures.move:
+	    ASSERT(at.paramcnt = 3);
+	    param := at.firstparam; ASSERT(param # NIL);
+	    rhs := CodeGen.GenExpr(proc, param, TRUE, {Gen.gensi}, own);
+	    IF Op.IsError(rhs) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN rhs
+	    END;
+            CASE Op.Loc(rhs) OF
+	    | Op.immediate, Op.immediateDyn:
+	       ASSERT(rhs.data.kind = Op.integerConst);
+	       rhs := Op.MemOp0(1, rhs.data.intval, 0);
+            | Op.register:
+	       ASSERT(rhs.reg1 # NIL);
+	       rhs := Op.MemOp1(rhs.reg1, 1, 0, 0);
+	    END;
+	    param := param.next; ASSERT(param # NIL);
+	    lhs := CodeGen.GenExpr(proc, param, TRUE, {Gen.gendi}, own);
+	    IF Op.IsError(lhs) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN lhs
+	    END;
+            CASE Op.Loc(lhs) OF
+	    | Op.immediate, Op.immediateDyn:
+	       ASSERT(lhs.data.kind = Op.integerConst);
+	       lhs := Op.MemOp0(1, lhs.data.intval, 0);
+            | Op.register:
+	       ASSERT(lhs.reg1 # NIL);
+	       lhs := Op.MemOp1(lhs.reg1, 1, 0, 0);
+	    END;
+            param := param.next; ASSERT(param # NIL);
+            op := CodeGen.GenExpr(proc, param, TRUE, Gen.StdRegs, own);
+	    IF Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN op
+	    END;
+            CodeGen.GenStringOp(proc, AMD64.MOVS, {Gen.rep},
+			     lhs, rhs, op, 1, TRUE, own);
+	    (* GenStringOp will destroy the registers. *)
+            RETURN NIL;
+	 | OberonStdProcedures.new, OberonStdProcedures.sysnew:
+	    ASSERT(at.paramcnt >= 1);
+	    param := at.firstparam; ASSERT(param # NIL);
+	    sizeop := NIL;
+	    IF type = OberonStdProcedures.sysnew THEN
+	       ASSERT((at.paramcnt = 2) & (param.next # NIL));
+	       sizeop := CodeGen.GenExpr(proc, param.next, TRUE,
+	                                  {Gen.gendi, Gen.gensi}, own);
+	       IF Op.IsError(sizeop) THEN
+                  Regs.DestroyOwnerOnError(proc.regs, own);
+		  RETURN sizeop;
+	       END;
+	       CASE Op.Loc(sizeop) OF
+	       | Op.immediate, Op.immediateDyn:
+                  ASSERT(sizeop.data.kind = Op.integerConst);
+                  IF sizeop.data.intval MOD 8 # 0 THEN
+		     INC(sizeop.data.intval, 8 - sizeop.data.intval MOD 8);
+		  END;
+               | Op.register:
+	          Emit.Instr2(proc.s, AMD64.ADD, sizeop, Op.ImmInt(7));
+		  Emit.Instr2(proc.s, AMD64.AND, sizeop, Op.ImmInt(-8));
+	       END;
+	    ELSE
+	       ASSERT(at.paramcnt = 1);
+	    END;
+	    typ := param.type;
+	    ASSERT(typ.form = Sym.pointer);
+	    IF (param.mode = Sym.varAt) & (param.ident.varkind = Sym.refParam) &
+	       (typ.reftype.form = Sym.record) THEN
+	       IF sizeop # NIL THEN  (* dummytag *)
+                  lhs := CodeGen.GenDesignator(proc, param, Gen.StdRegs, own);
+		  Regs.CreateValue(reg, proc.regs, own, Regs.addrM);
+		  Regs.LoadReg(reg, {Gen.gensi});
+		  lhs.memsz := 8;
+		  Emit.Instr2(proc.s, AMD64.LEA, Op.RegOp(reg, 8), lhs);
+		  Regs.DestroyOwnedValue(lhs.reg1, own);
+		  Regs.DestroyOwnedValue(lhs.reg2, own);
+		  Allocate(proc, NIL, reg, sizeop, NIL, own);
+		  Regs.DestroyOwnedValue(reg, own);
+		  Regs.DestroyOwnedValue(sizeop.reg1, own);
+		  Regs.DestroyOwnedValue(sizeop.reg2, own);
+	       ELSE
+                  NEW(var);
+		  var.mode := CodeGen.stackM;
+		  var.ident := param.ident;
+		  op := CodeGen.GenVar(proc, var, FALSE, Gen.StdRegs, own);
+		  Regs.CreateValue(tag, proc.regs, own, Regs.stdM);
+		  Regs.LoadReg(tag, {Gen.gendi});
+		  Regs.CreateValue(reg, proc.regs, own, Regs.addrM);
+		  Regs.LoadReg(reg, {Gen.gensi});
+		  Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, 8), op);
+		  INC(op.disp, 8);
+		  Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(tag, 8), op);
+		  Regs.DestroyOwnedValue(op.reg1, own);
+		  Regs.DestroyOwnedValue(op.reg2, own);
+		  Allocate(proc, NIL, reg,
+			    Op.MemOp1(tag, 4, GenTypes.sizeoff, 0), tag, own);
+		  Regs.DestroyOwnedValue(tag, own);
+		  Regs.DestroyOwnedValue(reg, own);
+	       END;
+	    ELSE
+	       tag := NIL;
+	       IF sizeop = NIL THEN
+		  size := Sym32.GetSize(proc.module, typ.reftype, proc.errors);
+
+		  tagop := GenTypes.GenTag(proc, typ.reftype);
+		  Regs.CreateValue(tag, proc.regs, own, Regs.stdM);
+		  Regs.LoadReg(tag, {Gen.gendi, Gen.gensi});
+		  Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(tag, 8), tagop);
+		  sizeop := Op.ImmInt(size);
+	       END;
+	       Allocate(proc, param, NIL, sizeop, tag, own);
+	       IF tag = NIL THEN
+		  Regs.DestroyOwnedValue(sizeop.reg1, own);
+		  Regs.DestroyOwnedValue(sizeop.reg2, own);
+	       ELSE
+		  Regs.DestroyOwnedValue(tag, own);
+	       END;
+	    END;
+	    RETURN NIL;
+	 | OberonStdProcedures.odd:
+	    ASSERT(at.paramcnt = 1);
+	    param := at.firstparam; ASSERT(param # NIL);
+	    lhs := CodeGen.GenExpr(proc, param, FALSE, Gen.StdRegs, own);
+	    IF Op.IsError(lhs) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN lhs
+	    END;
+	    Emit.Instr2(proc.s, AMD64.TEST, lhs, Op.ImmInt(1));
+	    Regs.DestroyOwnedValue(lhs.reg1, own);
+	    Regs.DestroyOwnedValue(lhs.reg2, own);
+	    RETURN Op.CCOp(AMD64.JNZ-AMD64.JCC);
+	 | OberonStdProcedures.ord:
+	    ASSERT(at.paramcnt = 1);
+	    param := at.firstparam; ASSERT(param # NIL);
+	    op := CodeGen.GenExpr(proc, param, TRUE, Gen.LowByteRegs, own);
+	    IF Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN op
+	    END;
+            CASE Op.Loc(op) OF
+	    | Op.immediate, Op.immediateDyn:
+	       IF op.data.kind = Op.charConst THEN
+		  op := Op.ImmInt(ORD(op.data.charval));
+	       ELSE
+		  ASSERT(op.data.kind = Op.integerConst);
+		  op := Op.ImmInt(op.data.intval);
+	       END;
+	    | Op.register:
+	       ASSERT(op.reg1 # NIL);
+               Regs.RemoveConstraint(op.reg1);
+               op.memsz := 4;
+               Emit.Instr2(proc.s, AMD64.AND, op, Op.ImmInt(255));
+	    END;
+	    IF op.reg1 # NIL THEN
+	       Regs.Chown(op.reg1, caller);
+            END;
+	    IF op.reg2 # NIL THEN
+	       Regs.Chown(op.reg2, caller);
+            END;
+	    RETURN op;
+	 | OberonStdProcedures.put:
+	    ASSERT(at.paramcnt = 2);
+	    param := at.firstparam;
+	    ASSERT((param # NIL) & (param.next # NIL));
+	    Sym32.GetType(param.next, attype);
+	    size := Sym32.GetSize(proc.module, attype, proc.errors);
+	    rset := Gen.StdRegs;
+	    IF size <= 1 THEN
+	       rset := Gen.LowByteRegs;
+	    END;
+	    rhs := CodeGen.GenExpr(proc, param.next, TRUE, rset, own);
+	    IF Op.IsError(rhs) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN rhs
+	    END;
+            IF (size <= 1) & (Op.Loc(rhs) = Op.register) THEN
+	       Regs.AddConstraint(rhs.reg1, Gen.LowByteRegs);
+	    END;
+	    lhs := CodeGen.GenExpr(proc, param, TRUE, Gen.StdRegs, own);
+	    IF Op.IsError(lhs) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN lhs
+	    END;
+            CASE Op.Loc(lhs) OF
+	    | Op.immediate, Op.immediateDyn:
+	       ASSERT(lhs.data.kind = Op.integerConst);
+	       lhs := Op.MemOp0(size, lhs.data.intval, 0);
+            | Op.register:
+	       ASSERT(lhs.reg1 # NIL);
+	       lhs := Op.MemOp1(lhs.reg1, size, 0, 0);
+	    END;
+	    IF attype.form = Sym.real THEN
+	       rhs := CodeGen.LoadFPUReg(proc, rhs, attype.form, size, own);
+	       lhs.memsz := size;
+	       AMD64FPURegisters.StoreReal(rhs.reg1, proc.s, lhs);
+	       Regs.DestroyOwnedValue(lhs.reg1, own);
+	    ELSE
+	       CASE Op.Loc(rhs) OF
+	       | Op.memory, Op.register:
+		  rhs.memsz := size;
+	       | Op.immediate:
+		  rhs.immsz := size;
+	       | Op.immediateDyn:
+	       END;
+	       Emit.Instr2(proc.s, AMD64.MOV, lhs, rhs);
+	       Regs.DestroyOwnedValue(lhs.reg1, own);
+	       Regs.DestroyOwnedValue(rhs.reg1, own);
+	    END;
+	    RETURN NIL;
+	 (* | OberonStdProcedures.rot: See OberonStdProcedures.ash *)
+	 | OberonStdProcedures.short:
+	    (* With the current implementation there is no need for
+	     * type conversions we just return the LONGINT value but we
+	     * must check that the result fits into SHORT. SHORTREALs
+	     * just get truncated. *)
+	    ASSERT(at.paramcnt = 1);
+	    param := at.firstparam; ASSERT(param # NIL);
+	    op := CodeGen.GenExpr(proc, param, TRUE, possible, own);
+	    IF Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN op
+	    END;
+	    Sym32.GetType(at, attype);
+	    IF attype.form = Sym.real THEN
+	       RETURN op;
+	    END;
+	    (* AMD64: if type is generic (e.g. result of MOD with literal 7),
+	       skip the range check — generic integer size is indeterminate *)
+	    IF (attype = NIL) OR ((attype.form IN Sym.specforms) &
+	          (attype.spec = Sym.generic)) THEN
+	       IF op.reg1 # NIL THEN Regs.Chown(op.reg1, caller) END;
+	       RETURN op;
+	    END;
+            IF Sym32.GetSize(proc.module, attype, proc.errors) = 1 THEN
+	       CASE Op.Loc(op) OF
+	       | Op.immediate, Op.immediateDyn:
+		  IF (op.immsz > 1) THEN
+		     CompilerErrors.Raise(proc.errors, FixupLoc(param),
+					   "constant out of range");
+                     Regs.DestroyOwnerOnError(proc.regs, own);
+                     RETURN Op.Error();
+		  END;
+               | Op.register:
+	          (* We extend the lowest byte of the source operand into
+		   * a 4 byte register. Then we compare it to
+		   * the original value to check if SHORT is actually ok. *)
+		  Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+		  Regs.LoadReg(reg, Gen.LowByteRegs);
+		  Regs.AddConstraint(reg, Gen.LowByteRegs);
+		  opreg := Op.RegOp(reg, 4);
+		  (* Create a copy of the original value *)
+		  Emit.Instr2(proc.s, AMD64.MOV, opreg, op);
+		  (* Sign/Zero extend the lowest byte *)
+		  op2 := Op.RegOp(reg, 1);
+		  CASE param.type.form OF
+		  | Sym.integer, Sym.address:
+		     Emit.Instr2(proc.s, AMD64.MOVSX, opreg, op2);
+		  | Sym.cardinal:
+		     Emit.Instr2(proc.s, AMD64.MOVZX, opreg, op2);
+		  END;
+		  (* Generate a run time error if the original value
+		   * and the extension of the lowest byte don't match. *)
+		  FragmentedStreams.CreateLabel(noerr);
+		  Emit.Instr2(proc.s, AMD64.CMP, opreg, op);
+		  Emit.JumpCC(proc.s, noerr, AMD64.JE-AMD64.JCC);
+		  Regs.EnterLevel(proc.regs);
+		  EmitErrors.Conversion(proc, at.loc, op);
+		  Regs.LeaveLevel(proc.regs);
+		  Regs.DoneLevel(proc.regs);
+		  FragmentedStreams.AttachLabel(proc.s, noerr);
+		  Regs.DestroyOwnedValue(reg, own);
+	       END;
+	    END;
+	    IF op.reg1 # NIL THEN
+	       Regs.Chown(op.reg1, caller);
+	    END;
+	    RETURN op;
+	 (* | OberonStdProcedures.size: Handled by Oberon32iBuiltIns *)
+	 | OberonStdProcedures.val:
+	    (* NOTE: This is a simplified implementation that allows
+	     * more conversions than oc. However, all portable conversions
+	     * allowed by oc should work as advertized. *)
+	    ASSERT(at.paramcnt = 2);
+	    param := at.firstparam;
+            Sym32.GetType(param, typ);
+	    size := Sym32.GetSize(proc.module, typ, proc.errors);
+	    param := param.next;
+	    Sym32.GetType(param, typ2);
+	    (* Note: Sym.char is numeric. This differs from the oc
+	     * implementation. *)
+	    IF typ2.form IN Sym.numeric + {Sym.set, Sym.char, Sym.byte} THEN
+	       op := CodeGen.GenExpr(proc, param, TRUE, Gen.LowByteRegs, own);
+	       IF Op.IsError(op) THEN
+                  Regs.DestroyOwnerOnError(proc.regs, own);
+		  RETURN op;
+	       END;
+	       IF typ2.form = Sym.real THEN
+		  ASSERT(Op.Loc(op) = Op.fpuRegister);
+		  IF (typ.form = Sym.real) THEN
+		     RETURN op;
+		  END;
+	       ELSIF Op.Loc(op) = Op.immediateDyn THEN
+                  Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+		  Regs.LoadReg(reg, Gen.LowByteRegs);
+		  Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, 4), op);
+		  op := Op.RegOp(reg, 4);
+	       ELSIF Op.Loc(op) = Op.immediate THEN
+                  Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+		  Regs.LoadReg(reg, Gen.LowByteRegs);
+		  Emit.Instr2(proc.s, AMD64.XOR, Op.RegOp(reg, 4),
+		               Op.RegOp(reg, 4));
+		  ASSERT(op.immsz IN {1,2,4});
+		  Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, op.immsz),
+		               op);
+		  op := Op.RegOp(reg, 4);
+	       END;
+	       IF (Op.Loc(op) = Op.fpuRegister) & (size = 4) THEN
+		  Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+		  Regs.SaveReg(reg);
+		  Regs.UntracedValue(reg2, Gen.genbp);
+		  ok := Regs.StackOffset(reg, offset); ASSERT(ok);
+		  AMD64FPURegisters.StoreReal(op.reg1, proc.s,
+		  			      Op.MemOp1(reg2, 4, offset, 0));
+		  op := Op.RegOp(reg, 4);
+               ELSIF (Op.Loc(op) = Op.fpuRegister) & (size = 8) THEN
+                  (* Nothing *)
+               ELSIF (typ.form IN Sym.numeric + {Sym.set})
+	             & ~(Op.Loc(op) = Op.fpuRegister) THEN
+		  op.memsz := 4;
+	       ELSIF (typ.form IN {Sym.pointer, Sym.proceduretype, Sym.coroutine})
+		     & (Op.Loc(op) = Op.register) THEN
+		  (* AMD64: pointer/procedure/coroutine types are 8 bytes;
+		     just reinterpret the register value, no struct copy *)
+		  op.memsz := size;
+		  Regs.Chown(op.reg1, caller);
+		  RETURN op;
+	       ELSE
+                  IF ~(size IN {1,2,4}) OR (Op.Loc(op) = Op.fpuRegister) THEN
+		     CompilerErrors.Raise(proc.errors, at.loc,
+		                           "type conversion not supported");
+		     Regs.DestroyOwnerOnError(proc.regs, own);
+		     RETURN Op.Error();
+		  END;
+		  op.memsz := size;
+	       END;
+	       IF typ.form IN Sym.structured THEN
+		  len := size;
+		  IF len < 4 THEN
+		     len := 4;
+		  END;
+		  (*
+		     Note: This is a hack. This means that we reserve
+		     len bytes for each SYSTEM.VAL cast to a structured
+		     value. It would be best to just not support this because
+		     this is the only way to write an Expression of Record
+		     Type. However, Math.om makes use of this and oc supported
+		     it.
+		   *)
+		  offset := StackAlloc.Allocate(proc.stack, len, 4, TRUE);
+		  Regs.UntracedValue(reg, Gen.genbp);
+		  op2 := Op.MemOp1(reg, len, offset, 0);
+		  CASE Op.Loc(op) OF
+		  | Op.fpuRegister:
+		     AMD64FPURegisters.StoreReal(op.reg1, proc.s, op2);
+		  | Op.register:
+		     op.memsz := 4;
+		     Emit.Instr2(proc.s, AMD64.MOV, op2, op);
+		     Regs.DestroyOwnedValue(op.reg1, own);
+		  END;
+		  RETURN op2;
+	       END;
+	       IF Op.Loc(op) # Op.fpuRegister THEN
+		  Regs.Chown(op.reg1, caller);
+		  SetMode(op.reg1, at.type);
+	       END;
+	       RETURN op;
+	    ELSE
+	       ASSERT(Sym32.GetSize(proc.module, typ2, proc.errors) >= size);
+	       op := CodeGen.GenExpr(proc, param, FALSE, Gen.StdRegs, own);
+	       IF typ.form = Sym.real THEN
+		  ASSERT(size IN {4,8});
+		  AMD64FPURegisters.CreateValue(reg, proc.fpuregs);
+		  op := CodeGen.LoadFPUReg(proc, op, Sym.real, size, own);
+	       ELSIF typ.form IN Sym.numeric + {Sym.set, Sym.char, Sym.byte} THEN
+		  IF size = 8 THEN
+		     (* AMD64: address-size target (8 bytes); source is pointer/structured *)
+		     IF Op.Loc(op) = Op.register THEN
+			op.memsz := 8;
+			SetMode(op.reg1, at.type);
+		     ELSE
+			Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+			Regs.LoadReg(reg, Gen.StdRegs);
+			op.memsz := 8;
+			Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, 8), op);
+			Regs.DestroyOwnedValue(op.reg1, own);
+			Regs.DestroyOwnedValue(op.reg2, own);
+			op := Op.RegOp(reg, 8);
+			SetMode(reg, at.type);
+		     END;
+		  ELSE
+                  ASSERT(size IN {1,2,4});
+                  Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+		  Regs.LoadReg(reg, Gen.LowByteRegs);
+		  Emit.Instr2(proc.s, AMD64.XOR, Op.RegOp(reg, 4),
+		               Op.RegOp(reg, 4));
+		  op.memsz := size;
+		  Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, size), op);
+		  Regs.DestroyOwnedValue(op.reg1, own);
+		  Regs.DestroyOwnedValue(op.reg2, own);
+		  IF typ.form IN {Sym.char, Sym.byte} THEN
+		     op := Op.RegOp(reg, 1);
+		  ELSE
+		     op := Op.RegOp(reg, 4);
+		  END;
+                  SetMode(reg, at.type);
+		  END;
+	       END;
+	       IF Op.Loc(op) # Op.fpuRegister THEN
+		  IF op.reg1 # NIL THEN
+		     Regs.Chown(op.reg1, caller);
+		  END;
+		  IF op.reg2 # NIL THEN
+		     Regs.Chown(op.reg2, caller);
+		  END;
+	       END;
+	       RETURN op;
+	    END;
+         END; (* CASE OberonStdProcedures.StdProc *)
+      ELSIF at.proc.type.builtinproc IS OberonUlmProcedures.StdProcedure THEN
+	 type := at.proc.type.builtinproc(OberonUlmProcedures.StdProcedure).stdproc;
+	 CASE type OF
+	 | OberonUlmProcedures.crspawn:
+	    ASSERT((proc.ident.class = Sym.procedureC) &
+	            (OA.ProcedureLevel(proc.ident) = 3) &
+		    (proc.ident.type.restype = NIL));
+	    ASSERT(at.paramcnt > 0);
+	    param := at.firstparam; ASSERT(param # NIL);
+	    IF param.next # NIL THEN
+	       sizeop := CodeGen.GenExpr(proc, param.next, TRUE,
+	                                 Gen.StdRegs, own);
+	       IF Op.IsError(sizeop) THEN
+                  Regs.DestroyOwnerOnError(proc.regs, own);
+		  RETURN NIL
+	       END;
+	       IF Op.Loc(sizeop) IN {Op.immediate, Op.immediateDyn} THEN
+                  Regs.CreateValue(sizereg, proc.regs, own, Regs.stdM);
+		  Regs.LoadReg(sizereg, Gen.StdRegs);
+		  Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(sizereg, 4),
+		              sizeop);
+		  sizeop := Op.RegOp(sizereg, 4);
+	       END;
+	    ELSE
+	       Regs.CreateValue(sizereg, proc.regs, own, Regs.stdM);
+	       Regs.LoadReg(sizereg, Gen.StdRegs);
+	       sizeop := Op.RegOp(sizereg, 4);
+	       op := Op.MemOp0(4, 0, 4);
+	       NEW(ref);
+	       ConstStrings.Create(ref.modname, "Coroutines");
+	       ConstStrings.Create(ref.symname, "defaultsize");
+	       Reloc.Create(req, proc.s, Reloc.addSym, ref);
+	       Op.RelocOpen(op, req);
+	       Emit.Instr2(proc.s, AMD64.MOV, sizeop, op);
+	    END;
+	    Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(reg, Gen.StdRegs);
+	    Regs.UntracedValue(sp, Gen.gensp);
+	    Regs.UntracedValue(bp, Gen.genbp);
+	    size := OA.DataBlockSize(NIL, proc.ident.type, NIL);
+	    (* Add 16 bytes for %rip and %rbp (saved on coroutine stack) *)
+	    Emit.Instr2(proc.s, AMD64.LEA, Op.RegOp(reg, 8),
+	                Op.MemOp1(bp, 8, 16+size, 0));
+	    Emit.Instr2(proc.s, AMD64.SUB, Op.RegOp(reg, 8),
+	                Op.RegOp(sp, 8));
+	    Emit.Instr2(proc.s, AMD64.LEA, Op.RegOp(sizeop.reg1, 8),
+	                Op.MemOp2(sizeop.reg1, reg, 8, crrecordlen+pagesize-1, 0, 1));
+	    Emit.Instr2(proc.s, AMD64.AND, Op.RegOp(sizeop.reg1, 8), Op.ImmInt(-pagesize));
+	    sizeop := Op.RegOp(sizeop.reg1, 8);
+	    (* Space for the pointer. This avoids a TmpPointer. *)
+	    Emit.Instr1(proc.s, AMD64.PUSH, Op.ImmInt(0));
+	    (* crreg = rsp after the push = address of the placeholder *)
+	    Regs.CreateValue(crreg, proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(crreg, Gen.StdRegs);
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(crreg, 8),
+	                Op.RegOp(sp, 8));
+	    (* AllocateStack(VAR ptr: Address; size: Size; mode: SHORTINT) uses the
+	     * AMD64 Oberon packed calling convention: args are stored at consecutive
+	     * byte-aligned offsets (not 8-byte QWORD slots as PUSH would produce).
+	     * Layout: ptr(8 bytes) + size(4 bytes) + mode(1 byte) = 13 bytes, pad to 16. *)
+	    Emit.Instr2(proc.s, AMD64.SUB, Op.RegOp(sp, 8), Op.ImmInt(16));
+	    (* VAR ptr : Address at [rsp+0] *)
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.MemOp1(sp, 8, 0, 0),
+	                Op.RegOp(crreg, 8));
+	    (* size : Size (LONGINT = 4 bytes) at [rsp+8] *)
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.MemOp1(sp, 4, 8, 1),
+	                Op.RegOp(sizeop.reg1, 4));
+	    (* mode : SHORTINT (1 byte) = -1 at [rsp+12] *)
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.MemOp1(sp, 1, 12, 1),
+	                Op.ImmInt(-1));
+	    Regs.DestroyOwnedValue(crreg, own);
+	    NEW(ref);
+	    ConstStrings.Create(ref.modname, "Storage");
+	    ConstStrings.Create(ref.symname, "AllocateStack");
+	    Emit.CallExtern(proc.s, proc.regs, ref);
+	    Regs.DestroyOwnedValue(sizeop.reg1, own);
+	    Regs.UntracedValue(sp, Gen.gensp);
+	    Emit.Instr2(proc.s, AMD64.ADD, Op.RegOp(sp, 8), Op.ImmInt(16));
+	    Regs.CreateValue(crreg, proc.regs, own, Regs.addrM);
+	    Regs.LoadReg(crreg, Gen.StdRegs);
+	    (* POP the top of the allocated stack. *)
+	    Emit.Instr1(proc.s, AMD64.POP, Op.RegOp(crreg, 8));
+	    Emit.Instr2(proc.s, AMD64.SUB, Op.RegOp(crreg, 8),
+	                 Op.ImmInt(crrecordlen));
+	    lhs := CodeGen.GenDesignator(proc, param, Gen.StdRegs, own);
+	    Emit.Instr2(proc.s, AMD64.MOV, lhs, Op.RegOp(crreg, 8));
+	    Regs.DestroyOwnedValue(lhs.reg1, own);
+	    Regs.DestroyOwnedValue(lhs.reg2, own);
+	    ASSERT(tmpreg = NIL);
+	    Regs.CreateValue(tmpreg, proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(tmpreg, Gen.StdRegs);
+	    Emit.Instr2(proc.s, AMD64.XOR, Op.RegOp(tmpreg, 4),
+	                Op.RegOp(tmpreg, 4));
+	    (* interrupts *)
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.MemOp1(crreg, 4, crints, 0),
+	                Op.RegOp(tmpreg, 4));
+	    (* started *)
+	    Emit.Instr2(proc.s, AMD64.MOV,
+	                Op.MemOp1(crreg, 4, crstarted, 0),
+	                Op.RegOp(tmpreg, 4));
+	    op := Op.MemOp0(8, 0, 4);  (* AMD64: small code model, 32-bit absolute relocation *)
+	    NEW(ref);
+	    ConstStrings.Create(ref.modname, "Coroutines");
+	    ConstStrings.Create(ref.symname, "tag");
+	    Reloc.Create(req, proc.s, Reloc.addSym, ref);
+	    Op.RelocOpen(op, req);
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(tmpreg, 8), op);
+            Emit.Instr2(proc.s, AMD64.MOV, Op.MemOp1(crreg, 8, -8, 0),
+	                Op.RegOp(tmpreg, 8));
+	    Regs.DestroyOwnedValue(tmpreg, own);
+	    tmpreg := NIL;
+	    Regs.DestroyOwnedValue(op.reg1, own);
+            (* Save context: store rbp, rsp, rip in coroutine record *)
+	    Regs.CreateValue(crbase, proc.regs, own, Regs.addrM);
+	    Regs.LoadReg(crbase, Gen.StdRegs);
+	    (* Add 24 bytes for: tag pointer(8) + saved rbp(8) + return rip(8) *)
+	    Emit.Instr2(proc.s, AMD64.LEA, Op.RegOp(crbase, 8),
+	                Op.MemOp1(crreg, 8, -(24+size), 0));
+	    Emit.Instr2(proc.s, AMD64.MOV,
+	                Op.MemOp1(crreg, 8, crbaseoffset, 0),
+		        Op.RegOp(crbase, 8));
+	    Regs.CreateValue(crtop, proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(crtop, {Gen.gendi});
+	    Emit.Instr2(proc.s, AMD64.LEA, Op.RegOp(crtop, 8),
+	                Op.MemOp1(crreg, 8, -8, 0));
+	    Emit.Instr2(proc.s, AMD64.SUB, Op.RegOp(crtop, 8),
+	                Op.RegOp(reg, 8));
+	    Emit.Instr2(proc.s, AMD64.MOV,
+	                Op.MemOp1(crreg, 8, crtopoffset, 0),
+		        Op.RegOp(crtop, 8));
+	    Regs.CreateValue(tmpreg, proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(tmpreg, {Gen.gensi});
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(tmpreg, 8),
+	                Op.RegOp(sp, 8));
+	    CodeGen.GenStringOp(proc, AMD64.MOVS, {Gen.rep},
+	                        Op.MemOp1(crtop, 8, 0, 0),
+			        Op.MemOp1(tmpreg, 8, 0, 0),
+			        Op.RegOp(reg, 4), 1, FALSE, own);
+	    (* Fix dynamic arrays. Everything else is accessed relative to
+	     * the base pointer. *)
+	    diffreg := NIL;
+	    pl := proc.ident.type.paramlist;
+	    WHILE pl # NIL DO
+	       IF (pl.type.form = Sym.array) &
+		     (pl.paramkind = Sym.valueParam) & pl.type.dyn THEN
+		  IF diffreg = NIL THEN
+		     Regs.CreateValue(diffreg, proc.regs, own, Regs.stdM);
+		     Regs.LoadReg(diffreg, Gen.StdRegs);
+		     Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(diffreg, 8),
+		                 Op.RegOp(crbase, 8));
+		     Emit.Instr2(proc.s, AMD64.SUB, Op.RegOp(diffreg, 8),
+		                 Op.RegOp(bp, 8));
+		  END;
+                  offset := OA.VarOffset(pl);
+		  Emit.Instr2(proc.s, AMD64.ADD,
+		              Op.MemOp1(crbase, 8, offset, 0),
+			      Op.RegOp(diffreg, 8));
+	       END;
+	       pl := pl.next;
+	    END;
+	    IF diffreg # NIL THEN
+	       Regs.DestroyOwnedValue(diffreg, own);
+	    END;
+	    ConstStrings.Create(mod, "RTErrors");
+	    ConstStrings.Create(sym, "CoroutineReturn");
+	    (* Fix return pointer to make sure that an error
+	     * handler is called. *)
+	    Regs.CreateValue(tmpreg, proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(tmpreg, Gen.StdRegs);
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(tmpreg, 8),
+	                 CodeGen.GenSymVal(proc, {}, mod, sym, own, FALSE));
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.MemOp1(crbase, 8, 8, 0),
+	                 Op.RegOp(tmpreg, 8));
+	    Regs.DestroyOwnedValue(tmpreg, own);
+	    (* Store zero as old base pointer. SysStacks will recognize
+	     * the end of the call chain if this is the case. *)
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.MemOp1(crbase, 8, 0, 0),
+	                 Op.ImmInt(0));
+	    Regs.DestroyOwnedValue(crbase, own);
+	    FragmentedStreams.CreateLabel(beyond);
+	    ConstStrings.Init(cs);
+	    Write.StringS(cs, "__CRSPAWN_CONTINUE_");
+	    Write.IntS(cs, PC.Unique(proc), 0);
+	    ConstStrings.Close(cs, sym);
+	    Reloc.NewSymbol(proc.s, sym, beyond);
+	    op := CodeGen.GenSymVal(proc, Gen.StdRegs, NIL, sym, own, FALSE);
+	    ASSERT(Op.Loc(op) IN {Op.immediate, Op.immediateDyn});
+	    Regs.CreateValue(tmpreg, proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(tmpreg, Gen.StdRegs);
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(tmpreg, 8), op);
+	    Emit.Instr2(proc.s, AMD64.MOV,
+	                Op.MemOp1(crreg, 8, creipoffset, 0), Op.RegOp(tmpreg, 8));
+	    Regs.DestroyOwnedValue(tmpreg, own);
+	    Regs.DestroyOwnedValue(crreg, own);
+	    (* Registers must be passed on the stack! *)
+	    Regs.SaveAll(proc.regs);
+	    CodeGen.GenReturn(proc);
+	    FragmentedStreams.AttachLabel(proc.s, beyond);
+	    RETURN NIL
+	 | OberonUlmProcedures.crswitch:
+	    ASSERT(at.paramcnt = 1);
+	    param := at.firstparam; ASSERT(param # NIL);
+	    op := CodeGen.GenExpr(proc, param, TRUE, Gen.StdRegs, own);
+	    IF Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN NIL;
+	    END;
+	    ASSERT(Op.Loc(op) = Op.register);
+	    ConstStrings.Create(mod, "Coroutines");
+	    ConstStrings.Create(sym, "current");
+	    op2 := CodeGen.GenSymVal(proc, Gen.StdRegs, mod, sym, own, TRUE);
+            ASSERT(Op.Loc(op2) = Op.register);
+	    reg := op2.reg1;
+	    Regs.CreateValue(crreg, proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(crreg, Gen.StdRegs);
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(crreg, 8),
+	                 Op.MemOp1(reg, 8, 0, 0));
+	    ConstStrings.Create(sym, "source");
+	    op2 := CodeGen.GenSymVal(proc, Gen.StdRegs, mod, sym, own, TRUE);
+	    ASSERT(Op.Loc(op2) = Op.register);
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.MemOp1(op2.reg1, 8, 0, 0),
+	                 Op.RegOp(crreg, 8));
+       	    Regs.DestroyOwnedValue(op2.reg1, own);
+	    (* Build exclusion set so tmpreg won't reuse any of the three live
+	     * untraced registers: op.reg1 (target), reg (&Coroutines.current),
+	     * or crreg (current coroutine base for the creip store). *)
+	    rset := Gen.StdRegs;
+	    Regs.MakeUntraced(op.reg1, own); (* Target Coroutine *)
+	    IF ~Regs.RegCode(op.reg1, reg1) THEN ASSERT(FALSE) END;
+	    EXCL(rset, reg1);
+	    Regs.MakeUntraced(reg, own); (* Address of Coroutines.current *)
+	    IF ~Regs.RegCode(reg, reg1) THEN ASSERT(FALSE) END;
+	    EXCL(rset, reg1);
+	    Regs.MakeUntraced(crreg, own); (* Current Coroutine *)
+	    IF ~Regs.RegCode(crreg, reg1) THEN ASSERT(FALSE) END;
+	    EXCL(rset, reg1);
+	    Regs.SaveAll(proc.regs);
+	    (* Ok, we have everything in place and the registers are saved.
+	     * Now let's save the current context. *)
+	    Regs.UntracedValue(sp, Gen.gensp);
+	    Regs.UntracedValue(bp, Gen.genbp);
+            Emit.Instr2(proc.s, AMD64.MOV,
+	                 Op.MemOp1(crreg, 8, crbaseoffset, 0),
+		         Op.RegOp(bp, 8));
+            Emit.Instr2(proc.s, AMD64.MOV,
+	                 Op.MemOp1(crreg, 8, crtopoffset, 0),
+		         Op.RegOp(sp, 8));
+	    FragmentedStreams.CreateLabel(beyond);
+	    ConstStrings.Init(cs);
+	    Write.StringS(cs, "__CRSWITCH_CONTINUE_");
+	    Write.IntS(cs, PC.Unique(proc), 0);
+	    ConstStrings.Close(cs, sym);
+	    Reloc.NewSymbol(proc.s, sym, beyond);
+	    op2 := CodeGen.GenSymVal(proc, Gen.StdRegs, NIL, sym, own, FALSE);
+	    ASSERT(Op.Loc(op2) IN {Op.immediate, Op.immediateDyn});
+	    Regs.CreateValue(tmpreg, proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(tmpreg, rset);
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(tmpreg, 8), op2);
+	    Emit.Instr2(proc.s, AMD64.MOV,
+	                 Op.MemOp1(crreg, 8, creipoffset, 0), Op.RegOp(tmpreg, 8));
+	    Regs.DestroyOwnedValue(tmpreg, own);
+	    (* Now switch Coroutines current. *)
+	    crreg := op.reg1;
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.MemOp1(reg, 8, 0, 0),
+	                 Op.RegOp(crreg, 8));
+	    (* And restore the context *)
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(sp, 8),
+	                 Op.MemOp1(crreg, 8, crtopoffset, 0));
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(bp, 8),
+	                 Op.MemOp1(crreg, 8, crbaseoffset, 0));
+	    Emit.Instr1(proc.s, AMD64.JMP,
+	                 Op.MemOp1(crreg, 8, creipoffset, 0));
+	    Emit.Instr2(proc.s, AMD64.ORI,
+	                 Op.MemOp1(crreg, 4, crstarted, 0), Op.ImmInt(1));
+            FragmentedStreams.AttachLabel(proc.s, beyond);
+	    RETURN NIL;
+	 | OberonUlmProcedures.halt:
+	    (* AMD64: exit code in RDI, syscall number 60 in RAX, SYSCALL *)
+	    ASSERT(at.paramcnt = 1);
+	    param := at.firstparam; ASSERT(param # NIL);
+	    op := CodeGen.GenExpr(proc, param, TRUE, Gen.StdRegs, own);
+	    IF Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN NIL;
+	    END;
+	    Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(reg, {Gen.gendi});
+	    Regs.AddConstraint(reg, {Gen.gendi});
+	    IF Op.Loc(op) IN {Op.immediate, Op.immediateDyn} THEN
+	       Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg, 8), op);
+	    ELSE
+	       ASSERT(Op.Loc(op) = Op.register);
+	       Regs.LoadReg(op.reg1, {Gen.gendi});
+	       Regs.DestroyOwnedValue(reg, own);
+	       reg := op.reg1;
+	    END;
+	    Regs.UntracedValue(reg2, Gen.genax);
+	    Emit.Instr2(proc.s, AMD64.MOV, Op.RegOp(reg2, 8),
+	                 Op.ImmInt(sysexit));
+	    Regs.DestroyOwnedValue(reg, own);
+	    Emit.Instr0(proc.s, AMD64.SYSCALL);
+	    RETURN NIL;
+	 | OberonUlmProcedures.tas:
+	    ASSERT(at.paramcnt = 1);
+	    param := at.firstparam; ASSERT(param # NIL);
+	    ASSERT(param.type.form = Sym.boolean);
+	    op := CodeGen.GenDesignator(proc, param, Gen.StdRegs, own);
+	    ASSERT(op.memsz = 1);
+	    Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(reg, Gen.LowByteRegs);
+	    Regs.AddConstraint(reg, Gen.LowByteRegs);
+	    Emit.Instr2(proc.s, AMD64.XOR, Op.RegOp(reg, 4),
+	                 Op.RegOp(reg, 4));
+	    Emit.Instr1(proc.s, AMD64.INCR, Op.RegOp(reg, 4));
+            Emit.Instr2(proc.s, AMD64.XCHG, Op.RegOp(reg, 1), op);
+	    Regs.DestroyOwnedValue(op.reg1, own);
+	    Regs.DestroyOwnedValue(op.reg2, own);
+	    Emit.Instr2(proc.s, AMD64.ORI, Op.RegOp(reg, 1),
+	                 Op.RegOp(reg, 1));
+	    Regs.DestroyOwnedValue(reg, own);
+	    RETURN Op.CCOp(AMD64.JNZ-AMD64.JCC);
+	 | OberonUlmProcedures.wclear:
+	    ASSERT(at.paramcnt = 2);
+	    param := at.firstparam; ASSERT(param # NIL);
+	    lhs := CodeGen.GenExpr(proc, param, TRUE, Gen.StdRegs, own);
+	    IF Op.IsError(lhs) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN lhs
+	    END;
+            CASE Op.Loc(lhs) OF
+	    | Op.immediate, Op.immediateDyn:
+	       ASSERT(lhs.data.kind = Op.integerConst);
+	       lhs := Op.MemOp0(4, lhs.data.intval, 0);
+            | Op.register:
+	       ASSERT(lhs.reg1 # NIL);
+	       lhs := Op.MemOp1(lhs.reg1, 4, 0, 0);
+	    END;
+	    param := param.next; ASSERT(param # NIL);
+            op := CodeGen.GenExpr(proc, param, TRUE, Gen.StdRegs, own);
+	    IF Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN op
+	    END;
+            IF Op.Loc(op) IN {Op.immediate, Op.immediateDyn} THEN
+	       Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+	       Regs.LoadReg(reg, Gen.StdRegs);
+	       opreg := Op.RegOp(reg, 4);
+	       Emit.Instr2(proc.s, AMD64.MOV, opreg, op);
+	       op := opreg;
+	    END;
+            Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+	    Regs.LoadReg(reg, Gen.StdRegs);
+	    j := 2;
+	    regarr[0] := op.reg1;
+	    regarr[1] := reg;
+	    possibles[0] := Gen.StdRegs;
+	    possibles[1] := Gen.StdRegs;
+            IF lhs.reg1 # NIL THEN
+	       j := 3;
+	       regarr[2] := lhs.reg1;
+	       possibles[2] := Gen.StdRegs;
+	    END;
+	    ok := Regs.PrepareInstruction(j, regarr, possibles); ASSERT(ok);
+	    opreg := Op.RegOp(reg, 4);
+	    Emit.Instr2(proc.s, AMD64.XOR, opreg, opreg);
+	    FragmentedStreams.CreateLabel(start);
+	    FragmentedStreams.AttachLabel(proc.s, start);
+	    FragmentedStreams.CreateLabel(beyond);
+	    Emit.Instr1(proc.s, AMD64.DECR, op);
+	    Emit.JumpCC(proc.s, beyond, AMD64.JS-AMD64.JCC);
+	    ASSERT(lhs.reg2 = NIL);
+	    lhs.reg2 := op.reg1;
+	    Op.SetScale(lhs, 4);
+	    opreg := Op.RegOp(reg, 4);
+	    Emit.Instr2(proc.s, AMD64.MOV, lhs, opreg);
+            Emit.Jump(proc.s, start);
+	    FragmentedStreams.AttachLabel(proc.s, beyond);
+	    Regs.DestroyOwnedValue(reg, own);
+	    Regs.DestroyOwnedValue(lhs.reg1, own);
+	    Regs.DestroyOwnedValue(op.reg1, own);
+	    RETURN NIL;
+	 | OberonUlmProcedures.wmove:
+	    ASSERT(at.paramcnt = 3);
+	    param := at.firstparam; ASSERT(param # NIL);
+	    rhs := CodeGen.GenExpr(proc, param, TRUE, {Gen.gensi}, own);
+	    IF Op.IsError(rhs) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN rhs
+	    END;
+            CASE Op.Loc(rhs) OF
+	    | Op.immediate, Op.immediateDyn:
+	       ASSERT(rhs.data.kind = Op.integerConst);
+	       rhs := Op.MemOp0(4, rhs.data.intval, 0);
+            | Op.register:
+	       ASSERT(rhs.reg1 # NIL);
+	       rhs := Op.MemOp1(rhs.reg1, 4, 0, 0);
+	    END;
+	    param := param.next; ASSERT(param # NIL);
+	    lhs := CodeGen.GenExpr(proc, param, TRUE, {Gen.gendi}, own);
+	    IF Op.IsError(lhs) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN lhs
+	    END;
+            CASE Op.Loc(lhs) OF
+	    | Op.immediate, Op.immediateDyn:
+	       ASSERT(lhs.data.kind = Op.integerConst);
+	       lhs := Op.MemOp0(4, lhs.data.intval, 0);
+            | Op.register:
+	       ASSERT(lhs.reg1 # NIL);
+	       lhs := Op.MemOp1(lhs.reg1, 4, 0, 0);
+	    END;
+            param := param.next; ASSERT(param # NIL);
+            op := CodeGen.GenExpr(proc, param, TRUE, Gen.StdRegs, own);
+	    IF Op.IsError(op) THEN
+	       Regs.DestroyOwnerOnError(proc.regs, own);
+	       RETURN op
+	    END;
+            CodeGen.GenStringOp(proc, AMD64.MOVS, {Gen.rep},
+			     lhs, rhs, op, 4, TRUE, own);
+	    (* GenStringOp will destroy the registers. *)
+            RETURN NIL;
+	 END; (* CASE OberonUlmProcedures.StdProc *)
+      ELSE
+	 ASSERT(op # NIL); (* FALSE *)
+      END; (* IF builtinproc IS ... *)
+      ASSERT(op # NIL); (* FALSE *)
+   END GenBuiltIn;
+
+BEGIN
+   (* AMD64 Linux syscall register convention:
+    *   rax = syscall number, rdi = arg1, rsi = arg2, rdx = arg3,
+    *   r10 = arg4, r8 = arg5, r9 = arg6
+    *)
+   reg2param[0] := Gen.genax;
+   reg2param[1] := Gen.gendi;
+   reg2param[2] := Gen.gensi;
+   reg2param[3] := Gen.gendx;
+   reg2param[4] := Gen.genr10;
+   reg2param[5] := Gen.genr8;
+   reg2param[6] := Gen.genr9;
+   reg2param[7] := 0;
+   AMD64BuiltIns.GenBuiltIn := GenBuiltIn;
+END AMD64LinuxOberonBuiltIns.

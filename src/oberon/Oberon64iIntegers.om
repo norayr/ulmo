@@ -1,0 +1,105 @@
+MODULE Oberon64iIntegers;
+
+   (* AMD64 adaptation of Oberon32iIntegers.om.
+      LONGINT stays 32-bit on Oberon64i (longIntLen=32),
+      so the integer overflow limits are the same as on i386.
+   *)
+
+   IMPORT CompilerErrors, CompilerObjects, Oberon64i, RelatedEvents, Streams,
+      Write;
+
+   TYPE
+      Value = Oberon64i.Integer;
+
+   PROCEDURE ReadDec(s: Streams.Stream; VAR intval: Value;
+                     loc: CompilerObjects.Location;
+		     errors: RelatedEvents.Object) : BOOLEAN;
+      VAR
+	 ch: CHAR;
+	 val, digit: Value;
+	 es: Streams.Stream;
+   BEGIN
+      val := 0;
+      WHILE Streams.ReadByte(s, ch) DO
+	 ASSERT((ch >= "0") & (ch <= "9"));
+	 digit := ORD(ch) - ORD("0");
+	 IF (val > MAX(Value) DIV 10) OR
+	       (val = MAX(Value) DIV 10) & (digit > MAX(Value) MOD 10) THEN
+	    CompilerErrors.Open(es);
+	    CompilerErrors.At1(es, loc);
+	    IF Oberon64i.integerLen < Oberon64i.maxIntegerLenOnTarget THEN
+	       Write.StringS(es, "implementation restriction: ");
+	    END;
+	    Write.StringS(es, "integer constant exceeds maximal value");
+	    CompilerErrors.Close(es, errors);
+	    intval := MAX(Value); RETURN FALSE
+	 END;
+	 val := val * 10 + digit;
+      END;
+      intval := val;
+      RETURN TRUE
+   END ReadDec;
+
+   PROCEDURE ReadHex(s: Streams.Stream; VAR intval: Value;
+                     loc: CompilerObjects.Location;
+		     errors: RelatedEvents.Object) : BOOLEAN;
+      CONST
+	 maxdigits = Oberon64i.integerLen DIV 8 * 2;
+	 maxdigitsOnTarget = Oberon64i.maxIntegerLenOnTarget DIV 8 * 2;
+      VAR
+	 nonzero: BOOLEAN;
+	 ok: BOOLEAN;
+	 ch: CHAR;
+	 digit: SHORTINT;
+	 length: INTEGER;
+	 digits: ARRAY maxdigits OF SHORTINT;
+	 i: INTEGER;
+	 offset, val: Value;
+	 es: Streams.Stream;
+   BEGIN
+      nonzero := FALSE; length := 0;
+      LOOP
+	 ok := Streams.ReadByte(s, ch); ASSERT(ok);
+	 IF ch = "H" THEN EXIT END;
+	 ASSERT((ch >= "0") & (ch <= "9") OR (ch >= "A") & (ch <= "F"));
+	 IF ch # "0" THEN nonzero := TRUE END;
+	 IF nonzero THEN
+	    IF ch >= "A" THEN
+	       digit := SHORT(ORD(ch) - ORD("A") + 10);
+	    ELSE
+	       digit := SHORT(ORD(ch) - ORD("0"));
+	    END;
+	    IF length < maxdigits THEN
+	       digits[length] := digit;
+	    END;
+	    INC(length);
+	 END;
+      END;
+      IF (length > maxdigits) OR (length > maxdigitsOnTarget) THEN
+	 CompilerErrors.Open(es);
+	 CompilerErrors.At1(es, loc);
+	 IF length <= maxdigitsOnTarget THEN
+	    Write.StringS(es, "implementation restriction: ");
+	 END;
+	 Write.StringS(es, "hex constant exceeds maximal value");
+	 CompilerErrors.Close(es, errors);
+	 intval := MAX(Value); RETURN FALSE
+      END;
+      IF length = 0 THEN intval := 0; RETURN TRUE END;
+
+      IF (length = maxdigits) & (digits[0] >= 8) THEN
+	 (* negative value *)
+	 offset := MIN(Value); DEC(digits[0], 8);
+      ELSE
+	 offset := 0;
+      END;
+
+      val := 0; i := 0;
+      WHILE i < length DO
+	 val := val * 10H + digits[i]; INC(i);
+      END;
+      intval := offset + val;
+      RETURN TRUE
+   END ReadHex;
+
+END Oberon64iIntegers.

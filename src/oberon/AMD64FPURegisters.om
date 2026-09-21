@@ -1,0 +1,204 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2004 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   $Id: AMD64FPURegi.om,v 1.1 2004/09/06 18:58:47 borchert Exp borchert $
+   ----------------------------------------------------------------------------
+   $Log: AMD64FPURegi.om,v $
+   Revision 1.1  2004/09/06 18:58:47  borchert
+   Initial revision
+
+   ----------------------------------------------------------------------------
+*)
+
+MODULE AMD64FPURegisters; (* Christian Ehrhardt *)
+
+   IMPORT Disciplines, Emit := AMD64Emit, FragmentedStreams,
+      Gen := AMD64OpCodeGenerator, Op := AMD64Operands,
+      Pentium := AMD64Instructions, Regs := CompilerRegisters;
+
+   CONST maxregs = 8;
+
+   TYPE
+
+      RegSet = POINTER TO RegSetRec;
+      RegSetRec = RECORD
+         (Disciplines.ObjectRec)
+	 top : Regs.Register;
+      END;
+
+      Value = POINTER TO ValueRec;
+      ValueRec = RECORD
+         (Regs.ValueRec)
+	 set : RegSet;
+	 freg : Regs.Register; (* Distance counted from the stack top! *)
+      END;
+
+   PROCEDURE ^ Instr2 (s : FragmentedStreams.Stream; mnem : Gen.Mnemonic;
+   		     op1, op2 : Op.Operand);
+
+   PROCEDURE Create (VAR set : RegSet);
+      VAR
+         ret : RegSet;
+   BEGIN
+       ret := NIL;
+       NEW (ret);
+       ret.top := -1;
+       set := ret;
+   END Create;
+
+   PROCEDURE CreateValue (VAR reg : Regs.Value; set : RegSet);
+      VAR
+	 ret : Value;
+   BEGIN
+      Regs.UntracedValue (ret, -1);
+      ret.freg := -1;
+      ret.set := set;
+      reg := ret;
+   END CreateValue;
+
+
+   (* Note: Emitting FLDP changes the size of the stack but register
+      numbers in op must be relative to the old stack size. I.e. we
+      increment the stack size only after emitting the Instruction. This
+      also means that we have to adjust the register number of the new
+      register!
+    *)
+   PROCEDURE PushReal (reg : Regs.Value; s : FragmentedStreams.Stream;
+                       op : Op.Operand);
+      VAR
+	 st0 : Op.Operand;
+   BEGIN
+      WITH reg : Value DO
+	 ASSERT (reg.set.top < maxregs - 1);
+	 CASE Op.Loc (op) OF
+	 | Op.fpuRegister:
+	    ASSERT (op.memsz = 0);
+	    ASSERT (op.reg1 # reg);
+	 | Op.memory:
+	    ASSERT ((op.memsz = 4) OR (op.memsz = 8));
+	 END;
+	 reg.freg := reg.set.top;
+	 st0 := Op.FPUOp (reg);
+	 Instr2 (s, Pentium.FLD, st0, op);
+	 INC (reg.set.top);
+	 reg.freg := reg.set.top;
+      END;
+   END PushReal;
+
+   PROCEDURE PushInt (reg : Regs.Value; s : FragmentedStreams.Stream;
+		      op : Op.Operand);
+      VAR
+	 st0 : Op.Operand;
+   BEGIN
+      WITH reg : Value DO
+	 ASSERT (reg.set.top < maxregs - 1);
+	 ASSERT (Op.Loc (op) = Op.memory);
+	 ASSERT ((op.memsz = 2) OR (op.memsz = 4) OR (op.memsz = 8));
+	 reg.freg := reg.set.top;
+	 st0 := Op.FPUOp (reg);
+	 Instr2 (s, Pentium.FILD, st0, op);
+	 INC (reg.set.top);
+	 reg.freg := reg.set.top;
+      END;
+   END PushInt;
+
+
+   PROCEDURE StoreReal (reg : Regs.Value; s : FragmentedStreams.Stream;
+   			op : Op.Operand);
+      VAR
+	 st0 : Op.Operand;
+   BEGIN
+      WITH reg : Value DO
+	 ASSERT (reg.set.top >= 0);
+	 ASSERT (reg.freg = reg.set.top);
+	 CASE Op.Loc (op) OF
+	 | Op.memory:
+	    ASSERT ((op.memsz = 4) OR (op.memsz = 8));
+	 | Op.fpuRegister:
+	    ASSERT (op.memsz = 0);
+	 END;
+	 st0 := Op.FPUOp (reg);
+	 Instr2 (s, Pentium.FSTP, op, st0);
+	 DEC (reg.set.top);
+	 reg.freg := -1;
+      END;
+   END StoreReal;
+
+   PROCEDURE StoreInt (reg : Regs.Value; s : FragmentedStreams.Stream;
+		       op : Op.Operand);
+      VAR
+	 st0 : Op.Operand;
+   BEGIN
+      WITH reg : Value DO
+	 ASSERT (reg.set.top >= 0);
+	 ASSERT (reg.freg = reg.set.top);
+	 ASSERT (Op.Loc (op) = Op.memory);
+	 ASSERT ((op.memsz = 2) OR (op.memsz = 4) OR (op.memsz = 8));
+	 st0 := Op.FPUOp (reg);
+	 Instr2 (s, Pentium.FISTP, op, st0);
+	 DEC (reg.set.top);
+	 reg.freg := -1;
+      END;
+   END StoreInt;
+
+
+   PROCEDURE PrepareReg (reg : Regs.Value);
+   BEGIN
+      IF reg = NIL THEN RETURN END;
+      IF reg IS Value THEN
+	 WITH reg : Value DO
+	    ASSERT ((reg.freg >= 0) OR (reg.set.top < 0));
+	    ASSERT (reg.freg <= reg.set.top);
+	    Regs.SetRegCode (reg, reg.set.top - reg.freg);
+	 END;
+      END;
+   END PrepareReg;
+
+   PROCEDURE PrepareOp (op : Op.Operand);
+   BEGIN
+      PrepareReg (op.reg1);
+      PrepareReg (op.reg2);
+   END PrepareOp;
+
+   PROCEDURE Instr2 (s : FragmentedStreams.Stream; mnem : Gen.Mnemonic;
+   		     op1, op2 : Op.Operand);
+   BEGIN
+      PrepareOp (op1);
+      PrepareOp (op2);
+      Emit.Instr2 (s, mnem, op1, op2);
+   END Instr2;
+
+   PROCEDURE Instr1 (s : FragmentedStreams.Stream; mnem : Gen.Mnemonic;
+   		     op1 : Op.Operand);
+   BEGIN
+      PrepareOp (op1);
+      Emit.Instr1 (s, mnem, op1);
+   END Instr1;
+
+   (* Fixup stacksize after a pop instruction. *)
+   PROCEDURE Pop (reg : Regs.Value);
+   BEGIN
+      WITH reg : Value DO
+         ASSERT (reg.freg = reg.set.top);
+	 DEC (reg.set.top);
+	 reg.freg := reg.set.top;
+      END;
+   END Pop;
+
+END AMD64FPURegisters.

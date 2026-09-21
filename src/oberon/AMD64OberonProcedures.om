@@ -1,0 +1,180 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2004 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   AMD64 adaptation of I386OberonProcedures.om
+   ----------------------------------------------------------------------------
+*)
+
+MODULE AMD64OberonProcedures;
+
+   (* built-in math procedures for AMD64: sqrt, sin, cos *)
+
+   IMPORT BaseTypes := OberonBaseTypes, CompilerErrors, CompilerObjects,
+      ConstantObjects, ConstStrings, NetIO, Services, Streams,
+      Strings, Sym := OberonSymbols, Types := OberonTypes, Write;
+
+   CONST
+      sqrt = 0;
+      sin  = 1;
+      cos  = 2;
+
+   TYPE
+      StdProc = SHORTINT; (* sqrt .. cos *)
+
+   TYPE
+      StdProcedure = POINTER TO StdProcedureRec;
+      StdProcedureRec =
+	 RECORD
+	    (Sym.BuiltInProcedureRec)
+	    stdproc: StdProc;
+	 END;
+   VAR
+      stdprocType: Services.Type;
+
+   VAR
+      sqrtF : Sym.Ident;
+      sinF  : Sym.Ident;
+      cosF  : Sym.Ident;
+
+   (* === OberonSymbols if for StdProcedure =============================== *)
+
+   PROCEDURE CheckArgs(builtinproc: Sym.BuiltInProcedure;
+                       args: Sym.Attribute;
+		       VAR restype: Sym.Type);
+      CONST
+	 maxargs = 1;
+      VAR
+	 stdproc: StdProc;
+	 arg: Sym.Attribute;
+	 nofargs: INTEGER;
+	 index: INTEGER;
+	 types: ARRAY maxargs OF Sym.Type;
+	 forms: ARRAY maxargs OF Sym.Form;
+	 at: ARRAY maxargs OF Sym.Attribute;
+	 es: Streams.Stream;
+	 error: BOOLEAN;
+
+      PROCEDURE OpenError(at: Sym.Attribute);
+      BEGIN
+	 error := TRUE;
+	 CompilerErrors.Open(es);
+	 CompilerErrors.AtObject1(es, at);
+      END OpenError;
+
+      PROCEDURE CloseError;
+      BEGIN
+	 CompilerErrors.Close(es, at[0].loc.src);
+      END CloseError;
+
+      PROCEDURE Error(at: Sym.Attribute; msg: ARRAY OF CHAR);
+      BEGIN
+	 OpenError(at);
+	 Write.StringS(es, msg);
+	 CloseError;
+      END Error;
+
+      PROCEDURE CheckNumeric(at: Sym.Attribute);
+      BEGIN
+	 Types.CheckAtType(at, Sym.numeric);
+      END CheckNumeric;
+
+   BEGIN (* CheckArgs *)
+      stdproc := builtinproc(StdProcedure).stdproc;
+      restype := NIL;
+      error := FALSE;
+      nofargs := 0;
+      arg := args;
+      WHILE arg # NIL DO
+	 IF nofargs < maxargs THEN
+	    at[nofargs] := arg;
+	    types[nofargs] := at[nofargs].type;
+	    IF types[nofargs] = NIL THEN
+	       RETURN (* do not check if there are already errors *)
+	    END;
+	    forms[nofargs] := types[nofargs].form;
+	 END;
+	 IF ~(arg.mode IN Sym.opModes) THEN
+	    Error(arg, "expression expected");
+	 END;
+	 INC(nofargs); arg := arg.next;
+      END;
+      ASSERT(nofargs >= builtinproc.minargs);
+
+      IF error THEN RETURN END;
+
+      CASE stdproc OF
+      | sqrt, sin, cos:
+	 CheckNumeric(at[0]);
+	 restype := BaseTypes.longreal;
+      END;
+   END CheckArgs;
+
+   (* === initializations ================================================= *)
+
+   PROCEDURE Init;
+   BEGIN
+      ConstantObjects.RegisterType(stdprocType,
+         "AMD64OberonProcedures.StdProcedure", "OberonSymbols.BuiltInProcedure");
+   END Init;
+
+   PROCEDURE InitStd;
+
+      PROCEDURE Create(name: ARRAY OF CHAR;
+                       stdproc: StdProc;
+		       minargs, maxargs: INTEGER;
+		       function: BOOLEAN;
+		       VAR ident: Sym.Ident);
+	 VAR
+	    cstring: ConstStrings.String;
+	    stdprocedure: StdProcedure;
+	    qualifiedName: ARRAY 256 OF CHAR;
+      BEGIN
+	 NEW(stdprocedure);
+	 qualifiedName := "AMD64OberonProcedures.";
+	 Strings.Concatenate(qualifiedName, name);
+	 ConstantObjects.Init(stdprocedure, stdprocType, qualifiedName);
+	 Sym.InitBuiltInProcedure(stdprocedure, minargs, maxargs, CheckArgs);
+	 ConstStrings.Create(cstring, name);
+	 IF function THEN
+	    Sym.CreateBuiltInFunction(ident, cstring, stdprocedure);
+	 ELSE
+	    Sym.CreateBuiltInProcedure(ident, cstring, stdprocedure);
+	 END;
+	 CompilerObjects.InitBuiltInObject(ident);
+	 stdprocedure.stdproc := stdproc;
+      END Create;
+
+      PROCEDURE CreateFunc(name: ARRAY OF CHAR;
+			   stdproc: StdProc;
+			   minargs, maxargs: INTEGER;
+			   VAR ident: Sym.Ident);
+      BEGIN
+	 Create(name, stdproc, minargs, maxargs, TRUE, ident);
+      END CreateFunc;
+
+   BEGIN (* InitStd *)
+      CreateFunc("SQRT", sqrt, 1, 1, sqrtF);
+      CreateFunc("SIN",  sin,  1, 1, sinF);
+      CreateFunc("COS",  cos,  1, 1, cosF);
+   END InitStd;
+
+BEGIN
+   Init;
+   InitStd;
+END AMD64OberonProcedures.

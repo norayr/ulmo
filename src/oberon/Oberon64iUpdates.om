@@ -1,0 +1,177 @@
+MODULE Oberon64iUpdates;
+
+   (* AMD64 variant of Oberon32iUpdates: uses Oberon64iSymbols for all
+      type-size and constant comparisons, so that AMD64 attachments
+      (already set by AMD64 ProcessModule) are not confused with i386 ones.
+   *)
+
+   IMPORT CompilerErrors, CompilerObjects, ConstStrings, Iterators, Oberon64i,
+      OberonErrors, OberonTypes, RelatedEvents, Scopes, Streams,
+      Sym := OberonSymbols, Sym64i := Oberon64iSymbols, Write;
+
+   PROCEDURE CheckForUpdates(public, private: Sym.Ident;
+                             updatesPermitted: BOOLEAN;
+			     VAR updated: BOOLEAN;
+			     errors: RelatedEvents.Object);
+      VAR
+	 it: Iterators.Iterator;
+	 defident, modident: Sym.Ident;
+	 deftype, modtype: Sym.Type;
+	 abort: BOOLEAN; (* abort on first error *)
+	 ok: BOOLEAN;
+
+      PROCEDURE CheckType(deftype, modtype: Sym.Type);
+	 VAR
+	    defsize, modsize: Oberon64i.Size;
+	    es: Streams.Stream;
+
+	 PROCEDURE CheckFields(defscope, modscope: Scopes.Scope);
+	    VAR
+	       it: Iterators.Iterator;
+	       deffield, modfield: Sym.FieldList;
+	       ok: BOOLEAN;
+	       defoffset, modoffset: Oberon64i.Size;
+	       es: Streams.Stream;
+	 BEGIN
+	    Scopes.GetIterator(defscope, it);
+	    WHILE ~abort & Iterators.Get(it, deffield) DO
+	       ok := Scopes.Lookup(modscope, deffield.name, modfield);
+	       ASSERT(ok);
+	       defoffset := Sym64i.GetOffset(public, deffield);
+	       modoffset := Sym64i.GetOffset(private, modfield);
+	       IF defoffset # modoffset THEN
+		  IF updatesPermitted THEN
+		     Sym64i.PatchOffset(public, deffield, modoffset);
+		     updated := TRUE;
+		  ELSE
+		     CompilerErrors.Open(es);
+		     CompilerErrors.At1(es, modfield.loc);
+		     CompilerErrors.Ref(es, deffield.loc);
+		     Write.StringS(es, "required update is prohibited");
+		     CompilerErrors.Close(es, errors);
+		     abort := TRUE; RETURN
+		  END;
+	       END;
+	       CheckType(deffield.type, modfield.type);
+	    END;
+	 END CheckFields;
+
+      BEGIN (* CheckType *)
+	 IF abort THEN RETURN END;
+	 IF (deftype = NIL) & (modtype = NIL) THEN RETURN END;
+	 ASSERT((deftype # NIL) & (modtype # NIL));
+	 IF (deftype.ident # NIL) & (deftype.ident.module # NIL) &
+	       (ConstStrings.Compare(deftype.ident.module.name,
+	                             public.name) # 0) THEN
+	    (* we left our module *)
+	    RETURN
+	 END;
+	 (* skip size check for unresolved generic types *)
+	 IF (deftype.form IN Sym.specforms) & (deftype.spec = Sym.generic) THEN RETURN END;
+	 IF (modtype.form IN Sym.specforms) & (modtype.spec = Sym.generic) THEN RETURN END;
+	 defsize := Sym64i.GetSize(public, deftype, errors);
+	 modsize := Sym64i.GetSize(public, modtype, errors);
+	 IF defsize # modsize THEN
+	    IF updatesPermitted THEN
+	       Sym64i.PatchSize(public, deftype, modsize);
+	       updated := TRUE;
+	    ELSE
+	       CompilerErrors.Open(es);
+	       CompilerErrors.At1(es, modtype.loc);
+	       CompilerErrors.Ref(es, deftype.loc);
+	       Write.StringS(es, "required update is prohibited");
+	       CompilerErrors.Close(es, errors);
+	       abort := TRUE; RETURN
+	    END;
+	 END;
+	 ASSERT(deftype.form = modtype.form);
+	 CASE deftype.form OF
+	 | Sym.array:   CheckType(deftype.element, modtype.element);
+	 | Sym.record:  CheckType(deftype.basetype, modtype.basetype);
+	                CheckFields(deftype.publicfieldscope,
+			            modtype.publicfieldscope);
+	 | Sym.pointer: IF deftype.reftype.ident = NIL THEN
+			   (* avoid endless recursion for self-referential
+			      data types
+			   *)
+			   CheckType(deftype.reftype, modtype.reftype);
+			END;
+	 ELSE
+	 END;
+      END CheckType;
+
+      PROCEDURE CheckConst(const1, const2: Sym.Attribute);
+	 VAR
+	    cdisc1, cdisc2: Sym64i.Attribute;
+	    type1, type2: Sym.Type;
+	    es: Streams.Stream;
+
+	 PROCEDURE OpenError;
+	 BEGIN
+	    CompilerErrors.Open(es);
+	    CompilerErrors.At1(es, const2.loc); (* that of the module *)
+	    CompilerErrors.Ref(es, const1.loc); (* that of the if *)
+	 END OpenError;
+
+      BEGIN (* CheckConst *)
+	 CompilerObjects.GetAttachment(const1, cdisc1);
+	 CompilerObjects.GetAttachment(const2, cdisc2);
+	 ASSERT((cdisc1 # NIL) & (cdisc2 # NIL));
+	 IF ~Sym64i.CompareConstants(cdisc1, cdisc2) THEN
+	    OpenError;
+	    Write.StringS(es, "constant value differs from that of export declaration");
+	    CompilerErrors.Close(es, errors);
+	    RETURN
+	 END;
+	 IF OberonTypes.IsChar(const1) & OberonTypes.IsChar(const2) OR
+	       OberonTypes.IsString(const1) & OberonTypes.IsString(const2) THEN
+	    RETURN
+	 END;
+	 Sym64i.GetType(const1, type1);
+	 Sym64i.GetType(const2, type2);
+	 IF ~OberonTypes.Identical(type1, type2) THEN
+	    OpenError;
+	    Write.StringS(es, "constant type differs from that of export declaration");
+	    CompilerErrors.Close(es, errors);
+	    IF (type1.ident # NIL) & (type2.ident # NIL) THEN
+	       OpenError;
+	       OberonErrors.WriteString(es, type1.ident.name);
+	       Write.StringS(es, " vs ");
+	       OberonErrors.WriteString(es, type2.ident.name);
+	       CompilerErrors.Close(es, errors);
+	    END;
+	 END;
+      END CheckConst;
+
+   BEGIN (* CheckForUpdates *)
+      abort := FALSE;
+      Scopes.GetIterator(public.export, it);
+      WHILE ~abort & Iterators.Get(it, defident) DO
+	 ok := Scopes.Lookup(private.scope, defident.name, modident);
+	 ASSERT(ok);
+	 IF defident.class = Sym.constC THEN
+	    ASSERT(modident.class = Sym.constC);
+	    IF ~OberonTypes.IsChar(defident.constexpr) OR
+		  ~OberonTypes.IsChar(modident.constexpr) THEN
+	       Sym64i.GetType(defident.constexpr, deftype);
+	       Sym64i.GetType(modident.constexpr, modtype);
+	       CheckType(deftype, modtype);
+	    END;
+	 ELSE
+	    CheckType(defident.type, modident.type);
+	 END;
+      END;
+      IF abort THEN RETURN END;
+
+      Scopes.GetIterator(public.export, it);
+      WHILE ~abort & Iterators.Get(it, defident) DO
+	 ok := Scopes.Lookup(private.scope, defident.name, modident);
+	 ASSERT(ok);
+	 IF defident.class = Sym.constC THEN
+	    ASSERT(modident.class = Sym.constC);
+	    CheckConst(defident.constexpr, modident.constexpr);
+	 END;
+      END;
+   END CheckForUpdates;
+
+END Oberon64iUpdates.

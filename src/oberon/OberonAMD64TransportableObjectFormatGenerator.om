@@ -1,0 +1,91 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2004 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   AMD64 adaptation of OberonI386TransportableObjectFormatGenerator.om
+   ----------------------------------------------------------------------------
+*)
+
+MODULE OberonAMD64TransportableObjectFormatGenerator;
+
+   IMPORT Args := UnixArguments, CompilerObjects, Conclusions, Errors,
+      PersistentObjects, PersistentTexts, RelatedEvents, Services, Streams,
+      TOF := AMD64OberonTransportableObjectFormat, UnixFiles;
+
+   VAR
+      out: Streams.Stream;
+      header: CompilerObjects.Header;
+      text: PersistentTexts.Text;
+      headerType, textType: Services.Type;
+      errors: RelatedEvents.Object;
+
+   PROCEDURE ProcessArgs;
+      VAR
+	 flag: CHAR;
+	 filename: ARRAY 512 OF CHAR;
+	 in: Streams.Stream;
+
+      PROCEDURE OpenStream(VAR s: Streams.Stream;
+			   filename: ARRAY OF CHAR;
+			   mode: UnixFiles.Mode);
+      BEGIN
+	 IF ~UnixFiles.Open(s, filename, mode, Streams.onebuf, errors) THEN
+	    Conclusions.Conclude(errors, Errors.fatal, "");
+	 END;
+	 RelatedEvents.Forward(s, errors);
+      END OpenStream;
+
+      PROCEDURE LoadHeaderAndText(s: Streams.Stream);
+      BEGIN
+	 IF ~PersistentObjects.GuardedRead(s, headerType, header) OR
+	       ~PersistentObjects.GuardedRead(s, textType, text) THEN
+	    Conclusions.Conclude(errors, Errors.fatal, "");
+	 END;
+	 RelatedEvents.Forward(text, errors);
+      END LoadHeaderAndText;
+
+   BEGIN (* ProcessArgs *)
+      Args.Init("[-o output] [input]");
+      in := Streams.stdin; out := Streams.stdout;
+      WHILE Args.GetFlag(flag) DO
+	 CASE flag OF
+	 | "o":
+	       Args.FetchString(filename);
+	       OpenStream(out, filename, UnixFiles.write + UnixFiles.create);
+	 ELSE
+	    Args.Usage;
+	 END;
+      END;
+      IF Args.GetArg(filename) THEN
+	 OpenStream(in, filename, UnixFiles.read);
+      ELSE
+	 in := Streams.stdin;
+      END;
+      LoadHeaderAndText(in);
+      Args.AllArgs;
+   END ProcessArgs;
+
+BEGIN
+   NEW(errors); RelatedEvents.QueueEvents(errors);
+   Services.SeekType("CompilerObjects.Header", headerType);
+   Services.SeekType("PersistentTexts.Text", textType);
+   ProcessArgs;
+   IF ~TOF.Gen(out, header, text, errors) OR ~Streams.Close(out) THEN
+      Conclusions.Conclude(errors, Errors.fatal, "");
+   END;
+END OberonAMD64TransportableObjectFormatGenerator.

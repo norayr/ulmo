@@ -1,0 +1,1132 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2004 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   $Id: I386OberonI.om,v 1.1 2004/09/06 16:54:38 borchert Exp borchert $
+   ----------------------------------------------------------------------------
+   $Log: I386OberonI.om,v $
+   Revision 1.1  2004/09/06 16:54:38  borchert
+   Initial revision
+
+   ----------------------------------------------------------------------------
+*)
+
+MODULE AMD64Instructions;
+
+   IMPORT Gen := AMD64OpCodeGenerator;
+
+   (* instruction formats for the Pentium processor *)
+
+   CONST
+      AAA    = 1;
+      AAD    = 2;
+      AAM    = 3;
+      AAS    = 4;
+      ADC    = 5;
+      ADD    = 6;
+      AND    = 7;
+      ARPL   = 8;
+
+      BOUND  = 20;
+      BSF    = 21;
+      BSR    = 22;
+      BSWAP  = 23;
+      BT     = 24;
+      BTC    = 25;
+      BTR    = 26;
+      BTS    = 27;
+
+      CALL   = 40;
+      CALLF  = 41;
+      CBW    = 42;   CWDE = CBW;   CWD = CBW;   CDQ = CWD;
+      CLC    = 43;
+      CLD    = 44;
+      CLI    = 45;
+      CLTS   = 46;
+      CMC    = 47;
+      CMP    = 48;
+      CMPS   = 49;
+      CMPXCHG     = 51;
+      CMPXCHG8B   = 52;
+      CPUID  = 53;
+
+      DAA    = 60;
+      DAS    = 61;
+      DECR   = 62;
+      DIVIDE = 63;
+
+      ENTER  = 70;
+      HLT    = 71;
+      IDIVIDE   = 72;
+      IMUL   = 73;
+      INCR   = 74;
+      INP    = 75;
+      INPS   = 76;
+      INT    = 79;
+      INTO   = 80;
+      INVD   = 81;
+      INVLPG = 82;
+      IRET   = 83; IRETD = IRET;
+
+      (* keep the following lines and constant values in order! *)
+      JCC    = 100;
+      JO     = 100;                                 (* add 0 *)
+      JNO    = 101;                                 (* add 1 *)
+      JB     = 102;   JNAE   = JB;   JC    = JB;    (* add 2 *)
+      JAE    = 103;   JNB    = JAE;  JNC   = JAE;   (* add 3 *)
+      JE     = 104;   JZ     = JE;                  (* add 4 *)
+      JNE    = 105;   JNZ    = JNE;                 (* add 5 *)
+      JBE    = 106;   JNA    = JBE;                 (* add 6 *)
+      JA     = 107;   JNBE   = JA;                  (* add 7 *)
+      JS     = 108;                                 (* add 8 *)
+      JNS    = 109;                                 (* add 9 *)
+      JP     = 110;   JPE    = JP;                  (* add A *)
+      JNP    = 111;   JPO    = JNP;                 (* add B *)
+      JL     = 112;   JNGE   = JL;                  (* add C *)
+      JGE    = 113;   JNL    = JGE;                 (* add D *)
+      JLE    = 114;   JNG    = JLE;                 (* add E *)
+      JG     = 115;   JNLE   = JG;                  (* add F *)
+
+      JCXZ   = 120;
+      JECXZ  = 121;
+      JMP    = 122;
+      JMPFAR = 123;
+
+      LAHF   = 130;
+      LAR    = 131;
+      LDS    = 132;
+      LES    = 133;
+      LFS    = 134;
+      LGS    = 135;
+      LSS    = 136;
+      LEA    = 137;
+      LEAVE  = 138;
+      LGDT   = 139;
+      LIDT   = 140;
+      LLDT   = 141;
+      LMSW   = 142;
+      LODS   = 143;
+      LOOPI  = 146;
+      LOOPIE = 147;   LOOPIZ   = LOOPIE;
+      LOOPINE   = 148;   LOOPINZ   = LOOPINE;
+      LSL    = 149;
+      LTR    = 150;
+
+      MOV    = 160;
+      MOVS   = 161;
+      MOVSXD = 162;  (* AMD64: sign-extend r/m32 to r64; opcode 63H with REX.W *)
+      MOVSX  = 164;
+      MOVZX  = 165;
+      MUL    = 166;
+
+      NEG    = 170;
+      NOP    = 171;
+      NOT    = 172;
+
+      ORI    = 180;
+      OUTP   = 181;
+      OUTPS  = 182;
+
+      POP    = 190;
+      POPA   = 191;
+      POPF   = 192;
+      PUSH   = 193;
+      PUSHA  = 194;
+      PUSHF  = 195;
+
+      RCL    = 200;
+      RCR    = 201;
+      ROL    = 202;
+      ROR    = 203;
+      RDMSR  = 204;
+      RDTSC  = 205;
+      RET    = 206;
+      RETFAR = 207;
+      RETP   = 208;
+      RETPFAR   = 209;
+      RSM    = 210;
+
+      SAHF   = 220;
+      SAL    = 221;   SHL   = SAL;
+      SAR    = 222;
+      SHR    = 224;
+      SBB    = 225;
+      SCAS   = 226;
+
+      (* keep the following lines and constant values in order! *)
+      SETCC   = 230;
+      SETO    = 230;                                       (* add 0 *)
+      SETNO   = 231;                                       (* add 1 *)
+      SETB    = 232;   SETNAE   = SETB;   SETC   = SETB;   (* add 2 *)
+      SETAE   = 233;   SETNB    = SETAE;  SETNC  = SETAE;  (* add 3 *)
+      SETE    = 234;   SETZ     = SETE;                    (* add 4 *)
+      SETNE   = 235;   SETNZ    = SETNE;                   (* add 5 *)
+      SETBE   = 236;   SETNA    = SETBE;                   (* add 6 *)
+      SETA    = 237;   SETNBE   = SETA;                    (* add 7 *)
+      SETS    = 238;                                       (* add 8 *)
+      SETNS   = 239;                                       (* add 9 *)
+      SETP    = 240;   SETPE    = SETP;                    (* add A *)
+      SETNP   = 241;   SETPO    = SETNP;                   (* add B *)
+      SETL    = 242;   SETNGE   = SETL;                    (* add C *)
+      SETGE   = 243;   SETNL    = SETGE;                   (* add D *)
+      SETLE   = 244;   SETNG    = SETLE;                   (* add E *)
+      SETG    = 245;   SETNLE   = SETG;                    (* add F *)
+
+      SGDT    = 250;
+      SIDT    = 251;
+      SHLD    = 252;
+      SHRD    = 253;
+      SLDT    = 255;
+      SMSW    = 256;
+      STC     = 257;
+      STD     = 258;
+      STI     = 259;
+      STOS    = 260;
+      STR     = 263;
+      SUB     = 264;
+
+      TEST    = 270;
+      VERR    = 271;
+      VERW    = 272;
+      WAIT    = 273;
+      WBINVD  = 274;
+      WRMSR   = 275;
+
+      XADD    = 280;
+      XCHG    = 281;
+      XLAT    = 282;
+      XOR     = 283;
+
+      F2XM1   = 300;
+      FABS    = 301;
+      FADD    = 302;
+      FIADD   = 700;
+      FADDP   = 303;
+      FBLD    = 304;
+      FBSTP   = 305;
+      FCHS    = 306;
+      FCLEX   = 307;
+      FNCLEX  = 701;
+      FCOM    = 308;
+      FCOMP   = 309;
+      FCOMPP  = 310;
+      FCOS    = 311;
+      FDECSTP = 312;
+      FDIV    = 313;
+      FDIVP   = 314;
+      FIDIV   = 315;
+      FDIVR   = 316;
+      FDIVRP  = 317;
+      FIDIVR  = 318;
+      FFREE   = 319;
+      FICOM   = 320;
+      FICOMP  = 321;
+      FILD    = 322;
+      FINCSTP = 323;
+      FINIT   = 324;
+      FNINIT  = 702;
+      FIST    = 325;
+      FISTP   = 326;
+      FLD     = 327;
+
+      (* keep the following lines in order *)
+      FLDCONST   = 330;
+      FLD1    = 330;   (* add 0, const = 1.0 *)
+      FLDL2T  = 331;   (* add 1, const = log10 2 *)
+      FLDL2E  = 332;   (* add 2, const = log2 e *)
+      FLDPI   = 333;   (* add 3, const = pi *)
+      FLDLG2  = 334;   (* add 4, const = log10 2 *)
+      FLDLN2  = 335;   (* add 5, const = log 2 *)
+      FLDZ    = 336;   (* add 6, const = 0.0 *)
+
+      FLDCW   = 340;   (* XXX is it FLDCW or FNLDCW? *)
+      FLDENV  = 341;
+      FMUL    = 342;
+      FMULP   = 343;
+      FIMUL   = 344;
+      FNOP    = 345;
+      FPATAN  = 346;
+      FPREM   = 347;
+      FPREM1  = 348;
+      FPTAN   = 349;
+      FRNDINT = 350;
+      FRSTOR  = 351;
+      FSAVE   = 352;
+      FNSAVE  = 703;
+      FSCALE  = 353;
+      FSIN    = 354;
+      FSINCOS = 355;
+      FSQRT   = 356;
+      FST     = 357;
+      FSTP    = 358;
+      FSTCW   = 359;
+      FNSTCW  = 704;
+      FSTENV  = 360;
+      FNSTENV = 705;
+      FSTSW   = 361;
+      FNSTSW  = 706;
+      FSUB    = 362;
+      FSUBP   = 363;
+      FISUB   = 364;
+      FSUBR   = 365;
+      FSUBRP  = 366;
+      FISUBR  = 367;
+      FTST    = 368;
+      FUCOM   = 369;
+      FUCOMP  = 370;
+      FUCOMPP = 371;
+      FWAIT   = 372;
+      FXAM    = 373;
+      FXCH    = 374;
+      FXTRACT = 375;
+      FYL2X   = 376;
+      FYL2XP1 = 377;
+
+      SYSCALL = 707;
+
+   TYPE
+      RangeRec =
+	 RECORD
+	    min, max : INTEGER;
+	 END;
+
+   VAR
+      JMPRange, JCCRange, CALLRange : RangeRec;
+
+   PROCEDURE ToHexDigit (i : INTEGER; VAR ch : CHAR) : BOOLEAN;
+   BEGIN
+      IF (i < 0) OR (i >= 16) THEN RETURN FALSE END;
+         IF i < 10 THEN
+            ch := CHR (i + ORD("0"));
+         ELSE
+            ch := CHR (i + ORD("A") - 10);
+         END;
+      RETURN TRUE;
+   END ToHexDigit;
+
+   PROCEDURE MakeIop (type, s1b, s1a, s1o, s2b, s2a, s2o : INTEGER) : Gen.InstrOp;
+      VAR
+         op : Gen.InstrOp;
+   BEGIN
+      op := NIL;
+      NEW(op);
+      op.type := type;
+      op.immregsz.base := s1b;
+      op.immregsz.addrm := s1a;
+      op.immregsz.opm  := s1o;
+      op.memsz.base := s2b;
+      op.memsz.addrm := s2a;
+      op.memsz.opm  := s2o;
+      RETURN op;
+   END MakeIop;
+
+
+   PROCEDURE Init;
+      VAR
+         al,ah,axop,ax, eax, st0, st1, sti : Gen.InstrOp;
+         ib,id,iop,io, iw : Gen.InstrOp;
+         relb, rela, relA, relop : Gen.InstrOp;
+         rmb, rmw, rmop, rm32, rm64 : Gen.InstrOp;
+         regb, regw, regop, reg32, reg64 : Gen.InstrOp;
+         mem2op, memop, memOP, mem6 : Gen.InstrOp;
+         ptrOP : Gen.InstrOp;
+         fmt : ARRAY 256 OF CHAR;
+         i : INTEGER;
+         edxeax, ecxebx, dxaxop : Gen.InstrOp;
+         dl, dx, edx, dxop :  Gen.InstrOp;
+         cl, cx, ecx, cxop :  Gen.InstrOp;
+         moffsb, moffsop : Gen.InstrOp;
+         smemsb, smemsop, smemdb, smemdop : Gen.InstrOp;
+	 m32real, m64real, m80real : Gen.InstrOp;
+	 m16int, m32int, m64int : Gen.InstrOp;
+	 m2byte, m10byte, m28byte, m108byte : Gen.InstrOp;
+	 ok: BOOLEAN;
+   BEGIN
+      st0  := MakeIop (Gen.tst, 0,0,0, 0,0,0);
+      st0.reg1 := 0;
+      st1  := MakeIop (Gen.tst, 0,0,0, 0,0,0);
+      st1.reg1 := 1;
+      sti  := MakeIop (Gen.tsti, 0,0,0, 0,0,0);
+      al   := MakeIop (Gen.timpl1, 0,0,0, 1,0,0);
+      al.reg1 := Gen.regal;
+      ah   := MakeIop (Gen.timpl1, 0,0,0, 1,0,0);
+      ah.reg1 := Gen.regah;
+      axop := MakeIop (Gen.timpl1, 0,0,0, 0,0,1);
+      axop.reg2 := Gen.genax;
+      ax   := MakeIop (Gen.timpl1, 0,0,0, 2,0,0);
+      al.reg2 := Gen.genax;
+      eax := MakeIop (Gen.timpl1, 0,0,0, 4,0,0);
+      eax.reg2 := Gen.genax;
+      ib   := MakeIop (Gen.timm,  1,0,0, 0,0,0);
+      id   := MakeIop (Gen.timm,  4,0,0, 0,0,0);
+      io   := MakeIop (Gen.timm,  8,0,0, 0,0,0);  (* 8-byte imm64 for MOVABS *)
+      iop  := MakeIop (Gen.timm,  0,0,1, 0,0,0);
+      iw   := MakeIop (Gen.timm,  2,0,0, 0,0,0);
+      relb := MakeIop (Gen.trel,  1,0,0, 0,0,0);
+      relop:= MakeIop (Gen.trel,  0,0,1, 0,0,0);
+      rmb  := MakeIop (Gen.trm,   0,0,0, 1,0,0);
+      rmw  := MakeIop (Gen.trm,   0,0,0, 2,0,0);
+      rmop := MakeIop (Gen.trm,   0,0,0, 0,0,1);
+      rm32 := MakeIop (Gen.trm,   0,0,0, 4,0,0);
+      rm64 := MakeIop (Gen.trm,   0,0,0, 8,0,0);
+      regb := MakeIop (Gen.treg,  0,0,0, 1,0,0);
+      reg32:= MakeIop (Gen.treg,  0,0,0, 4,0,0);
+      reg64:= MakeIop (Gen.treg,  0,0,0, 8,0,0);
+      regw := MakeIop (Gen.treg,  0,0,0, 2,0,0);
+      regop:= MakeIop (Gen.treg,  0,0,0, 0,0,1);
+      mem2op:= MakeIop(Gen.tmem,  0,0,0, 0,0,2);
+      memOP:= MakeIop (Gen.tmem,  0,0,0, 2,0,1);
+      memop:= MakeIop (Gen.tmem,  0,0,0, 0,0,1);
+      mem6 := MakeIop (Gen.tmem,  0,0,0, 6,0,0);
+      ptrOP:= MakeIop (Gen.tptr,  2,0,1, 0,0,0);
+      edxeax := MakeIop (Gen.timpl2, 4,0,0, 4,0,0);
+      edxeax.reg1 := Gen.genax; edxeax.reg2 := Gen.gendx;
+      ecxebx := MakeIop (Gen.timpl2, 4,0,0, 4,0,0);
+      ecxebx.reg1 := Gen.genbx; ecxebx.reg2 := Gen.gencx;
+      dxaxop := MakeIop (Gen.timpl2, 0,0,1, 0,0,1);
+      dxaxop.reg1 := Gen.genax; dxaxop.reg2 := Gen.gendx;
+      dl := MakeIop (Gen.timpl1, 0,0,0, 1,0,0); dl.reg1 := Gen.regdl;
+      dx := MakeIop (Gen.timpl1, 0,0,0, 2,0,0); dx.reg1 := Gen.gendx;
+      edx := MakeIop (Gen.timpl1, 0,0,0, 4,0,0); edx.reg1 := Gen.gendx;
+      dxop := MakeIop (Gen.timpl1, 0,0,0, 0,0,1); dxop.reg1 := Gen.gendx;
+      cl := MakeIop (Gen.timpl1, 0,0,0, 1,0,0); cl.reg1 := Gen.regcl;
+      cx := MakeIop (Gen.timpl1, 0,0,0, 2,0,0); cx.reg1 := Gen.gencx;
+      ecx := MakeIop (Gen.timpl1, 0,0,0, 4,0,0); ecx.reg1 := Gen.gencx;
+      cxop := MakeIop (Gen.timpl1, 0,0,0, 0,0,1); cxop.reg1 := Gen.gencx;
+      moffsb := MakeIop (Gen.tmoffs, 0,1,0, 1,0,0);
+      moffsop := MakeIop (Gen.tmoffs, 0,1,0, 0,0,1);
+      smemsb := MakeIop (Gen.tsmems, 0,1,0, 1,0,0);
+      smemsop := MakeIop (Gen.tsmems, 0,1,0, 0,0,1);
+      smemdb := MakeIop (Gen.tsmemd, 0,1,0, 1,0,0);
+      smemdop := MakeIop (Gen.tsmemd, 0,1,0, 0,0,1);
+      m32real := MakeIop (Gen.treal, 0,0,0, 4,0,0);
+      m64real := MakeIop (Gen.treal, 0,0,0, 8,0,0);
+      m80real := MakeIop (Gen.treal, 0,0,0, 10,0,0);
+      m16int := MakeIop (Gen.tint, 0,0,0, 2,0,0);
+      m32int := MakeIop (Gen.tint, 0,0,0, 4,0,0);
+      m64int := MakeIop (Gen.tint, 0,0,0, 8,0,0);
+      m2byte := MakeIop (Gen.tnbyte, 0,0,0, 2,0,0);
+      m28byte := MakeIop (Gen.tnbyte, 0,0,0, 28,0,0);
+      m108byte := MakeIop (Gen.tnbyte, 0,0,0, 108,0,0);
+      m10byte := MakeIop (Gen.tnbyte, 0,0,0, 10,0,0);
+
+
+      ok := Gen.RegisterFormat0(AAA, "37", 3); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(AAD, "D50A", 10); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(AAM, "D40A", 18); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(AAS, "3F", 3); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(ADC, "14%1I%",al,ib,1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ADC, "?O?15%1I%", axop,id,1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ADC, "?A??O?80%0D2%%1I%",rmb,ib,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ADC, "?A??O?81%0D2%%1I%",rmop,iop,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ADC, "?A??O?83%0D2%%1I%",rmop,ib,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ADC, "?A?10%0M%%1R%",rmb,regb,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ADC, "?A??O?11%0M%%1R%",rmop,regop,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ADC, "?A??O?12%0R%%1M%",regb,rmb,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ADC, "?A??O?13%0R%%1M%",regop,rmop,2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(ADD, "04%1I%",al,ib,1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ADD, "?O?05%1I%", axop,id,1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ADD, "?A??O?80%0D0%%1I%",rmb,ib,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ADD, "?A??O?81%0D0%%1I%",rmop,iop,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ADD, "?A??O?83%0D0%%1I%",rmop,ib,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ADD, "?A?00%0M%%1R%",rmb,regb,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ADD, "?A??O?01%0M%%1R%",rmop,regop,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ADD, "?A??O?02%0R%%1M%",regb,rmb,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ADD, "?A??O?03%0R%%1M%",regop,rmop,2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(AND, "24%1I%",al,ib,1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(AND, "?O?25%1I%", axop,id,1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(AND, "?A??O?80%0D4%%1I%",rmb,ib,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(AND, "?A??O?81%0D4%%1I%",rmop,iop,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(AND, "?A??O?83%0D4%%1I%",rmop,ib,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(AND, "?A?20%0M%%1R%",rmb,regb,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(AND, "?A??O?21%0M%%1R%",rmop,regop,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(AND, "?A??O?22%0R%%1M%",regb,rmb,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(AND, "?A??O?23%0R%%1M%",regop,rmop,2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(ARPL, "?A?63%0M%%1R%", rmw, regw, 7); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(BOUND,"?A??O?62%0R%%1M%",regop,mem2op,8); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(BSF, "?A??O?0FBC%0R%%1M%", regop, rmop, 20); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(BSR, "?A??O?0FBD%0R%%1M%", regop, rmop, 20); ASSERT(ok);
+      (* FIXME: BSWAP is missing *)
+
+      ok := Gen.RegisterFormat2(BT, "?A??O?0FA3%0M%%1R%",rmop,regop,6); ASSERT(ok);
+      ok := Gen.RegisterFormat2(BT, "?A??O?0FBA%0D4%%1I%",rmop,ib,4); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(BTC, "?A??O?0FBB%0M%%1R%",rmop,regop,10); ASSERT(ok);
+      ok := Gen.RegisterFormat2(BTC, "?A??O?0FBA%0D7%%1I%",rmop,ib,7); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(BTR, "?A??O?0FB3%0M%%1R%",rmop,regop,10); ASSERT(ok);
+      ok := Gen.RegisterFormat2(BTR, "?A??O?0FBA%0D6%%1I%",rmop,ib,7); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(BTS, "?A??O?0FAB%0M%%1R%",rmop,regop,10); ASSERT(ok);
+      ok := Gen.RegisterFormat2(BTS, "?A??O?0FBA%0D5%%1I%",rmop,ib,7); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(CALL, "?O?E8%0C%", relop,1); ASSERT(ok);
+      ok := Gen.RegisterFormat1(CALL, "?A??O?FF%0D2%", rmop,2); ASSERT(ok);
+      ok := Gen.RegisterFormat1(CALLF, "?O?9A%0C%", ptrOP,4); ASSERT(ok);
+      ok := Gen.RegisterFormat1(CALLF, "?A??O?FF%0D3%", memOP,5); ASSERT(ok);
+
+      (* CBW and CWDE sign extend AL/AX to AX/EAX depending on Operand size. The
+       * implicit Operand added here is the Destination.
+       * (can't use the source, this would require a Operand size multiplier of 0.5) *)
+      ok := Gen.RegisterFormat1(CBW, "?O?98", axop, 3); ASSERT(ok);
+      (* Actually CWD and CDQ *)
+      ok := Gen.RegisterFormat1(CDQ, "?O?99", dxaxop, 2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(CLC, "F8", 2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(CLD, "FC", 2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(CLI, "FA", 7); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(CLTS,  "0F06", 10); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(CMC, "F5", 2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(CMP, "3C%1I%",al,ib,1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(CMP, "?O?3D%1I%", axop,id,1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(CMP, "?A??O?80%0D7%%1I%",rmb,ib,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(CMP, "?A??O?81%0D7%%1I%",rmop,iop,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(CMP, "?A??O?83%0D7%%1I%",rmop,ib,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(CMP, "?A?38%0M%%1R%",rmb,regb,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(CMP, "?A??O?39%0M%%1R%",rmop,regop,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(CMP, "?A??O?3A%0R%%1M%",regb,rmb,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(CMP, "?A??O?3B%0R%%1M%",regop,rmop,2); ASSERT(ok);
+
+      (* BIG NOTE: CMPS has its Operands reversed compared to the
+         normal intel convention!   *)
+      ok := Gen.RegisterFormat2(CMPS, "?R??A?A6", smemsb, smemdb, 5); ASSERT(ok);
+      ok := Gen.RegisterFormat2(CMPS, "?R??A??O?A7", smemsop, smemdop, 5); ASSERT(ok);
+
+      ok := Gen.RegisterFormat3(CMPXCHG, "?A?0FB0%1M%%2R%", al, rmb, regb, 6); ASSERT(ok);
+      ok := Gen.RegisterFormat3(CMPXCHG, "?A??O?0FB1%1M%%2R%", axop, rmop, regop, 6); ASSERT(ok);
+
+      ok := Gen.RegisterFormat3(CMPXCHG8B, "?A?0FC7%1D1%", edxeax, rm64, ecxebx,10); ASSERT(ok);
+
+      (* Registers EAX, EBX, ECX and EDX are implicit Operands *)
+      ok := Gen.RegisterFormat0(CPUID, "0FA2", 14); ASSERT(ok);
+
+
+      ok := Gen.RegisterFormat0(DAA, "27", 3); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(DAS, "2F", 3); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(DECR, "?A?FE%0D1%", rmb, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat1(DECR, "?A??O?FF%0D1%", rmop, 2); ASSERT(ok);
+      (* NOTE: do NOT add a regop short-form here; on AMD64 the i386 short-form
+         DEC r32 opcodes 48-4F are repurposed as REX prefixes and must NOT be
+         generated. The rmop format above correctly handles register operands. *)
+
+      ok := Gen.RegisterFormat2(DIVIDE, "?A?F6%1D6%", ax, rmb, 17); ASSERT(ok);
+      ok := Gen.RegisterFormat2(DIVIDE, "?A??O?F7%1D6%", dxaxop, rmop, 33); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(ENTER, "C8%0I%%1I%", iw, ib, 15); ASSERT(ok);
+
+      (* Floating Point Instructions *)
+      ok := Gen.RegisterFormat1(F2XM1,  "D9F0", st0, 57); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(FABS,   "D9E1", st0, 1); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FADD,   "?A?D8%1D0%", st0, m32real, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FADD,   "?A?DC%1D0%", st0, m64real, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FADD,   "D8C0%1F%", st0, sti, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FADD,   "DCC0%0F%", sti, st0, 3); ASSERT(ok);
+
+      (* XXX POP! *)
+      ok := Gen.RegisterFormat2(FADDP,  "DEC0%0F%", sti, st0, 3); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FIADD,  "?A?DA%1D0%", st0, m32int, 7); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FIADD,  "?A?DE%1D0%", st0, m16int, 7); ASSERT(ok);
+
+      (* XXX PUSH! *)
+      ok := Gen.RegisterFormat2(FBLD,   "?A?DF%1D4%", st0, m10byte, 58); ASSERT(ok);
+
+      (* XXX POP! *)
+      ok := Gen.RegisterFormat2(FBSTP,  "?A?DF%0D6%", m10byte, st0, 154); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(FCHS,   "D9E0", st0, 1); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(FCLEX,  "9BDBE2", 10); ASSERT(ok);
+      ok := Gen.RegisterFormat0(FNCLEX, "DBE2", 10); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FCOM,   "?A?D8%1D2%", st0, m32real, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FCOM,   "?A?DC%1D2%", st0, m64real, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FCOM,   "D8D0%1F%", st0, sti, 4); ASSERT(ok);
+
+      (* XXX POP! *)
+      ok := Gen.RegisterFormat2(FCOMP,  "?A?D8%1D3%", st0, m32real, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FCOMP,  "?A?DC%1D3%", st0, m64real, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FCOMP,  "D8D8%1F%", st0, sti, 4); ASSERT(ok);
+
+      (* XXX POP! TWO TIMES *)
+      ok := Gen.RegisterFormat2(FCOMPP, "DED9", st0, st1, 4); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(FCOS,   "D9FF", st0, 124); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(FDECSTP, "D9F6", 1); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FDIV,    "?A?D8%1D6%", st0, m32real, 39); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FDIV,    "?A?DC%1D6%", st0, m64real, 39); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FDIV,    "D8F0%1F%", st0, sti, 39); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FDIV,    "DCF8%0F%", sti, st0, 39); ASSERT(ok);
+
+      (* XXX POP! *)
+      ok := Gen.RegisterFormat2(FDIVP,   "DEF8%0F%", sti, st0, 39); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FIDIV,   "?A?DA%1D6%", st0, m32int, 42); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FIDIV,   "?A?DE%1D6%", st0, m16int, 42); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FDIVR,   "?A?D8%1D7%", st0, m32real, 39); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FDIVR,   "?A?DC%1D7%", st0, m64real, 39); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FDIVR,   "D8F8%1F%", st0, sti, 39); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FDIVR,   "DCF0%0F%", sti, st0, 39); ASSERT(ok);
+
+      (* XXX POP! *)
+      ok := Gen.RegisterFormat2(FDIVRP,  "DEF0%0F%", sti, st0, 39); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FIDIVR,  "?A?DA%1D7%", st0, m32int, 42); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FIDIVR,  "?A?DE%1D7%", st0, m16int, 42); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(FFREE,   "DDC0%0F%", sti, 1); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FICOM,   "?A?DE%1D2%", st0, m16int, 8); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FICOM,   "?A?DA%1D2%", st0, m32int, 8); ASSERT(ok);
+
+      (* XXX POP! *)
+      ok := Gen.RegisterFormat2(FICOMP,  "?A?DE%1D3%", st0, m16int, 8); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FICOMP,  "?A?DA%1D3%", st0, m32int, 8); ASSERT(ok);
+
+      (* XXX PUSH! *)
+      ok := Gen.RegisterFormat2(FILD,    "?A?DF%1D0%", st0, m16int, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FILD,    "?A?DB%1D0%", st0, m32int, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FILD,    "?A?DF%1D5%", st0, m64int, 3); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(FINCSTP, "D9F7", 1); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(FINIT,   "9BDBE3", 16); ASSERT(ok);
+      ok := Gen.RegisterFormat0(FNINIT,  "DBE3", 12); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FIST,    "?A?DF%0D2%", m16int, st0, 6); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FIST,    "?A?DB%0D2%", m32int, st0, 6); ASSERT(ok);
+
+      (* XXX POP! *)
+      ok := Gen.RegisterFormat2(FISTP,   "?A?DF%0D3%", m16int, st0, 6); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FISTP,   "?A?DB%0D3%", m32int, st0, 6); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FISTP,   "?A?DF%0D7%", m64int, st0, 6); ASSERT(ok);
+
+      (* XXX PUSH! *)
+      ok := Gen.RegisterFormat2(FLD,     "?A?D9%1D0%", st0, m32real, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FLD,     "?A?DD%1D0%", st0, m64real, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FLD,     "?A?DB%1D5%", st0, m80real, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FLD,     "D9C0%1F%", st0, sti, 1); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(FLD1,    "D9E8", st0, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat1(FLDL2T,  "D9E9", st0, 5); ASSERT(ok);
+      ok := Gen.RegisterFormat1(FLDL2E,  "D9EA", st0, 5); ASSERT(ok);
+      ok := Gen.RegisterFormat1(FLDPI,   "D9EB", st0, 5); ASSERT(ok);
+      ok := Gen.RegisterFormat1(FLDLG2,  "D9EC", st0, 5); ASSERT(ok);
+      ok := Gen.RegisterFormat1(FLDLN2,  "D9ED", st0, 5); ASSERT(ok);
+      ok := Gen.RegisterFormat1(FLDZ,    "D9EE", st0, 2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(FLDCW,   "?A?D9%0D5%", m2byte, 7); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(FLDENV,  "?A?D9%0D4%", m28byte, 37); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FMUL,    "?A?D8%1D1%", st0, m32real, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FMUL,    "?A?DC%1D1%", st0, m64real, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FMUL,    "D8C8%1F%", st0, sti, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FMUL,    "DCC8%0F%", sti, st0, 3); ASSERT(ok);
+
+      (* XXX POP! *)
+      ok := Gen.RegisterFormat2(FMULP,   "DEC8%0F%", sti, st0, 3); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FMULP,   "?A?DA%1D1%", st0, m32int, 7); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FMULP,   "?A?DE%1D1%", st0, m16int, 7); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(FNOP,    "D9D0", 1); ASSERT(ok);
+
+      (* XXX POP! *)
+      ok := Gen.RegisterFormat2(FPATAN,  "D9F3", st0, st1, 173); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FPREM,   "D9F8", st0, st1, 64); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FPREM1,  "D9F5", st0, st1, 70); ASSERT(ok);
+
+      (* XXX PUSH! WARNING: FUNNY SEMANTIC: Pushes 1 into ST0 and leaves
+       * the result in ST1. *)
+      ok := Gen.RegisterFormat2(FPTAN,   "D9F2", st0, st1, 173); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(FRNDINT, "D9FC", st0, 20); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(FRSTOR,  "?A?DD%0D4%", m108byte, 95); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(FSAVE,   "?A?9BDD%0D6%", m108byte, 127); ASSERT(ok);
+      ok := Gen.RegisterFormat1(FNSAVE,  "?A?DD%0D6%", m108byte, 124); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FSCALE,  "D9FD", st0, st1, 31); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(FSIN,    "D9FE", st0, 126); ASSERT(ok);
+
+      (* XXX POP! *)
+      ok := Gen.RegisterFormat2(FSINCOS, "D9FB", st0, st1, 137); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(FSQRT,   "D9FA", st0, 70); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FST,     "?A?D9%0D2%", m32real, st0, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FST,     "?A?DD%0D2%", m64real, st0, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FST,     "DDD0%0F%", sti, st0, 2); ASSERT(ok);
+
+      (* XXX POP! *)
+      ok := Gen.RegisterFormat2(FSTP,    "?A?D9%0D3%", m32real, st0, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FSTP,    "?A?DD%0D3%", m64real, st0, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FSTP,    "?A?DB%0D7%", m80real, st0, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FSTP,    "DDD8%0F%", sti, st0, 2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(FSTCW,   "?A?9BD9%0D7%", m2byte, 7); ASSERT(ok);
+      ok := Gen.RegisterFormat1(FNSTCW,  "?A?D9%0D7%", m2byte, 7); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(FSTENV,  "?A?9BD9%0D6%", m28byte, 37); ASSERT(ok);
+      ok := Gen.RegisterFormat1(FNSTENV, "?A?D9%0D6%", m28byte, 37); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(FSTSW,   "?A?9BDD%0D7%", m2byte, 5); ASSERT(ok);
+      ok := Gen.RegisterFormat1(FSTSW,   "9BDFE0", ax, 5); ASSERT(ok);
+      ok := Gen.RegisterFormat1(FNSTSW,  "?A?DD%0D7%", m2byte, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat1(FNSTSW,  "DFE0", ax, 2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FSUB,   "?A?D8%1D4%", st0, m32real, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FSUB,   "?A?DC%1D4%", st0, m64real, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FSUB,   "D8E0%1F%", st0, sti, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FSUB,   "DCE8%0F%", sti, st0, 3); ASSERT(ok);
+
+      (* XXX POP! *)
+      ok := Gen.RegisterFormat2(FSUBP,  "DEE8%0F%", sti, st0, 3); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FISUB,  "?A?DA%1D4%", st0, m32int, 7); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FISUB,  "?A?DE%1D4%", st0, m16int, 7); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FSUBR,  "?A?D8%1D5%", st0, m32real, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FSUBR,  "?A?DC%1D5%", st0, m64real, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FSUBR,  "D8E8%1F%", st0, sti, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FSUBR,  "DCE0%0F%", sti, st0, 3); ASSERT(ok);
+
+      (* XXX POP! *)
+      ok := Gen.RegisterFormat2(FSUBRP, "DEE0%0F%", sti, st0, 3); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FISUBR, "?A?DA%1D5%", st0, m32int, 7); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FISUBR, "?A?DE%1D5%", st0, m16int, 7); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(FTST,    "D9E4", st0, 4); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FUCOM,   "DDE0%1F%", st0, sti, 4); ASSERT(ok);
+
+      (* XXX POP! *)
+      ok := Gen.RegisterFormat2(FUCOMP,  "DDE8%1F%", st0, sti, 4); ASSERT(ok);
+
+      (* XXX POP! TWO TIMES *)
+      ok := Gen.RegisterFormat2(FUCOMPP, "DAE9", st0, st1, 4); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(FWAIT,   "9B", 3); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(FXAM,    "D9E5", 21); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(FXCH,    "D9C8%1F%", st0, sti, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FXCH,    "D9C8%0F%", sti, st0, 1); ASSERT(ok);
+
+      (* XXX PUSH! WARNING: Funny PUSH usage. *)
+      ok := Gen.RegisterFormat2(FXTRACT, "D9F4", st0, st1, 13); ASSERT(ok);
+
+      (* XXX POP! *)
+      ok := Gen.RegisterFormat2(FYL2XP1, "D9F9", st0, st1, 103); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(HLT, "F4",0); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(IDIVIDE, "?A?F6%1D7%", ax, rmb, 17); ASSERT(ok);
+      ok := Gen.RegisterFormat2(IDIVIDE, "?A??O?F7%1D7%", dxaxop, rmop, 33); ASSERT(ok);
+
+      ok := Gen.RegisterFormat3(IMUL, "?A?F6%2D5%",ax, al, rmb,11); ASSERT(ok);
+      ok := Gen.RegisterFormat3(IMUL, "?A??O?F7%2D5%", dxaxop, axop, rmop,11); ASSERT(ok);
+      ok := Gen.RegisterFormat2(IMUL, "?A??O?0FAF%0R%%1M%",regop,rmop,10); ASSERT(ok);
+      ok := Gen.RegisterFormat3(IMUL, "?A??O?6B%0R%%1M%%2I%",regop,rmop,ib,10); ASSERT(ok);
+      ok := Gen.RegisterFormat3(IMUL, "?A??O?69%0R%%1M%%2I%",regop,rmop,iop,10); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(INP, "E4%1I%",al,ib,21); ASSERT(ok);
+      ok := Gen.RegisterFormat2(INP, "?O?E5%1I%",axop,ib,21); ASSERT(ok);
+      ok := Gen.RegisterFormat2(INP, "EC",al,dx,21); ASSERT(ok);
+      ok := Gen.RegisterFormat2(INP, "?O?ED",axop,dx,21); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(INCR, "?A?FE%0D0%",rmb,2); ASSERT(ok);
+      ok := Gen.RegisterFormat1(INCR, "?A??O?FF%0D0%",rmop,2); ASSERT(ok);
+      (* NOTE: do NOT add a regop short-form here; on AMD64 the i386 short-form
+         INC r32 opcodes 40-47 are repurposed as REX prefixes and must NOT be
+         generated. The rmop format above correctly handles register operands. *)
+
+      ok := Gen.RegisterFormat2(INPS, "?R??A?6C", smemdb, dx, 24); ASSERT(ok);
+      ok := Gen.RegisterFormat2(INPS, "?R??A??O?6D", smemdop, dx, 24); ASSERT(ok);
+
+      (* FIXME: INT 3 can be faster coded as "CC", Do we need this *)
+      ok := Gen.RegisterFormat1(INT, "CD%0I%",ib, 30); ASSERT(ok);
+      ok := Gen.RegisterFormat0(INTO, "CE", 4); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(INVD, "0F08", 15); ASSERT(ok);
+
+      (* FIXME: Format of INVLPG is strange, do we need INVLPG anyway ? *)
+
+      (* FIXME: What's the difference between IRET and IRETD ?*)
+      (* 16bit operand size corresponds to IRET, 32bit is IRETD *)
+      ok := Gen.RegisterFormat0(IRET, "?O?CF", 10); ASSERT(ok);
+
+      (* Relative conditional jump instructions *)
+      fmt := "7X%0C%";
+      i := 0;
+      WHILE i < 16 DO
+         ok := ToHexDigit (i, fmt[1]); ASSERT(ok);
+         ok := Gen.RegisterFormat1(JCC+i, fmt, relb, 1); ASSERT(ok);
+         INC(i);
+      END;
+
+      fmt := "?O?0F8X%0C%";
+      i := 0;
+      WHILE i < 16 DO
+         ok := ToHexDigit (i, fmt[6]); ASSERT(ok);
+         ok := Gen.RegisterFormat1(JCC+i, fmt, relop, 1); ASSERT(ok);
+         INC(i);
+      END;
+
+      (* FIXME: JCXZ and JECXZ missing *)
+
+      (* Unconditional Jumps *)
+      ok := Gen.RegisterFormat1(JMP, "EB%0C%", relb, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat1(JMP, "?O?E9%0C%", relop, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat1(JMP, "?A??O?FF%0D4%", rmop, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat1(JMPFAR, "?O?EA%0C%", ptrOP, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat1(JMPFAR, "?A??O?FF%0D5%", memOP, 4); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(LAHF, "9F", 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(LAR, "?A??O?0F02%0R%%1M%", regop, rmop, 8); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(LDS,"?A??O?C5%0R%%1M%",regop, memOP, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(LSS,"?A??O?0FB2%0R%%1M%",regop, memOP, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(LES,"?A??O?C4%0R%%1M%",regop, memOP, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(LFS,"?A??O?0FB4%0R%%1M%",regop, memOP, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(LGS,"?A??O?0FB5%0R%%1M%",regop, memOP, 4); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(LEA, "?A??O?8D%0R%%1M%",regop, memop, 1); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(LEAVE, "C9", 3); ASSERT(ok);
+
+      (* 16 bit Operand size is theoretically possible, mem16&24 would be
+       * loaded in this case *)
+      ok := Gen.RegisterFormat1(LGDT, "?A?0F01%0D2%", mem6, 6); ASSERT(ok);
+      ok := Gen.RegisterFormat1(LIDT, "?A?0F01%0D3%", mem6, 6); ASSERT(ok);
+      ok := Gen.RegisterFormat1(LLDT, "?A?0F00%0D2%", rmw, 9); ASSERT(ok);
+      ok := Gen.RegisterFormat1(LMSW, "?A?0F01%0D6%", rmw, 8); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(LODS, "?R??A?AC", al, smemsb, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(LODS, "?R??A??O?AD", axop, smemsop, 2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(LOOPI, "E2%0C%", relb, 6); ASSERT(ok);
+      ok := Gen.RegisterFormat1(LOOPIE, "E1%0C%", relb, 7); ASSERT(ok);
+      ok := Gen.RegisterFormat1(LOOPINE, "E0%0C%", relb, 7); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(LSL, "?A??O?0F03%0R%%1M%", regop, rmop, 8); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(LTR, "?A?0F00%0D3%", rmw, 10); ASSERT(ok);
+
+      (* FIXME: Segment, special and debug Register Movements still missing *)
+      ok := Gen.RegisterFormat2(MOV, "?A?88%0M%%1R%", rmb, regb, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(MOV, "?A??O?89%0M%%1R%", rmop, regop, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(MOV, "?A?8A%0R%%1M%", regb, rmb, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(MOV, "?A??O?8B%0R%%1M%", regop, rmop, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(MOV, "?A?A0%1I%", al, moffsb, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(MOV, "?A??O?A1%1I%", axop, moffsop, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(MOV, "?A?A2%0I%", moffsb, al, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(MOV, "?A??O?A3%0I%", moffsop, axop, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(MOV, "B0%0+%%1I%", regb, ib, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(MOV, "?A?B8%0+%%1I%", reg64, io, 1); ASSERT(ok); (* MOVABS r64,imm64 *)
+      (* Note: 16/32-bit MOV r,imm uses "?O?B8%0+%%1I%", regop, iop but that form
+         generates wrong code for 64-bit (iop=8 bytes without REX.W).
+         For 16/32-bit, fall back to "?A??O?C7%0D0%%1I%", rmop, id (6 bytes). *)
+      ok := Gen.RegisterFormat2(MOV, "?A?C6%0D0%%1I%", rmb, ib, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(MOV, "?A??O?C7%0D0%%1I%", rmop, id, 1); ASSERT(ok);
+      (* 16-bit MOV r/m16,imm16: 66H C7 /0 imm16. Must be registered AFTER the
+         rmop+id format so it lands at the list head and is tried first. The
+         rmop+id format (above) writes 4 bytes of immediate even with the 66H
+         prefix, leaving 2 stray 00 bytes; rmw+iw writes exactly 2. *)
+      ok := Gen.RegisterFormat2(MOV, "?A?66C7%0D0%%1I%", rmw, iw, 1); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(MOVS, "?R??A?A4", smemdb, smemsb, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(MOVS, "?R??A??O?A5", smemdop, smemsop, 4); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(MOVSX, "?A??O?0FBE%0R%%1M%", regop, rmb, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(MOVSX, "?A?0FBF%0R%%1M%", reg32, rmw, 3); ASSERT(ok);
+      (* AMD64: MOVSXD reg64, r/m32 — sign-extend 32-bit to 64-bit; opcode 63H, REX.W auto-set by size=8 *)
+      ok := Gen.RegisterFormat2(MOVSXD, "?A?63%0R%%1M%", reg64, rm32, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(MOVZX, "?A??O?0FB6%0R%%1M%", regop, rmb, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(MOVZX, "?A?0FB7%0R%%1M%", reg32, rmw, 3); ASSERT(ok);
+
+      ok := Gen.RegisterFormat3(MUL, "?A?F6%2D4%",ax, al, rmb, 11); ASSERT(ok);
+      ok := Gen.RegisterFormat3(MUL, "?A??O?F7%2D4%", dxaxop, axop, rmop, 11); ASSERT(ok);
+      (* The next three are in fact IMUL Instructions but the lower 32bits
+       * of the result are the same and the others are discarded. *)
+      ok := Gen.RegisterFormat2(MUL, "?A??O?0FAF%0R%%1M%",regop,rmop,10); ASSERT(ok);
+      ok := Gen.RegisterFormat3(MUL, "?A??O?6B%0R%%1M%%2I%",regop,rmop,ib,10); ASSERT(ok);
+      ok := Gen.RegisterFormat3(MUL, "?A??O?69%0R%%1M%%2I%",regop,rmop,iop,10); ASSERT(ok);
+      ok := Gen.RegisterFormat1(NEG, "?A?F6%0D3%", rmb, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat1(NEG, "?A??O?F7%0D3%", rmop, 2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(NOP, "90", 1); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(NOT, "?A?F6%0D2%", rmb, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat1(NOT, "?A??O?F7%0D2%", rmop, 2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(ORI, "0C%1I%",al,ib,1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ORI, "?O?0D%1I%", axop,id,1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ORI, "?A??O?80%0D1%%1I%",rmb,ib,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ORI, "?A??O?81%0D1%%1I%",rmop,iop,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ORI, "?A??O?83%0D1%%1I%",rmop,ib,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ORI, "?A?08%0M%%1R%",rmb,regb,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ORI, "?A??O?09%0M%%1R%",rmop,regop,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ORI, "?A??O?0A%0R%%1M%",regb,rmb,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ORI, "?A??O?0B%0R%%1M%",regop,rmop,2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(OUTP, "E6%0I%", ib, al, 19); ASSERT(ok);
+      ok := Gen.RegisterFormat2(OUTP, "?O?E7%0I%", ib, axop, 19); ASSERT(ok);
+      ok := Gen.RegisterFormat2(OUTP, "EE", dx, al, 19); ASSERT(ok);
+      ok := Gen.RegisterFormat2(OUTP, "?O?EF", dx, axop, 19); ASSERT(ok);
+
+      (* FIXME: The manual says we can have r/m instead of a string
+       * memory Operand. Probably not true! *)
+      ok := Gen.RegisterFormat2(OUTPS, "?R??A?6E", dx, smemsb, 24); ASSERT(ok);
+      ok := Gen.RegisterFormat2(OUTPS, "?R??A??O?6F", dx, smemsop, 24); ASSERT(ok);
+
+      (* FIXME: Segment registers still missing *)
+      ok := Gen.RegisterFormat1(POP, "?A??O?8F%0D0%", rmop, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat1(POP, "?A??O?58%0+%", regop, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat0(POPA, "?A??O?61", 5); ASSERT(ok);
+      ok := Gen.RegisterFormat0(POPF, "?A??O?9D", 4); ASSERT(ok);
+
+      (* FIXME: Segment registers still missing *)
+      ok := Gen.RegisterFormat1(PUSH, "?A??O?FF%0D6%", rmop, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat1(PUSH, "?A??O?50%0+%", regop, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat1(PUSH, "?A?6A%0I%", ib, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat1(PUSH, "?A??O?68%0I%", iop, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat0(PUSHA, "?A??O?60", 5); ASSERT(ok);
+      ok := Gen.RegisterFormat0(PUSHF, "?A??O?9C", 3); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(RCL, "?A?D0%0D2%", rmb, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(RCL, "?A?D2%0D2%", rmb, cl, 16); ASSERT(ok);
+      ok := Gen.RegisterFormat2(RCL, "?A?C0%0D2%%1I%", rmb, ib, 17); ASSERT(ok);
+      ok := Gen.RegisterFormat1(RCL, "?A??O?D1%0D2%", rmop, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(RCL, "?A??O?D3%0D2%", rmop, cl, 16); ASSERT(ok);
+      ok := Gen.RegisterFormat2(RCL, "?A??O?C1%0D2%%1I%", rmop, ib, 17); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(RCR, "?A?D0%0D3%", rmb, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(RCR, "?A?D2%0D3%", rmb, cl, 16); ASSERT(ok);
+      ok := Gen.RegisterFormat2(RCR, "?A?C0%0D3%%1I%", rmb, ib, 17); ASSERT(ok);
+      ok := Gen.RegisterFormat1(RCR, "?A??O?D1%0D3%", rmop, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(RCR, "?A??O?D3%0D3%", rmop, cl, 16); ASSERT(ok);
+      ok := Gen.RegisterFormat2(RCR, "?A??O?C1%0D3%%1I%", rmop, ib, 17); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(ROL, "?A?D0%0D0%", rmb, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ROL, "?A?D2%0D0%", rmb, cl, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ROL, "?A?C0%0D0%%1I%", rmb, ib, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat1(ROL, "?A??O?D1%0D0%", rmop, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ROL, "?A??O?D3%0D0%", rmop, cl, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ROL, "?A??O?C1%0D0%%1I%", rmop, ib, 2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(ROR, "?A?D0%0D1%", rmb, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ROR, "?A?D2%0D1%", rmb, cl, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ROR, "?A?C0%0D1%%1I%", rmb, ib, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat1(ROR, "?A??O?D1%0D1%", rmop, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ROR, "?A??O?D3%0D1%", rmop, cl, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ROR, "?A??O?C1%0D1%%1I%", rmop, ib, 2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(RDMSR, "0F32", edxeax, ecx, 22); ASSERT(ok);
+      ok := Gen.RegisterFormat1(RDTSC, "0F31", edxeax, 11); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(RET, "C3", 2); ASSERT(ok);
+      ok := Gen.RegisterFormat0(RETFAR, "CB", 4); ASSERT(ok);
+      ok := Gen.RegisterFormat1(RETP, "C2%0I%", iw, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat1(RETPFAR, "CA%0I%", iw, 4); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(RSM, "0FAA", 83); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(SAHF, "9E", ah, 2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(SAL, "?A?D0%0D4%", rmb, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SAL, "?A?D2%0D4%", rmb, cl, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SAL, "?A?C0%0D4%%1I%", rmb, ib, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat1(SAL, "?A??O?D1%0D4%", rmop, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SAL, "?A??O?D3%0D4%", rmop, cl, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SAL, "?A??O?C1%0D4%%1I%", rmop, ib, 2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(SAR, "?A?D0%0D7%", rmb, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SAR, "?A?D2%0D7%", rmb, cl, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SAR, "?A?C0%0D7%%1I%", rmb, ib, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat1(SAR, "?A??O?D1%0D7%", rmop, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SAR, "?A??O?D3%0D7%", rmop, cl, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SAR, "?A??O?C1%0D7%%1I%", rmop, ib, 2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(SHR, "?A?D0%0D5%", rmb, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SHR, "?A?D2%0D5%", rmb, cl, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SHR, "?A?C0%0D5%%1I%", rmb, ib, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat1(SHR, "?A??O?D1%0D5%", rmop, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SHR, "?A??O?D3%0D5%", rmop, cl, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SHR, "?A??O?C1%0D5%%1I%", rmop, ib, 2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(SBB, "1C%1I%",al,ib,1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SBB, "?O?1D%1I%", axop,id,1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SBB, "?A??O?80%0D3%%1I%",rmb,ib,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SBB, "?A??O?81%0D3%%1I%",rmop,iop,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SBB, "?A??O?83%0D3%%1I%",rmop,ib,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SBB, "?A?18%0M%%1R%",rmb,regb,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SBB, "?A??O?19%0M%%1R%",rmop,regop,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SBB, "?A??O?1A%0R%%1M%",regb,rmb,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SBB, "?A??O?1B%0R%%1M%",regop,rmop,2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(SCAS, "?R??A?AE", smemdb, al, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SCAS, "?R??A??O?AF", smemdop, axop, 4); ASSERT(ok);
+
+      (* Conditional set instruction *)
+      (* Note: /0 needed but not described in Chapter 25 of the manual *)
+      fmt := "?A?0F9X%0D0%";
+      i := 0;
+      WHILE i < 16 DO
+         ok := ToHexDigit (i, fmt[6]); ASSERT(ok);
+         ok := Gen.RegisterFormat1(SETCC+i, fmt, rmb, 1); ASSERT(ok);
+         INC(i);
+      END;
+
+      ok := Gen.RegisterFormat1(SGDT, "?A?0F01%0D0%", mem6, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat1(SIDT, "?A?0F01%0D1%", mem6, 4); ASSERT(ok);
+
+      ok := Gen.RegisterFormat3(SHLD, "?A??O?0FA4%0M%%1R%%2I%", rmop, regop, ib, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat3(SHLD, "?A??O?0FA5%0M%%1R%", rmop, regop, cl, 5); ASSERT(ok);
+      ok := Gen.RegisterFormat3(SHRD, "?A??O?0FAC%0M%%1R%%2I%", rmop, regop, ib, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat3(SHRD, "?A??O?0FAD%0M%%1R%", rmop, regop, cl, 5); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(SLDT, "?A??O?0F00%0D0%", rmop, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat1(SMSW, "?A?0F01%0D4%", rmw, 4); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(STC, "F9", 2); ASSERT(ok);
+      ok := Gen.RegisterFormat0(STD, "FD", 2); ASSERT(ok);
+      ok := Gen.RegisterFormat0(STI, "FB", 7); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(STOS, "?R??A?AA", smemdb, al, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(STOS, "?R??A??O?AB", smemdop, axop, 3); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(STR, "?A?0F00%0D1%", rmw, 2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(SUB, "2C%1I%",al,ib,1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SUB, "?O?2D%1I%", axop,id,1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SUB, "?A??O?80%0D5%%1I%",rmb,ib,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SUB, "?A??O?81%0D5%%1I%",rmop,iop,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SUB, "?A??O?83%0D5%%1I%",rmop,ib,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SUB, "?A?28%0M%%1R%",rmb,regb,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SUB, "?A??O?29%0M%%1R%",rmop,regop,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SUB, "?A??O?2A%0R%%1M%",regb,rmb,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SUB, "?A??O?2B%0R%%1M%",regop,rmop,2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(TEST, "A8%1I%", al, ib, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(TEST, "?O?A9%1I%", axop, id, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(TEST, "?A?F6%0D0%%1I%", rmb, ib, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(TEST, "?A??O?F7%0D0%%1I%", rmop, iop, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(TEST, "?A?84%0M%%1R%", rmb, regb, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(TEST, "?A??O?85%0M%%1R%", rmop, regop, 2); ASSERT(ok);
+
+      ok := Gen.RegisterFormat1(VERR, "?A?0F00%0D4%", rmw, 7); ASSERT(ok);
+      ok := Gen.RegisterFormat1(VERW, "?A?0F00%0D5%", rmw, 7); ASSERT(ok);
+
+      ok := Gen.RegisterFormat0(WAIT, "9B", 1); ASSERT(ok);
+      ok := Gen.RegisterFormat0(WBINVD, "0F09", 2000); ASSERT(ok);
+      (* Warning: Implicit Operand ECX *)
+      ok := Gen.RegisterFormat1(WRMSR, "0F30", edxeax, 42); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(XADD, "?A?0FC0%0M%%1R%", rmb, regb, 4); ASSERT(ok);
+      ok := Gen.RegisterFormat2(XADD, "?A??O?0FC1%0M%%1R%", rmop, regop, 4); ASSERT(ok);
+
+      ok := Gen.RegisterFormat2(XCHG, "?O?90%1+%", axop, regop, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(XCHG, "?O?90%0+%", regop, axop, 2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(XCHG, "?A??O?86%0R%%1M%", regb, rmb, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(XCHG, "?A??O?86%0M%%1R%", rmb, regb, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(XCHG, "?A??O?87%0R%%1M%", regop, rmop, 3); ASSERT(ok);
+      ok := Gen.RegisterFormat2(XCHG, "?A??O?87%0M%%1R%", rmop, regop, 3); ASSERT(ok);
+
+      (* FIXME: XLATB missing: Strange implicit Operands. Is it better than
+       * MOV ? *)
+
+      ok := Gen.RegisterFormat2(XOR, "34%1I%",al,ib,1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(XOR, "?O?35%1I%", axop,id,1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(XOR, "?A??O?80%0D6%%1I%",rmb,ib,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(XOR, "?A??O?81%0D6%%1I%",rmop,iop,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(XOR, "?A??O?83%0D6%%1I%",rmop,ib,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(XOR, "?A?30%0M%%1R%",rmb,regb,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(XOR, "?A??O?31%0M%%1R%",rmop,regop,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(XOR, "?A??O?32%0R%%1M%",regb,rmb,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(XOR, "?A??O?33%0R%%1M%",regop,rmop,2); ASSERT(ok);
+
+      (* AMD64: for 64-bit ops with 32-bit sign-extended immediates.
+       * x86-64 only allows imm32s (not imm64) for ALU ops.
+       * These id variants must come AFTER the iop variants so that
+       * for os=4,immsz=4 the iop version is preferred; for os=8,immsz=4
+       * the iop version fails (expects immsz=8) and id matches. *)
+      ok := Gen.RegisterFormat2(ADC, "?A??O?81%0D2%%1I%",rmop,id,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ADD, "?A??O?81%0D0%%1I%",rmop,id,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(AND, "?A??O?81%0D4%%1I%",rmop,id,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(CMP, "?A??O?81%0D7%%1I%",rmop,id,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ORI, "?A??O?81%0D1%%1I%",rmop,id,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SBB, "?A??O?81%0D3%%1I%",rmop,id,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SUB, "?A??O?81%0D5%%1I%",rmop,id,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(TEST, "?A??O?F7%0D0%%1I%",rmop,id,2); ASSERT(ok);
+      ok := Gen.RegisterFormat2(XOR, "?A??O?81%0D6%%1I%",rmop,id,2); ASSERT(ok);
+      ok := Gen.RegisterFormat3(IMUL, "?A??O?69%0R%%1M%%2I%",regop,rmop,id,10); ASSERT(ok);
+
+      (* 16-bit accumulator short forms: hardcoded 66H prefix + fixed 2-byte
+       * immediate.  Without these, the ?O?+axop+id forms above emit 4 bytes of
+       * immediate even when the 66H operand-size prefix makes the operand 16-bit,
+       * leaving two stray 00 bytes (same bug the MOV fix at line 879 solved). *)
+      ok := Gen.RegisterFormat2(ADC,  "?A?6615%1I%", ax, iw, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ADD,  "?A?6605%1I%", ax, iw, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(AND,  "?A?6625%1I%", ax, iw, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(CMP,  "?A?663D%1I%", ax, iw, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(ORI,  "?A?660D%1I%", ax, iw, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SBB,  "?A?661D%1I%", ax, iw, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(SUB,  "?A?662D%1I%", ax, iw, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(TEST, "?A?66A9%1I%", ax, iw, 1); ASSERT(ok);
+      ok := Gen.RegisterFormat2(XOR,  "?A?6635%1I%", ax, iw, 1); ASSERT(ok);
+   END Init;
+
+BEGIN
+   Init;
+   JMPRange.min := 2;
+   JMPRange.max := 6;
+   JCCRange.min := 2;
+   JCCRange.max := 6;
+   CALLRange.min := 5;
+   CALLRange.max := 5;
+   ASSERT(Gen.RegisterFormat0(SYSCALL, "0F05", 0));
+END AMD64Instructions.

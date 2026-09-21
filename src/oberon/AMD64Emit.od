@@ -1,0 +1,108 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2004 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   $Id: AMD64Emit.od,v 1.1 2004/09/06 18:40:01 borchert Exp borchert $
+   ----------------------------------------------------------------------------
+   $Log: AMD64Emit.od,v $
+   Revision 1.1  2004/09/06 18:40:01  borchert
+   Initial revision (AMD64 adaptation)
+
+   ----------------------------------------------------------------------------
+*)
+
+DEFINITION AMD64Emit; (* Christian Ehrhardt *)
+
+   IMPORT ConstStrings, Disciplines, FragmentedStreams,
+      Gen := AMD64OpCodeGenerator, Op := AMD64Operands,
+      Regs := CompilerRegisters, Relocations := CompilerRelocations, Streams,
+      Types;
+
+   TYPE
+      FixedData = POINTER TO FixedDataRec;
+      FixedDataRec =
+	 RECORD
+	    (Disciplines.ObjectRec)
+	    align: Types.Size;
+	 END;
+
+
+      StrTable = POINTER TO StrTableRec;
+      StrTableRec = RECORD (FixedDataRec) END;
+
+   PROCEDURE CreateFixedData(VAR data: FixedData);
+
+   PROCEDURE CreateStringTable(VAR rodata: StrTable);
+
+   PROCEDURE OpenFixedData(rodata: FixedData; VAR s: Streams.Stream);
+
+   PROCEDURE InstrMode(s: FragmentedStreams.Stream; mnem: Gen.Mnemonic;
+		       nops: INTEGER; ops: ARRAY OF Op.Operand;
+		       modeadd: SET; morereg: Regs.Value);
+
+   PROCEDURE Instr(s: FragmentedStreams.Stream; mnem: Gen.Mnemonic;
+		   nops: INTEGER; ops: ARRAY OF Op.Operand);
+   PROCEDURE Instr0(s: FragmentedStreams.Stream; mnem: Gen.Mnemonic);
+   PROCEDURE Instr1(s: FragmentedStreams.Stream; mnem: Gen.Mnemonic;
+                    op : Op.Operand);
+   PROCEDURE Instr2(s: FragmentedStreams.Stream; mnem: Gen.Mnemonic;
+		    op1, op2: Op.Operand);
+   PROCEDURE Instr3(s: FragmentedStreams.Stream; mnem: Gen.Mnemonic;
+		    op1, op2, op3: Op.Operand);
+
+   PROCEDURE Jump(s: FragmentedStreams.Stream; dest: FragmentedStreams.Label);
+
+   PROCEDURE Call(s: FragmentedStreams.Stream; dest: FragmentedStreams.Label);
+
+   PROCEDURE CallExtern(s: FragmentedStreams.Stream; regs: Regs.RegSet;
+                        ref: Relocations.SymRef);
+
+   PROCEDURE Distance(s: FragmentedStreams.Stream;
+		      origin, dest: FragmentedStreams.Label);
+
+   PROCEDURE Bytes(s: Streams.Stream; data, sz : LONGINT);
+
+   PROCEDURE StringBase(rodata: StrTable; str: ConstStrings.String;
+			VAR len: Streams.Count) : Streams.Count;
+      (* Write a string to the rodata block and return the offset of the
+         first byte. We find identical strings that are added more than
+         once and add only a single copy.
+         str must be a ConstString.String in the domain rodata.hash. If
+         you don't have such a string use EmitStringStream or EmitStringArray
+         instead.
+      *)
+
+   PROCEDURE StringStream(rodata: StrTable; string: Streams.Stream;
+			  VAR len : Streams.Count) : Streams.Count;
+
+   PROCEDURE StringArray(rodata: StrTable; string: ARRAY OF CHAR;
+			 VAR len: Streams.Count) : Streams.Count;
+
+   PROCEDURE JumpCC(s: FragmentedStreams.Stream;
+		    dest: FragmentedStreams.Label; cc: LONGINT);
+
+   PROCEDURE Align(s: FragmentedStreams.Stream; val: INTEGER);
+
+   PROCEDURE AlignFixed(data: FixedData; val: LONGINT) : LONGINT;
+
+   PROCEDURE LongFixed(data: FixedData; val: LONGINT) : LONGINT;
+
+   PROCEDURE UnfixedObjects(s: FragmentedStreams.Stream;
+			    start: FragmentedStreams.Label);
+
+END AMD64Emit.

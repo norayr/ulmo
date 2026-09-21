@@ -1,0 +1,56 @@
+MODULE AMD64StackAllocations; (* AMD64 port — 8-byte stack slots *)
+
+   IMPORT Conclusions, Disciplines, Emit := AMD64Emit, FragmentedStreams,
+      Gen := AMD64OpCodeGenerator, Op := AMD64Operands,
+      Pentium := AMD64Instructions, Regs := CompilerRegisters,
+      StackAlloc := CompilerStackAllocations, Streams;
+
+   TYPE
+      StackSpace = POINTER TO StackSpaceRec;
+
+      Stack = POINTER TO StackRec;
+      StackRec = RECORD
+	 (StackAlloc.StackRec)
+	 stream : FragmentedStreams.Stream;
+	 obj : StackSpace;
+      END;
+
+   TYPE
+      StackSpaceRec = RECORD (Disciplines.ObjectRec) END;
+
+   PROCEDURE Create (VAR stack : Stack; s : FragmentedStreams.Stream;
+		     baseoff, align : LONGINT; dir : StackAlloc.Direction);
+   BEGIN
+      ASSERT (s # NIL); NEW (stack);
+      StackAlloc.Init (stack, baseoff, align, dir);
+      stack.stream := s; NEW(stack.obj);
+      FragmentedStreams.IncludeObject (stack.stream, stack.obj, 0, 100);
+   END Create;
+
+   PROCEDURE Close (stack : Stack);
+      VAR reg : Regs.Value; regop, immop : Op.Operand;
+	  tmps : FragmentedStreams.Stream;
+	  maxoff, len, dummy : LONGINT; ok : BOOLEAN;
+   BEGIN
+      reg := NIL;
+      FragmentedStreams.Create (tmps);
+      Regs.UntracedValue (reg, Gen.gensp);
+      maxoff := StackAlloc.GetSize (stack);
+      ASSERT (maxoff <= 0);
+      IF maxoff # 0 THEN
+	 regop := Op.RegOp (reg, 8);   (* AMD64: 64-bit RSP *)
+	 immop := Op.ImmInt (maxoff);
+	 Emit.Instr2 (tmps, Pentium.ADD, regop, immop);
+	 FragmentedStreams.Length (tmps, len, dummy); ASSERT (len = dummy);
+	 FragmentedStreams.SetObjectSize (stack.obj, len);
+	 FragmentedStreams.FixObject (stack.obj);
+	 ok := Streams.Seek (tmps, 0, Streams.fromStart); ASSERT (ok);
+	 ok := Streams.Copy (tmps, stack.stream, len); ASSERT (ok);
+      ELSE
+	 FragmentedStreams.SetObjectSize (stack.obj, 0);
+	 FragmentedStreams.FixObject (stack.obj);
+      END;
+      ok := Streams.Seek (stack.stream, 0, Streams.fromEnd); ASSERT (ok);
+   END Close;
+
+END AMD64StackAllocations.

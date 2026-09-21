@@ -1,0 +1,97 @@
+(* AMD64 Coroutines: increase defaultsize for 64-bit pointer and frame overhead.
+   On AMD64, frames are ~2x larger (8-byte pointers) and SysStorage.ProbeStackSize
+   touches 8KB on every critical region entry.  8192 leaves only ~4KB headroom
+   in the 12KB coroutine stack produced by AllocateStack; 65536 gives ~120KB. *)
+MODULE Coroutines;
+
+   (* run time interface to coroutines *)
+
+   IMPORT SYS := SYSTEM;
+
+   TYPE
+      Coroutine = SYS.COROUTINE;
+
+      (* $P- $O- *)
+      CoroutineTag = POINTER TO CoroutineTagRec;
+      CoroutineTagRec =
+	 RECORD
+	    size: LONGINT;
+	    module: LONGINT;
+	    typeno: INTEGER;
+	    hierlen: INTEGER;
+	    sentinel: LONGINT;
+	 END;
+      (* $P= $O= *)
+
+      CoroutineRec =
+	 RECORD
+	    (* see GenExpr.m2 *)
+	    interrupts: LONGINT;
+	    started: LONGINT;
+	    ucontext: ARRAY 24 OF BYTE; (* ucontext_t *)
+	 END;
+      CoroutinePtr = POINTER TO CoroutineRec;
+
+   VAR
+      defaultsize: LONGINT;
+	 (* default stack size of a coroutine,
+	    the size of the activation record of the procedure
+	    calling CRSPAWN is added to default;
+	    the default is taken if the second parameter of CRSPAWN
+	    is omitted
+	 *)
+      tag: CoroutineTag; (* used for all coroutines *)
+      tagrec: ARRAY SYS.SIZE(CoroutineTagRec) OF BYTE;
+	 (* use static storage to assure a constant pointer *)
+
+      main: Coroutine;
+	 (* is allocated during initialisation of this module
+	    and points to the main coroutine
+	 *)
+
+     tc : CoroutinePtr;
+     tt : CoroutineTag;
+
+   VAR
+      mainrec: (* see GenExpr.m2 *)
+	 ARRAY
+	    SYS.SIZE(CoroutineTag) +
+	    SYS.SIZE(CoroutineRec)
+	 OF BYTE;
+
+      source: Coroutine;
+	 (* the last CRSWITCH operation was executed by this coroutine *)
+
+      current: Coroutine;
+	 (* coroutine currently active *)
+
+      (* private components *)
+      tagloc: SYS.ADDRESS;
+
+BEGIN
+   (* Check Compiler Assertions *)
+   tc := NIL; tt := NIL;
+   ASSERT (SYS.ADR (tc.interrupts) = 0);
+   ASSERT (SYS.ADR (tc.started) = 4);
+   ASSERT (SYS.ADR (tc.ucontext[0]) = 8);
+   ASSERT (SYS.ADR (tt.size) = 0);
+   ASSERT (SYS.ADR (tt.module) = 4);
+   ASSERT (SYS.ADR (tt.typeno) = 8);
+   ASSERT (SYS.ADR (tt.hierlen) = 12);
+   ASSERT (SYS.ADR (tt.sentinel) = 16);
+   tag := SYS.VAL(CoroutineTag, SYS.ADR(tagrec));
+   tag.size := SYS.SIZE(CoroutineRec);
+   ASSERT (tag.size = 32);  (* 32 is hardcoded in the compiler. *)
+   tag.module := SYS.VAL(LONGINT, 0);
+   tag.typeno := 0; tag.hierlen := 0; tag.sentinel := MIN(LONGINT);
+
+   (* coroutines prefer coroutine records to be static *)
+   main := SYS.VAL(Coroutine,
+      SYS.VAL (SYS.ADDRESS, SYS.ADR(mainrec)) + SYS.SIZE(CoroutineTag));
+   (* patch tag field of main *)
+   tagloc := SYS.VAL(SYS.ADDRESS, main) - SYS.SIZE(CoroutineTag);
+   SYS.PUT(tagloc, SYS.VAL(SYS.ADDRESS, tag));
+   current := main;
+
+   defaultsize := 65536;
+END Coroutines.

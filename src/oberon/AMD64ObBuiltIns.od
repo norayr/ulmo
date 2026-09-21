@@ -1,0 +1,17 @@
+DEFINITION AMD64ObBuiltIns; (* AMD64 port *)
+
+   IMPORT Operands := AMD64Operands, PC := AMD64OberonContexts,
+      Regs := CompilerRegisters, Sym := OberonSymbols;
+
+   (* Avoids a reference cycle between AMD64LinuxOberonBuiltIns and
+      AMD64ObCodeGen; indirection point for multiple modules supporting
+      built-ins for the AMD64 architecture including OS-specific ones.
+   *)
+
+   VAR
+      GenBuiltIn: PROCEDURE (proc: PC.Context; at: Sym.Attribute;
+                             possible: SET;
+			     caller: Regs.Owner) : Operands.Operand;
+
+
+END AMD64ObBuiltIns.

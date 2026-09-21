@@ -1,0 +1,418 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2004 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   $Id: AMD64OberonR.om,v 1.2 2005/04/11 10:24:00 ehrhardt Exp $
+   ----------------------------------------------------------------------------
+   $Log: AMD64OberonR.om,v $
+   Revision 1.2  2005/04/11 10:24:00  ehrhardt
+   Formatting fixes.
+   Use NetIO.WriteShortInt.
+   Use QuickIterators
+
+   Revision 1.1  2004/09/06 17:33:36  borchert
+   Initial revision (AMD64 adaptation)
+
+   ----------------------------------------------------------------------------
+*)
+
+MODULE AMD64OberonResults; (* Christian Ehrhardt *)
+
+   IMPORT CompilerObjects, ConstStrings, Disciplines, Iterators, NetIO,
+      PersistentObjects, PersistentTexts, Relocations := CompilerRelocations,
+      Services, Streams;
+
+   TYPE
+      BlockType = SET;  (* read ... execute *)
+
+   CONST
+      read    = 0;
+      write   = 1;
+      execute = 2;
+
+   TYPE
+      Block = POINTER TO BlockRec;
+      Reloc = POINTER TO RelocRec;
+      Result = POINTER TO ResultRec;
+      Symbol = POINTER TO SymbolRec;
+
+      BlockRec = RECORD
+	 (Disciplines.ObjectRec);
+	 next : Block;
+	 res  : Result;
+	 mode : BlockType;
+         data : PersistentTexts.Text;
+	 datalen, memlen : LONGINT;   (* ASSERT memlen >= datalen *)
+	 align : LONGINT;
+	 syms : Symbol;
+	 relocs : Reloc;
+      END;
+
+      RelocRec = RECORD
+	 (Disciplines.ObjectRec)
+	 next : Reloc;
+	 block : Block;
+	 type : Relocations.RelocType;
+	 offset, size : LONGINT;
+	 symref : Relocations.SymRef;
+	 blocknext : Reloc; (* Needed to avoid use of Linearized Structures *)
+      END;
+
+      SymbolRec = RECORD
+	 (Disciplines.ObjectRec)
+	 next : Symbol;     (* Linked list of all symbols *)
+	 block : Block;
+	 name : ConstStrings.String;
+	 offset : LONGINT;
+	 blocknext : Symbol;  (* Linked list of all symbols in a block *)
+      END;
+
+      ResultRec = RECORD
+	 (CompilerObjects.ObjectRec)
+	 name : ConstStrings.String;
+	 blocks : Block;
+	 syms : Symbol;
+	 relocs : Reloc;
+      END;
+
+   VAR
+      resulttype : Services.Type;
+      resultpersif : PersistentObjects.Interface;
+
+(* ================= Temporary debug functions ============================= *)
+
+   PROCEDURE Error (code : INTEGER);
+   BEGIN
+      (*
+      Write.String ("OberonAMD64Results: Error: Code: ");
+      Write.Int (code, 0);
+      Write.Ln ();
+      *)
+   END Error;
+
+
+(* ================= Forward Declarations ================================== *)
+
+   PROCEDURE ^ Create(VAR res : CompilerObjects.Object);
+
+(* ================= PersistentObjects Interface for Result ================= *)
+
+   PROCEDURE CreateResult (VAR result : PersistentObjects.Object);
+      VAR
+	 res : Result;
+   BEGIN
+      Create (res);
+      result := res;
+   END CreateResult;
+
+   PROCEDURE WriteResult (s : Streams.Stream; object : PersistentObjects.Object) : BOOLEAN;
+      VAR
+	 blk : Block;
+
+      PROCEDURE WriteBlock (block : Block) : BOOLEAN;
+         VAR
+	    sym : Symbol;
+	    rel : Reloc;
+
+	 PROCEDURE WriteSym (symbol : Symbol) : BOOLEAN;
+	 BEGIN
+	    RETURN NetIO.WriteConstString (s, symbol.name) &
+		   NetIO.WriteLongInt (s, symbol.offset);
+	 END WriteSym;
+
+	 PROCEDURE WriteReloc (reloc : Reloc) : BOOLEAN;
+	 BEGIN
+	    RETURN NetIO.WriteShortInt(s, reloc.type) &
+		   NetIO.WriteLongInt (s, reloc.offset) &
+		   NetIO.WriteLongInt (s, reloc.size) &
+		   NetIO.WriteConstString (s, reloc.symref.modname) &
+		   NetIO.WriteConstString (s, reloc.symref.symname);
+	 END WriteReloc;
+
+      BEGIN
+         sym := NIL;
+	 sym := block.syms;
+	 WHILE sym # NIL DO
+	    IF ~NetIO.WriteChar (s, "M") THEN RETURN FALSE END;
+	    IF ~WriteSym (sym) THEN RETURN FALSE END;
+	    sym := sym.blocknext;
+	 END;
+	 IF ~NetIO.WriteChar (s, "E") THEN RETURN FALSE END;
+	 rel := block.relocs;
+	 WHILE rel # NIL DO
+	    IF ~NetIO.WriteChar (s, "M") THEN RETURN FALSE END;
+	    IF ~WriteReloc (rel) THEN RETURN FALSE END;
+	    rel := rel.blocknext;
+	 END;
+	 IF ~NetIO.WriteChar (s, "E") OR
+	       ~NetIO.WriteLongInt (s, block.datalen) OR
+	       ~NetIO.WriteLongInt (s, block.memlen) OR
+	       ~NetIO.WriteSet (s, block.mode) OR
+	       ~NetIO.WriteLongInt (s, block.align)
+	 THEN
+            RETURN FALSE;
+         END;
+	 IF block.data # NIL THEN ASSERT(block.datalen > 0) END;
+	 IF block.datalen > 0 THEN
+	    ASSERT(block.data # NIL);
+	    RETURN PersistentObjects.Write (s, block.data);
+         END;
+	 RETURN TRUE;
+      END WriteBlock;
+
+   BEGIN
+      blk := NIL;
+      WITH object : Result DO
+	 IF ~NetIO.WriteConstString (s, object.name) THEN RETURN FALSE END;
+         blk := object.blocks;
+         WHILE blk # NIL DO
+            IF ~NetIO.WriteChar (s, "M") THEN RETURN FALSE END;
+	    IF ~WriteBlock (blk) THEN RETURN FALSE END;
+	    blk := blk.next;
+	 END;
+      END;
+      RETURN NetIO.WriteChar (s, "E");
+   END WriteResult;
+
+   PROCEDURE ReadResult (s : Streams.Stream; object : PersistentObjects.Object) : BOOLEAN;
+      VAR
+	 last, blk : Block;
+	 ch  : CHAR;
+
+      PROCEDURE ReadBlock (block : Block) : BOOLEAN;
+	 VAR
+	    sym : Symbol;
+	    rel : Reloc;
+	    ch  : CHAR;
+
+	 PROCEDURE ReadSym (symbol : Symbol) : BOOLEAN;
+	 BEGIN
+	    RETURN NetIO.ReadConstString (s, symbol.name) &
+		   NetIO.ReadLongInt (s, symbol.offset);
+	 END ReadSym;
+
+	 PROCEDURE ReadReloc (reloc : Reloc) : BOOLEAN;
+	 BEGIN
+	    ASSERT(reloc # NIL);
+	    NEW(reloc.symref);
+	    RETURN NetIO.ReadShortInt(s, reloc.type) &
+		   NetIO.ReadLongInt(s, reloc.offset) &
+		   NetIO.ReadLongInt(s, reloc.size) &
+		   NetIO.ReadConstString(s, reloc.symref.modname) &
+		   NetIO.ReadConstString(s, reloc.symref.symname);
+	 END ReadReloc;
+
+      BEGIN (* ReadResult *)
+         sym := NIL;
+	 LOOP
+	    IF ~NetIO.ReadChar (s, ch) THEN Error (1); RETURN FALSE END;
+	    CASE ch OF
+	    |"M":
+	       NEW(sym);
+	       IF ~ReadSym (sym) THEN Error (2); RETURN FALSE END;
+	       sym.block := block;
+	       sym.blocknext := block.syms;
+	       block.syms := sym;
+	       sym.next := block.res.syms;
+	       block.res.syms := sym;
+	    |"E":
+	       EXIT;
+            ELSE
+	       Error (3);
+	       RETURN FALSE;
+	    END;
+         END;
+	 LOOP
+	    IF ~NetIO.ReadChar (s, ch) THEN Error (4); RETURN FALSE END;
+	    CASE ch OF
+	    |"M":
+	       NEW(rel);
+	       IF ~ReadReloc (rel) THEN Error (5); RETURN FALSE END;
+	       rel.blocknext := block.relocs;
+	       block.relocs := rel;
+	       rel.next := block.res.relocs;
+	       block.res.relocs := rel;
+	    |"E":
+	       EXIT;
+            ELSE
+	       Error (6);
+	       RETURN FALSE;
+	    END;
+         END;
+	 IF ~NetIO.ReadLongInt (s, block.datalen) OR
+	    ~NetIO.ReadLongInt (s, block.memlen) OR
+	    ~NetIO.ReadSet (s, block.mode) OR
+	    ~NetIO.ReadLongInt (s, block.align)
+         THEN
+	    Error (7);
+	    RETURN FALSE;
+	 END;
+	 IF block.datalen > 0 THEN
+	    RETURN PersistentObjects.Read (s, block.data);
+         END;
+	 RETURN TRUE;
+      END ReadBlock;
+
+   BEGIN
+      last := NIL;
+      WITH object : Result DO
+	 IF ~NetIO.ReadConstString (s, object.name) THEN RETURN FALSE END;
+	 last := NIL;
+	 LOOP
+	    IF ~NetIO.ReadChar (s, ch) THEN Error (8); RETURN FALSE END;
+	    CASE ch OF
+	    | "M":
+	       NEW(blk);
+	       blk.next := NIL;
+	       IF last = NIL THEN
+		  object.blocks := blk;
+	       ELSE
+		  last.next := blk;
+	       END;
+	       blk.res := object;
+	       last := blk;
+	       IF ~ReadBlock (blk) THEN Error (9); RETURN FALSE END;
+	    | "E":
+	       EXIT;
+	    ELSE
+	       Error (10);
+	       RETURN FALSE;
+	    END;
+	 END;
+	 RETURN TRUE
+      END;
+   END ReadResult;
+
+(* ========================= Exported Procedures =========================== *)
+
+   PROCEDURE Create(VAR res : CompilerObjects.Object);
+      VAR
+         result : Result;
+   BEGIN
+      NEW(result);
+      PersistentObjects.Init (result, resulttype);
+      result.name := NIL;
+      result.blocks := NIL;
+      result.syms   := NIL;
+      result.relocs := NIL;
+      res := result;
+   END Create;
+
+   PROCEDURE AddBlock (res : Result; mode : BlockType; VAR block : Block);
+      VAR
+	 blk : Block;
+   BEGIN
+      ASSERT(res # NIL);
+      ASSERT(mode = (mode * {read, write, execute}));
+      NEW(blk);
+      blk.res := res;
+      blk.mode := mode;
+      blk.data := NIL;
+      blk.datalen := 0; blk.memlen := 0;
+      blk.syms := NIL;
+      blk.relocs := NIL;
+      blk.next := res.blocks;
+      res.blocks := blk;
+      block := blk;
+   END AddBlock;
+
+   PROCEDURE AddSymbol (block : Block; name : ConstStrings.String;
+			offset : LONGINT);
+      VAR
+	 sym : Symbol;
+   BEGIN
+      ASSERT(block # NIL);
+      NEW(sym);
+      sym.offset := offset;
+      sym.name := name;
+      sym.block := block;
+      sym.blocknext := block.syms;
+      block.syms := sym;
+      sym.next := block.res.syms;
+      block.res.syms := sym;
+   END AddSymbol;
+
+   PROCEDURE AddReloc (block : Block; type : Relocations.RelocType;
+		       offset,size : LONGINT; ref : Relocations.SymRef);
+      VAR
+	 reloc : Reloc;
+   BEGIN
+      ASSERT(ref.symname # NIL);
+      ASSERT(ref.modname # NIL);
+      ASSERT((block # NIL) & (block.res # NIL));
+      NEW(reloc);
+      reloc.type := type;
+      NEW(reloc.symref);
+      reloc.symref.symname := ref.symname;
+      reloc.symref.modname := ref.modname;
+      reloc.offset := offset;
+      reloc.size := size;
+      reloc.block := block;
+      reloc.blocknext := block.relocs;
+      block.relocs := reloc;
+      reloc.next := block.res.relocs;
+      block.res.relocs := reloc;
+   END AddReloc;
+
+   PROCEDURE IterateSymbols (it : Iterators.Iterator; ref : Iterators.Reference; mode : Iterators.Mode);
+      VAR
+         blk : Block;
+	 sym : Symbol;
+   BEGIN
+      blk := NIL;
+      blk := ref(Block);
+      sym := blk.syms;
+      WHILE sym # NIL DO
+	 Iterators.Yield (it, sym);
+	 sym := sym.blocknext;
+      END;
+   END IterateSymbols;
+
+   PROCEDURE GetSymbols (VAR it : Iterators.Iterator; block : Block);
+   BEGIN
+      Iterators.CreateQuickIterator(it, IterateSymbols, block, 0);
+   END GetSymbols;
+
+   PROCEDURE IterateRelocs (it : Iterators.Iterator; ref : Iterators.Reference; mode : Iterators.Mode);
+      VAR
+         blk : Block;
+	 reloc : Reloc;
+   BEGIN
+      blk := NIL;
+      blk := ref(Block);
+      reloc := blk.relocs;
+      WHILE reloc # NIL DO
+	 Iterators.Yield (it, reloc);
+	 reloc := reloc.blocknext;
+      END;
+   END IterateRelocs;
+
+   PROCEDURE GetRelocs(VAR it: Iterators.Iterator; block: Block);
+   BEGIN
+      Iterators.CreateQuickIterator(it, IterateRelocs, block, 0);
+   END GetRelocs;
+
+BEGIN
+   NEW(resultpersif);
+   resultpersif.create := CreateResult;
+   resultpersif.read   := ReadResult;
+   resultpersif.write  := WriteResult;
+   resultpersif.createAndRead := NIL;
+   PersistentObjects.RegisterType (resulttype, "AMD64OberonResults.Result",
+	    "CompilerObjects.Object", resultpersif);
+END AMD64OberonResults.

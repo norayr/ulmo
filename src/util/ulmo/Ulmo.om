@@ -20,8 +20,9 @@ MODULE Ulmo;
 
    IMPORT CL := UnixArguments, Architectures, CompilerDatabases,
       CompilerKeys, CompilerObjects, Compilers, ConstStrings,
-      FilesystemDB, I386OberonBuiltIns, Listers, ModularizedStructures,
-      OberonBuiltIns, OberonCompiler, OberonI386, OberonParser,
+      FilesystemDB, I386OberonBuiltIns, AMD64OberonBuiltIns, Listers,
+      ModularizedStructures, OberonBuiltIns, OberonCompiler,
+      OberonI386, OberonAMD64, OberonParser,
       OberonSPARCv8, OberonSymbols, OberonUlmProcedures,
       ObjectLoader, PersistentTexts, Process, RelatedEvents,
       Storage, Streams, Write;
@@ -32,6 +33,7 @@ MODULE Ulmo;
       context: Compilers.Context;
       arch: Architectures.Architecture;
       archcs: ConstStrings.String;
+      archname: ARRAY 32 OF CHAR;
       ok: BOOLEAN;
       intensity: INTEGER;
       flag: CHAR;
@@ -171,19 +173,50 @@ BEGIN
    (* Obtain the I386 architecture object.  OberonI386 registers it in its
       module initialisation body, so it is available via Architectures.GetArch.
    *)
-   ConstStrings.Create(archcs, "I386");
-   Architectures.GetArch(archcs, arch);
-   IF arch = NIL THEN
-      Write.LineS(Streams.stderr, "ulmo: I386 architecture not available");
-      Process.Exit(Process.indicateFailure);
-   END;
+   (* Default architecture is I386; override with -arch flag *)
+   COPY("I386", archname);
 
-   (* Create the filesystem database.  The current directory (".") is used
+   (* Create the filesystem database before parsing flags so that -I dirs
+      can be added immediately.  The current directory (".") is used
       both as the output directory for compiled .obj files and as the first
       search path when looking up previously compiled objects.
    *)
    FilesystemDB.Open(db, ".");
    RelatedEvents.Forward(db, errors);
+
+   (* Parse command-line arguments — first pass: look for -arch before other flags *)
+   CL.Init("[-arch i386|amd64] [-I srcdir]... sourcefile [sourcefile...]");
+   WHILE CL.GetFlag(flag) DO
+      CASE flag OF
+      | "a":
+            (* -arch: select target architecture *)
+            CL.FetchString(archname);
+            IF (archname = "amd64") OR (archname = "AMD64") OR
+               (archname = "x86_64") OR (archname = "x86-64") THEN
+               COPY("AMD64", archname);
+            ELSIF (archname = "i386") OR (archname = "I386") OR
+                  (archname = "x86") THEN
+               COPY("I386", archname);
+            ELSE
+               Write.StringS(Streams.stderr, "ulmo: unknown arch: ");
+               Write.LineS(Streams.stderr, archname);
+               Process.Exit(Process.indicateFailure);
+            END;
+      | "I":
+            CL.FetchString(srcdir);
+            FilesystemDB.AddSrcDir(db, srcdir);
+      ELSE
+         CL.Usage;
+      END;
+   END;
+
+   ConstStrings.Create(archcs, archname);
+   Architectures.GetArch(archcs, arch);
+   IF arch = NIL THEN
+      Write.StringS(Streams.stderr, "ulmo: architecture not available: ");
+      Write.LineS(Streams.stderr, archname);
+      Process.Exit(Process.indicateFailure);
+   END;
 
    (* Set up the compiler context *)
    NEW(context);
@@ -199,21 +232,6 @@ BEGIN
       {CompilerObjects.private * CompilerObjects.archDependent};
 
    intensity := Storage.Intensity(4);
-
-   (* Parse command-line arguments.
-      -I srcdir   Add srcdir to the source file search path.
-      sourcefile  An Oberon source file to compile (.od or .om or .mod).
-   *)
-   CL.Init("[-I srcdir]... sourcefile [sourcefile...]");
-   WHILE CL.GetFlag(flag) DO
-      CASE flag OF
-      | "I":
-            CL.FetchString(srcdir);
-            FilesystemDB.AddSrcDir(db, srcdir);
-      ELSE
-         CL.Usage;
-      END;
-   END;
 
    ok := TRUE;
    WHILE ok & CL.GetArg(sourcefile) DO

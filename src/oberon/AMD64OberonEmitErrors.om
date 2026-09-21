@@ -1,0 +1,234 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2004 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   $Id: AMD64OberonE.om,v 1.2 2005/04/11 10:22:49 ehrhardt Exp $
+   ----------------------------------------------------------------------------
+   $Log: AMD64OberonE.om,v $
+   Revision 1.2  2005/04/11 10:22:49  ehrhardt
+   Formatting fixes.
+
+   Revision 1.1  2004/09/06 20:25:41  borchert
+   Initial revision (AMD64 adaptation)
+
+   ----------------------------------------------------------------------------
+*)
+
+MODULE AMD64OberonEmitErrors; (* Christian Ehrhardt *)
+
+   IMPORT CompilerObjects, ConstStrings, Emit := AMD64Emit,
+      Gen := AMD64OpCodeGenerator, Op := AMD64Operands,
+      PC := AMD64OberonContexts, Pentium := AMD64Instructions,
+      Regs := CompilerRegisters, Reloc := CompilerRelocations,
+      Res := AMD64OberonResults, Streams, Sym := OberonSymbols;
+
+   PROCEDURE RealName (ident : Sym.Ident) : ConstStrings.String;
+   BEGIN
+      IF ident.origname # NIL THEN
+         RETURN ident.origname
+      END;
+      RETURN ident.name
+   END RealName;
+
+
+   PROCEDURE PushString (proc : PC.Context; string : ConstStrings.String);
+      VAR
+         off, len : Streams.Count;
+	 cs : Streams.Stream;
+	 op : Op.Operand;
+	 ref : Reloc.SymRef;
+	 req : Reloc.RelocRequest;
+   BEGIN
+      ConstStrings.Open (cs, string);
+      off := Emit.StringStream (proc.rodata, cs, len);
+      Emit.Instr1 (proc.s, Pentium.PUSH, Op.ImmIntFixed (len, 4));
+      op := Op.ImmIntFixed (off, 4);
+      NEW (ref);
+      ConstStrings.Create (ref.symname, "__rodata");
+      ref.modname := RealName (proc.module);
+      Reloc.Create (req, proc.s, Reloc.addSym, ref);
+      Op.RelocOpen (op, req);
+      Emit.Instr1 (proc.s, Pentium.PUSH, op);
+   END PushString;
+
+   PROCEDURE PosToLine (proc : PC.Context; pos : Streams.Count) : Streams.Count;
+   BEGIN
+      RETURN pos;
+   END PosToLine;
+
+
+   PROCEDURE CaseError (proc : PC.Context;
+                        loc : CompilerObjects.Location);
+      VAR
+         reg : Regs.Value;
+	 ref : Reloc.SymRef;
+   BEGIN
+      Emit.Instr1 (proc.s, Pentium.PUSH,
+                   Op.ImmIntFixed (PosToLine (proc, loc.end), 4));
+      PushString (proc, RealName (proc.ident));
+      PushString (proc, RealName (proc.module));
+      NEW (ref);
+      ConstStrings.Create (ref.symname, "CaseError");
+      ConstStrings.Create (ref.modname, "RTErrors");
+      Emit.CallExtern (proc.s, proc.regs, ref);
+      Regs.UntracedValue (reg, Gen.gensp);
+      Emit.Instr2 (proc.s, Pentium.ADD, Op.RegOp (reg, 8), Op.ImmInt (40));
+   END CaseError;
+
+   PROCEDURE NoReturn (proc : PC.Context;
+                       loc : CompilerObjects.Location);
+      VAR
+         reg : Regs.Value;
+	 ref : Reloc.SymRef;
+   BEGIN
+      Emit.Instr1 (proc.s, Pentium.PUSH,
+                   Op.ImmIntFixed (PosToLine (proc, loc.end), 4));
+      PushString (proc, RealName (proc.ident));
+      PushString (proc, RealName (proc.module));
+      NEW (ref);
+      ConstStrings.Create (ref.symname, "NoReturn");
+      ConstStrings.Create (ref.modname, "RTErrors");
+      Emit.CallExtern (proc.s, proc.regs, ref);
+      Regs.UntracedValue (reg, Gen.gensp);
+      Emit.Instr2 (proc.s, Pentium.ADD, Op.RegOp (reg, 8), Op.ImmInt (40));
+   END NoReturn;
+
+   PROCEDURE TypeGuard (proc : PC.Context;
+                        loc : CompilerObjects.Location);
+      VAR
+         reg : Regs.Value;
+	 ref : Reloc.SymRef;
+   BEGIN
+      Emit.Instr1 (proc.s, Pentium.PUSH,
+                   Op.ImmIntFixed (PosToLine (proc, loc.begin), 4));
+      PushString (proc, RealName (proc.ident));
+      PushString (proc, RealName (proc.module));
+      NEW (ref);
+      ConstStrings.Create (ref.symname, "TypeGuardFailure");
+      ConstStrings.Create (ref.modname, "RTErrors");
+      Emit.CallExtern (proc.s, proc.regs, ref);
+      Regs.UntracedValue (reg, Gen.gensp);
+      Emit.Instr2 (proc.s, Pentium.ADD, Op.RegOp (reg, 8), Op.ImmInt (40));
+   END TypeGuard;
+
+   PROCEDURE RangeCheck (proc : PC.Context; loc : CompilerObjects.Location;
+                         val, limit : Op.Operand);
+      VAR
+         reg : Regs.Value;
+	 tmp1, tmp2 : Regs.Value;
+	 ref : Reloc.SymRef;
+	 own : Regs.Owner;
+   BEGIN
+      own := Regs.GetOwner (proc.regs);
+      CASE Op.Loc (val) OF
+      | Op.register:
+         val.memsz := 4;
+      | Op.immediate, Op.immediateDyn:
+         val.immsz := 4;
+      | Op.memory:
+         Regs.CreateValue (tmp1, proc.regs, own, Regs.stdM);
+	 Regs.LoadReg (tmp1, Gen.StdRegs);
+	 Emit.Instr2 (proc.s, Pentium.MOV, Op.RegOp (tmp1, 4), val);
+	 val := Op.RegOp (tmp1, 4);
+      END;
+      CASE Op.Loc (limit) OF
+      | Op.register:
+         limit.memsz := 4;
+      | Op.immediate, Op.immediateDyn:
+         limit.immsz := 4;
+      | Op.memory:
+         Regs.CreateValue (tmp2, proc.regs, own, Regs.stdM);
+	 Regs.LoadReg (tmp2, Gen.StdRegs);
+	 Emit.Instr2 (proc.s, Pentium.MOV, Op.RegOp (tmp2, 4), limit);
+	 limit := Op.RegOp (tmp2, 4);
+      END;
+      Emit.Instr1 (proc.s, Pentium.PUSH,
+                   Op.ImmIntFixed (PosToLine (proc, loc.begin), 4));
+      PushString (proc, RealName (proc.ident));
+      PushString (proc, RealName (proc.module));
+      Emit.Instr1 (proc.s, Pentium.PUSH, val);
+      Emit.Instr1 (proc.s, Pentium.PUSH, limit);
+      Regs.DestroyOwnedValue (tmp1, own);
+      Regs.DestroyOwnedValue (tmp2, own);
+      NEW (ref);
+      ConstStrings.Create (ref.symname, "RangeError");
+      ConstStrings.Create (ref.modname, "RTErrors");
+      Emit.CallExtern (proc.s, proc.regs, ref);
+      Regs.UntracedValue (reg, Gen.gensp);
+      Emit.Instr2 (proc.s, Pentium.ADD, Op.RegOp (reg, 8), Op.ImmInt (56));
+   END RangeCheck;
+
+   PROCEDURE Conversion (proc : PC.Context;
+                         loc : CompilerObjects.Location; val : Op.Operand);
+      VAR
+         reg : Regs.Value;
+	 ref : Reloc.SymRef;
+	 own : Regs.Owner;
+	 tmp : Regs.Value;
+   BEGIN
+      CASE Op.Loc (val) OF
+      | Op.register:
+         val.memsz := 4;
+      | Op.immediate, Op.immediateDyn:
+         val.immsz := 4;
+      | Op.memory:
+         Regs.CreateValue (tmp, proc.regs, own, Regs.stdM);
+	 Regs.LoadReg (tmp, Gen.StdRegs);
+	 Emit.Instr2 (proc.s, Pentium.MOV, Op.RegOp (tmp, 4), val);
+	 val := Op.RegOp (tmp, 4);
+      END;
+      Emit.Instr1 (proc.s, Pentium.PUSH,
+                   Op.ImmIntFixed (PosToLine (proc, loc.begin), 4));
+      PushString (proc, RealName (proc.ident));
+      PushString (proc, RealName (proc.module));
+      Emit.Instr1 (proc.s, Pentium.PUSH, val);
+      Regs.DestroyOwnedValue (tmp, own);
+      NEW (ref);
+      ConstStrings.Create (ref.symname, "ConversionError");
+      ConstStrings.Create (ref.modname, "RTErrors");
+      Emit.CallExtern (proc.s, proc.regs, ref);
+      Regs.UntracedValue (reg, Gen.gensp);
+      Emit.Instr2 (proc.s, Pentium.ADD, Op.RegOp (reg, 8), Op.ImmInt (48));
+   END Conversion;
+
+   PROCEDURE Assertion (proc : PC.Context;
+                        loc : CompilerObjects.Location; code : Op.Operand);
+      VAR
+         reg : Regs.Value;
+	 ref : Reloc.SymRef;
+   BEGIN
+      ASSERT (Op.Loc (code) IN {Op.register, Op.immediate, Op.immediateDyn});
+
+      IF Op.Loc (code) IN {Op.immediateDyn, Op.immediate} THEN
+         ASSERT (code.immsz < 4);
+         code.immsz := 4;
+      END;
+      Emit.Instr1 (proc.s, Pentium.PUSH,
+                   Op.ImmIntFixed (PosToLine (proc, loc.begin), 4));
+      PushString (proc, RealName (proc.ident));
+      PushString (proc, RealName (proc.module));
+      Emit.Instr1 (proc.s, Pentium.PUSH, code);
+      NEW (ref);
+      ConstStrings.Create (ref.symname, "FailedAssertion");
+      ConstStrings.Create (ref.modname, "RTErrors");
+      Emit.CallExtern (proc.s, proc.regs, ref);
+      Regs.UntracedValue (reg, Gen.gensp);
+      Emit.Instr2 (proc.s, Pentium.ADD, Op.RegOp (reg, 8), Op.ImmInt (48));
+   END Assertion;
+
+END AMD64OberonEmitErrors.

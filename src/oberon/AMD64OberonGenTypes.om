@@ -1,0 +1,1216 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2004 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   AMD64 adaptation of I386OberonGenTypes.om
+   ----------------------------------------------------------------------------
+*)
+
+MODULE AMD64OberonGenTypes; (* Christian Ehrhardt, AMD64 adaptation *)
+
+   IMPORT CompilerErrors, CompilerObjects, ConstStrings, Disciplines,
+      Emit := AMD64Emit, EmitErrors := AMD64OberonEmitErrors,
+      FragmentedStreams, Gen := AMD64OpCodeGenerator, AMD64OberonAnalyzer,
+      AMD64Regs := AMD64StdRegisters, Iterators, Op := AMD64Operands,
+      PC := AMD64OberonContexts, Pentium := AMD64Instructions,
+      Regs := CompilerRegisters, Reloc := CompilerRelocations,
+      Res := AMD64OberonResults, Scopes, Streams, Sym := OberonSymbols,
+      Sym32 := Oberon64iSymbols, TmpPtrs := CompilerTemporaryPointers, Write;
+
+   VAR
+      marktypeid : Disciplines.Identifier;
+      tmptagid : Disciplines.Identifier;
+
+   CONST
+      sizeoff = 0;
+      moduleoff = 8;
+      typenooff = 16;
+      hierlenoff = 20;
+      pointeroff = 32;
+
+      sentinel = MIN (LONGINT);
+
+   CONST
+      tagSimplePointer = 0;
+      tagPointerArray = 1;
+      tagOther = 2;
+      tagRecordArray = 3;
+
+      tmpPointerSy = 0;
+      simpleAddressSy = 1;
+      addressArraySy = 2;
+      tmpAddressSy = 3;
+
+   TYPE
+      MarkTypeDisc = POINTER TO MarkTypeDiscRec;
+      MarkTypeDiscRec = RECORD
+         (Disciplines.DisciplineRec)
+	 mark : LONGINT;
+	 done : BOOLEAN;
+      END;
+
+   TYPE
+      BlkList = POINTER TO BlkListRec;
+      BlkListRec = RECORD
+         (PC.TypeListRec)
+	 name : ConstStrings.String;
+      END;
+
+
+   TYPE
+      RegList = POINTER TO RegListRec;
+      RegListRec = RECORD
+         next : RegList;
+	 reg : Regs.Value;
+      END;
+      TmpTagDisc = POINTER TO TmpTagDiscRec;
+      TmpTagDiscRec = RECORD
+         (Disciplines.DisciplineRec)
+         list : RegList;
+      END;
+
+   VAR
+      thismod : ConstStrings.String;
+
+   PROCEDURE ^ MarkType (proc : PC.Context; type : Sym.Type; done : BOOLEAN) : LONGINT;
+
+   PROCEDURE CreateLocalTagName (VAR name : ConstStrings.String;
+                                 mark : LONGINT);
+      VAR
+         cs : Streams.Stream;
+   BEGIN
+      cs := NIL;
+      ConstStrings.Init (cs);
+      Write.StringS (cs, "__TAG__LOCAL_");
+      IF mark < 0 THEN
+         Write.StringS (cs, "BODY");
+      ELSE
+	 Write.IntS (cs, mark, 0);
+      END;
+      ConstStrings.Close (cs, name);
+   END CreateLocalTagName;
+
+   PROCEDURE CreateGTAGName (VAR name : ConstStrings.String);
+   BEGIN
+      ConstStrings.Create (name, "__TAG__LOCAL_GTAG");
+   END CreateGTAGName;
+
+
+   PROCEDURE CreateGlobalTagName (VAR name : ConstStrings.String;
+                                  identname : ConstStrings.String);
+      VAR
+         cs : Streams.Stream;
+   BEGIN
+      cs := NIL;
+      ConstStrings.Init (cs);
+      Write.StringS (cs, "__TAG__GLOBAL_");
+      ConstStrings.Write (cs, identname);
+      ConstStrings.Close (cs, name);
+   END CreateGlobalTagName;
+
+   PROCEDURE BlockStartName (VAR name : ConstStrings.String; mark : LONGINT;
+                             debug : ConstStrings.String);
+      VAR
+         cs : Streams.Stream;
+   BEGIN
+      cs := NIL;
+      name := NIL; cs := NIL;
+      ConstStrings.Init (cs);
+      Write.StringS (cs, "__BLOCK_START__");
+      IF mark < 0 THEN
+         Write.StringS (cs, "BODY");
+      ELSE
+	 Write.IntS (cs, mark, 0);
+      END;
+      ConstStrings.Close (cs, name);
+   END BlockStartName;
+
+
+   PROCEDURE BlockStart (proc : PC.Context; type : Sym.Type);
+      VAR
+	 mark : LONGINT;
+	 name : ConstStrings.String;
+	 lab : FragmentedStreams.Label;
+   BEGIN
+      name := NIL;
+      IF type = NIL THEN
+	 mark := -1;
+      ELSE
+	 mark := MarkType (proc, type, FALSE);
+      END;
+      BlockStartName (name, mark, proc.ident.name);
+      FragmentedStreams.CreateLabel (lab);
+      FragmentedStreams.AttachLabel (proc.s, lab);
+      Reloc.NewSymbol (proc.s, name, lab);
+   END BlockStart;
+
+
+   PROCEDURE BlockEndName (VAR name : ConstStrings.String; mark : LONGINT);
+      VAR
+         cs : Streams.Stream;
+   BEGIN
+      cs := NIL;
+      name := NIL; cs := NIL;
+      ConstStrings.Init (cs);
+      Write.StringS (cs, "__BLOCK_END__");
+      IF mark < 0 THEN
+         Write.StringS (cs, "BODY");
+      ELSE
+	 Write.IntS (cs, mark, 0);
+      END;
+      ConstStrings.Close (cs, name);
+   END BlockEndName;
+
+
+   PROCEDURE BlockEnd (proc : PC.Context; type : Sym.Type);
+      VAR
+	 mark : LONGINT;
+	 name : ConstStrings.String;
+	 lab : FragmentedStreams.Label;
+   BEGIN
+      name := NIL;
+      IF type = NIL THEN
+         mark := -1;
+      ELSE
+	 mark := MarkType (proc, type, FALSE);
+      END;
+      BlockEndName (name, mark);
+      FragmentedStreams.CreateLabel (lab);
+      FragmentedStreams.AttachLabel (proc.s, lab);
+      Reloc.NewSymbol (proc.s, name, lab);
+   END BlockEnd;
+
+   PROCEDURE TmpPtrName (proc : PC.Context; VAR name : ConstStrings.String;
+                         mark : LONGINT; start : BOOLEAN);
+      VAR
+         cs : Streams.Stream;
+   BEGIN
+      cs := NIL;
+      name := NIL; cs := NIL;
+      ConstStrings.Init (cs);
+      Write.StringS (cs, "__TMPPTR_");
+      IF start THEN
+         Write.StringS (cs, "START_");
+      ELSE
+	 Write.StringS (cs, "END_");
+      END;
+      Write.IntS (cs, mark, 0);
+      ConstStrings.Close (cs, name);
+   END TmpPtrName;
+
+   PROCEDURE RealName (module : Sym.Ident) : ConstStrings.String;
+      VAR
+         ret : ConstStrings.String;
+   BEGIN
+      ret := NIL;
+      ret := module.origname;
+      IF ret = NIL THEN
+         ret := module.name;
+      END;
+      RETURN ret;
+   END RealName;
+
+   PROCEDURE MarkType (proc : PC.Context; type : Sym.Type; done : BOOLEAN) : LONGINT;
+      VAR
+         marktyped : MarkTypeDisc;
+	 link : PC.TypeList;
+   BEGIN
+      link := NIL;
+      ASSERT (type # NIL);
+      ASSERT (type.form # Sym.pointer);
+      IF ~Disciplines.Seek (type, marktypeid, marktyped) THEN
+	 NEW (marktyped);
+	 marktyped.id := marktypeid;
+	 marktyped.mark := PC.Unique (proc);
+	 marktyped.done := FALSE;
+	 Disciplines.Add (type, marktyped);
+         NEW(link);
+	 link.type := type;
+	 link.next := proc.typelist;
+	 proc.typelist := link;
+      END;
+      IF done THEN
+	 marktyped.done := done;
+      END;
+      RETURN marktyped.mark;
+   END MarkType;
+
+   PROCEDURE TypeDone (type : Sym.Type) : BOOLEAN;
+      VAR
+         marktyped : MarkTypeDisc;
+   BEGIN
+      marktyped := NIL;
+      ASSERT (type # NIL);
+      ASSERT (type.form # Sym.pointer);
+      IF Disciplines.Seek (type, marktypeid, marktyped) THEN
+         RETURN marktyped.done;
+      END;
+      RETURN FALSE;
+   END TypeDone;
+
+   PROCEDURE TagSym (proc : PC.Context; type : Sym.Type) : Reloc.SymRef;
+      VAR
+         mark : LONGINT;
+	 ref : Reloc.SymRef;
+   BEGIN
+      ref := NIL;
+      ASSERT (type # NIL);
+      IF type.form = Sym.pointer THEN
+         type := type.reftype;
+      END;
+      NEW(ref);
+      IF (type.ident # NIL) &
+         (RealName (proc.module) # RealName (type.ident.module)) THEN
+	 CreateGlobalTagName (ref.symname, type.ident.name);
+	 ref.modname := RealName (type.ident.module);
+      ELSE
+         (* External type without name ? *)
+	 mark := MarkType (proc, type, FALSE);
+	 CreateLocalTagName (ref.symname, mark);
+	 ref.modname := RealName (proc.module);
+      END;
+      RETURN ref;
+   END TagSym;
+
+   PROCEDURE EmitTag (proc : PC.Context; type : Sym.Type);
+      VAR
+	 off, dummy : LONGINT;
+	 ref : Reloc.SymRef;
+   BEGIN
+      ref := NIL;
+      IF type.form = Sym.pointer THEN
+         type := type.reftype;
+      END;
+      off := Emit.LongFixed (proc.types, 0);    (* lower 4 bytes *)
+      dummy := Emit.LongFixed (proc.types, 0);  (* upper 4 bytes — R_X86_64_64 fills all 8 *)
+      ref := TagSym (proc, type);
+      Res.AddReloc (proc.typeblk, Reloc.addSym, off, 8, ref);
+   END EmitTag;
+
+   PROCEDURE GenPointerList (proc : PC.Context; type : Sym.Type;
+                             base : LONGINT);
+
+      VAR
+         off, i : LONGINT;
+
+      PROCEDURE ArrayList (type : Sym.Type; base : LONGINT);
+         VAR
+	    dyn, elm, off : LONGINT;
+	    tmpt : Sym.Type;
+	    attach : CompilerObjects.Attachment;
+      BEGIN
+         tmpt := NIL;
+         dyn := 0; elm := 1;
+	 tmpt := type;
+	 WHILE tmpt.dyn DO
+	    INC (dyn);
+	    tmpt := tmpt.element;
+	 END;
+	 WHILE tmpt.form = Sym.array DO
+	    CompilerObjects.GetAttachment (tmpt.length, attach);
+	    ASSERT (attach # NIL);
+	    WITH attach : Sym32.Attribute DO
+	       ASSERT (attach.kind = Sym32.integerConst);
+	       elm := elm * attach.intval;
+	    END;
+	    tmpt := tmpt.element;
+	 END;
+	 CASE tmpt.form OF
+	 | Sym.pointer, Sym.coroutine:
+	    IF (tmpt.form # Sym.coroutine) & ~tmpt.taggedptr THEN
+	       RETURN;
+	    END;
+	    i := base + tagPointerArray;
+	    off := Emit.LongFixed (proc.types, i);
+	    IF dyn > 0 THEN
+	       i := -dyn;
+	       off := Emit.LongFixed (proc.types, i);
+	    END;
+	    off := Emit.LongFixed (proc.types, elm);
+	 | Sym.address:
+	    IF ~tmpt.traced THEN
+	       RETURN;
+	    END;
+	    i := base + tagOther;
+	    off := Emit.LongFixed (proc.types, i);
+	    i := addressArraySy;
+	    off := Emit.LongFixed (proc.types, i);
+	    IF dyn > 0 THEN
+	       i := -dyn;
+	       off := Emit.LongFixed (proc.types, i);
+	    END;
+	    off := Emit.LongFixed (proc.types, elm);
+	 | Sym.record:
+	    i := base + tagRecordArray;
+	    off := Emit.LongFixed (proc.types, i);
+	    IF dyn > 0 THEN
+	       i := -dyn;
+	       off := Emit.LongFixed (proc.types, i);
+	    END;
+	    off := Emit.LongFixed (proc.types, elm);
+	    EmitTag (proc, tmpt);
+	 ELSE
+	    (* We have an array but it doesn't contain
+	     * pointers: Nothing to do. *)
+	 END;
+      END ArrayList;
+
+      PROCEDURE RecordList (type : Sym.Type; base : LONGINT);
+         VAR
+	    i, off, fieldoff : LONGINT;
+	    field : Sym.FieldList;
+      BEGIN
+         field := NIL;
+	 ASSERT (type.form = Sym.record);
+	 IF (type.ident # NIL) &
+	    (RealName (proc.module) # RealName (type.ident.module)) THEN
+            (* External type from another module.
+               If base is not 8-aligned, the type has size=0 from this module's
+               definition perspective (e.g. RECORD(Objects.ObjectRec) END in .od).
+               Nothing to tag in that case. *)
+            IF base MOD 8 # 0 THEN RETURN END;
+	    i := base + tagRecordArray;
+	    off := Emit.LongFixed (proc.types, i);
+            i := 1;
+	    off := Emit.LongFixed (proc.types, i);
+	    EmitTag (proc, type);
+	    RETURN;
+	 END;
+         ASSERT (base MOD 8 = 0);
+         IF type.basetype # NIL THEN
+	    GenPointerList (proc, type.basetype, base);
+	 END;
+	 field := type.fields;
+	 WHILE field # NIL DO
+	    fieldoff := Sym32.GetOffset (proc.module, field);
+	    GenPointerList (proc, field.type, base+fieldoff);
+	    field := field.next;
+	 END;
+      END RecordList;
+
+   BEGIN
+      CASE type.form OF
+      | Sym.array:
+         ArrayList (type, base);
+      | Sym.record:
+         RecordList (type, base);
+      | Sym.pointer, Sym.coroutine:
+         IF (type.form # Sym.coroutine) & ~type.taggedptr THEN
+	    RETURN;
+	 END;
+         ASSERT (base MOD 8 = 0);
+	 i := base + tagSimplePointer;
+         off := Emit.LongFixed (proc.types, i);
+      | Sym.address:
+         IF ~type.traced THEN
+	    RETURN;
+	 END;
+         ASSERT (base MOD 8 = 0);
+	 i := base + tagOther;
+         off := Emit.LongFixed (proc.types, i);
+	 i := simpleAddressSy;
+	 off := Emit.LongFixed (proc.types, i);
+      ELSE
+         (* Nothing to do: Type can not contain pointers. *)
+      END;
+   END GenPointerList;
+
+   PROCEDURE GenTagForGlobals (proc : PC.Context);
+      VAR
+	 it : Iterators.Iterator;
+	 ident : Sym.Ident;
+	 sym : ConstStrings.String;
+	 off, dummy : LONGINT;
+	 ref : Reloc.SymRef;
+   BEGIN
+      it := NIL;
+      off := Emit.AlignFixed (proc.types, 8);
+      CreateGTAGName (sym);
+      Res.AddSymbol (proc.typeblk, sym, off);
+      dummy := AMD64OberonAnalyzer.DataBlockSize (NIL, proc.module.scope, NIL);
+      (* Size of Global Variable block *)
+      off := Emit.LongFixed (proc.types, dummy); (* size at offset 0 *)
+      off := Emit.LongFixed (proc.types, 0);     (* padding at offset 4 *)
+      (* Module ref *)
+      off := Emit.LongFixed (proc.types, 0);     (* module lo at offset 8 *)
+      dummy := Emit.LongFixed (proc.types, 0);   (* module hi at offset 12 *)
+      NEW (ref);
+      ref.modname := RealName (proc.module);
+      ref.symname := thismod;
+      Res.AddReloc (proc.typeblk, Reloc.addSym, off, 8, ref);
+      off := Emit.LongFixed (proc.types, 0); (* typeno at offset 16 *)
+      off := Emit.LongFixed (proc.types, 0); (* hierlen at offset 20 *)
+      off := Emit.LongFixed (proc.types, 0); (* padding at offset 24 *)
+      off := Emit.LongFixed (proc.types, 0); (* padding at offset 28 — pointer list at 32 = 4*addrSize *)
+      (* Pointer List *)
+      Scopes.GetIterator (proc.module.scope, it);
+      ASSERT (it # NIL);
+      WHILE Iterators.Get (it, ident) DO
+         IF ident.class = Sym.varC THEN
+	    off := AMD64OberonAnalyzer.VarOffset (ident);
+	    GenPointerList (proc, ident.type, off);
+	 END;
+      END;
+      off := Emit.LongFixed (proc.types, sentinel);
+   END GenTagForGlobals;
+
+
+   (* Note: There are several reasons why this MUST be called after
+    * the code for the Procedure was generated.
+    * One reason is that the offset of static length non VAR arrays
+    * changes.
+    *)
+   PROCEDURE GenTagForBlock (proc : PC.Context; pident : Sym.Ident);
+      VAR
+         it : Iterators.Iterator;
+         ident : Sym.Ident;
+	 global : BOOLEAN;
+	 add, off, dummy, mark : LONGINT;
+	 sym : ConstStrings.String;
+	 link : BlkList;
+	 type : Sym.Type;
+	 tmpptrs : TmpPtrs.Ptr;
+	 ref : Reloc.SymRef;
+   BEGIN
+      it := NIL;
+      ASSERT (pident.class IN {Sym.procedureC, Sym.moduleC});
+      type := pident.type;
+      NEW (link);
+      link.next := proc.blklist;
+      link.type := type;
+      link.name := RealName (pident);
+      ASSERT (link.name # NIL);
+      proc.blklist := link;
+      IF type = NIL THEN
+         mark := -1;
+      ELSE
+	 mark := MarkType (proc, type, TRUE);
+      END;
+      off := Emit.AlignFixed (proc.types, 8);
+      CreateLocalTagName (sym, mark);
+      Res.AddSymbol (proc.typeblk, sym, off);
+      IF pident.class = Sym.procedureC THEN
+         ASSERT (type # NIL);
+	 global := (AMD64OberonAnalyzer.ProcedureLevel (pident) = 3);
+	 add := 16; (* 2 * 8: return address + saved rbp *)
+	 IF ~global THEN
+	    INC (add, 8);
+	 END;
+	 IF pident.type.restype # NIL THEN
+	    off := AMD64OberonAnalyzer.ResOffset (pident.type);
+	    INC (off, add);
+	    dummy := Emit.LongFixed (proc.types, off+tagOther);
+	    dummy := Emit.LongFixed (proc.types, simpleAddressSy);
+	 END;
+	 Scopes.GetIterator (pident.scope, it);
+	 ASSERT (it # NIL);
+	 WHILE Iterators.Get (it, ident) DO
+	    IF ident.class = Sym.varC THEN
+	       off := AMD64OberonAnalyzer.VarOffset (ident);
+	       CASE ident.varkind OF
+	       | Sym.noParam:
+		  GenPointerList (proc, ident.type, off);
+	       | Sym.refParam:
+	          IF off >= 0 THEN
+		     INC (off, add);
+		  END;
+		  ASSERT (off MOD 8 = 0);
+		  dummy := Emit.LongFixed (proc.types, off+tagOther);
+		  dummy := Emit.LongFixed (proc.types, simpleAddressSy);
+	       | Sym.valueParam:
+	          IF off >= 0 THEN
+		     INC (off, add);
+		  END;
+		  GenPointerList (proc, ident.type, off);
+	       END;
+	    END;
+	 END;
+      END;
+      tmpptrs := AMD64Regs.GetTmpPtrs (proc.regs);
+      WHILE tmpptrs # NIL DO
+         off := Emit.LongFixed (proc.types, tmpptrs.offset+tagOther);
+	 CASE tmpptrs.mode OF
+	 | Regs.addrM:
+	    off := Emit.LongFixed (proc.types, tmpAddressSy);
+	 | Regs.ptrM:
+	    off := Emit.LongFixed (proc.types, tmpPointerSy);
+	 END;
+	 (* Start Address — 8 bytes: lower 4 + upper 4, then R_X86_64_64 fills all 8 *)
+	 mark := PC.Unique (proc);
+	 TmpPtrName (proc, sym, mark, TRUE);
+	 Reloc.NewSymbol (proc.s, sym, tmpptrs.start);
+	 off := Emit.LongFixed (proc.types, 0);
+	 dummy := Emit.LongFixed (proc.types, 0);
+	 NEW (ref);
+	 ref.modname := RealName (proc.module);
+	 ref.symname := sym;
+	 Res.AddReloc (proc.typeblk, Reloc.addSym, off, 8, ref);
+	 (* End Address — 8 bytes: lower 4 + upper 4, then R_X86_64_64 fills all 8 *)
+	 TmpPtrName (proc, sym, mark, FALSE);
+	 Reloc.NewSymbol (proc.s, sym, tmpptrs.end);
+	 off := Emit.LongFixed (proc.types, 0);
+	 dummy := Emit.LongFixed (proc.types, 0);
+	 ref.symname := sym;
+	 Res.AddReloc (proc.typeblk, Reloc.addSym, off, 8, ref);
+	 tmpptrs := tmpptrs.next;
+      END;
+      off := Emit.LongFixed (proc.types, sentinel);
+      IF pident.class = Sym.moduleC THEN
+         ASSERT (proc.module = pident);
+	 GenTagForGlobals (proc);
+      END;
+   END GenTagForBlock;
+
+   PROCEDURE GenBlockList (proc : PC.Context);
+      VAR
+         list : BlkList;
+	 mark, off, strtaboff, dummy : LONGINT;
+	 cs : Streams.Stream;
+	 sym : ConstStrings.String;
+	 ref : Reloc.SymRef;
+   BEGIN
+      list := NIL;
+      off := Emit.AlignFixed (proc.types, 8);
+      list := proc.blklist(BlkList);
+      sym := NIL;
+      NEW (ref);
+      ref.modname := RealName (proc.module);
+      WHILE list # NIL DO
+         (* Pointer to previous block list entry -- 8 bytes for AMD64 pointer *)
+         off := Emit.LongFixed (proc.types, 0);
+         dummy := Emit.LongFixed (proc.types, 0);
+         IF sym # NIL THEN
+	    ref.symname := sym;
+	    Res.AddReloc (proc.typeblk, Reloc.addSym, off, 8, ref);
+	 END;
+	 (* Symbol for first entry in the block list. *)
+	 IF list.next = NIL THEN
+	    ConstStrings.Create (sym, "__BLOCKLIST__START");
+	    Res.AddSymbol (proc.typeblk, sym, off);
+	 END;
+	 (* Generate symbol for this entry. This is used to create the
+	  * link from the next block entry. *)
+	 IF list.type = NIL THEN
+	    mark := -1;
+	 ELSE
+	    mark := MarkType (proc, list.type, FALSE);
+	 END;
+	 ConstStrings.Init (cs);
+	 Write.StringS (cs, "__BLOCKLIST__");
+	 IF mark < 0 THEN
+	    Write.StringS (cs, "BODY");
+	 ELSE
+	    Write.IntS (cs, mark, 0);
+	 END;
+	 ConstStrings.Close (cs, sym);
+         Res.AddSymbol (proc.typeblk, sym, off);
+	 (* Start of Block -- 8 bytes for AMD64 pointer *)
+	 off := Emit.LongFixed (proc.types, 0);
+	 dummy := Emit.LongFixed (proc.types, 0);
+	 ref.symname := NIL;
+	 BlockStartName (ref.symname, mark, NIL);
+	 ASSERT (ref.symname # NIL);
+	 Res.AddReloc (proc.typeblk, Reloc.addSym, off, 8, ref);
+	 (* End of Block -- 8 bytes for AMD64 pointer *)
+	 off := Emit.LongFixed (proc.types, 0);
+	 dummy := Emit.LongFixed (proc.types, 0);
+	 BlockEndName (ref.symname, mark);
+	 Res.AddReloc (proc.typeblk, Reloc.addSym, off, 8, ref);
+	 (* Block Tag (pointerlist) for pointers on stack! -- 8 bytes for AMD64 pointer *)
+	 off := Emit.LongFixed (proc.types, 0);
+	 dummy := Emit.LongFixed (proc.types, 0);
+	 CreateLocalTagName (ref.symname, mark);
+	 Res.AddReloc (proc.typeblk, Reloc.addSym, off, 8, ref);
+	 (* Pointer to the block name -- 8 bytes for AMD64 pointer *)
+	 ConstStrings.Open (cs, list.name);
+         strtaboff := Emit.StringStream (proc.rodata, cs, dummy);
+	 off := Emit.LongFixed (proc.types, strtaboff);
+	 dummy := Emit.LongFixed (proc.types, 0);
+         ConstStrings.Create (ref.symname, "__rodata");
+	 Res.AddReloc (proc.typeblk, Reloc.addSym, off, 8, ref);
+	 (* Space for a count variable. Used for profiling. *)
+	 off := Emit.LongFixed (proc.types, 0);
+	 IF list.next = NIL THEN
+	    list := NIL;
+	 ELSE
+	    list := list.next(BlkList);
+	 END;
+      END;
+   END GenBlockList;
+
+   PROCEDURE GenModuleTag (proc : PC.Context);
+      VAR
+	 off, strtaboff, dummy : LONGINT;
+	 ref : Reloc.SymRef;
+	 cs : Streams.Stream;
+	 list : PC.TypeList;
+   BEGIN
+      ref := NIL;
+      list := proc.blklist;
+      NEW (ref);
+      ref.modname := RealName (proc.module);
+      off := Emit.AlignFixed (proc.types, 8);
+      Res.AddSymbol (proc.typeblk, thismod, off);
+      (* Next pointer -- 8 bytes for AMD64 pointer *)
+      off := Emit.LongFixed (proc.types, 0);
+      dummy := Emit.LongFixed (proc.types, 0);
+      (* Pointer to module name -- 8 bytes for AMD64 pointer *)
+      ConstStrings.Open (cs, RealName (proc.module));
+      strtaboff := Emit.StringStream (proc.rodata, cs, dummy);
+      off := Emit.LongFixed (proc.types, strtaboff);
+      dummy := Emit.LongFixed (proc.types, 0);
+      ConstStrings.Create (ref.symname, "__rodata");
+      Res.AddReloc (proc.typeblk, Reloc.addSym, off, 8, ref);
+      (* Module Initialization -- 8 bytes for AMD64 pointer *)
+      off := Emit.LongFixed (proc.types, 0);
+      dummy := Emit.LongFixed (proc.types, 0);
+      IF list # NIL THEN
+         ConstStrings.Create (ref.symname, "__init");
+	 Res.AddReloc (proc.typeblk, Reloc.addSym, off, 8, ref);
+      END;
+      (* Start of code block -- 8 bytes for AMD64 pointer *)
+      off := Emit.LongFixed (proc.types, 0);
+      dummy := Emit.LongFixed (proc.types, 0);
+      IF list # NIL THEN
+	 ConstStrings.Create (ref.symname, "__CODESTART");
+	 Res.AddReloc (proc.typeblk, Reloc.addSym, off, 8, ref);
+      END;
+      (* End of code block -- 8 bytes for AMD64 pointer *)
+      off := Emit.LongFixed (proc.types, 0);
+      dummy := Emit.LongFixed (proc.types, 0);
+      IF list # NIL THEN
+	 ConstStrings.Create (ref.symname, "__CODEEND");
+	 Res.AddReloc (proc.typeblk, Reloc.addSym, off, 8, ref);
+      END;
+      (* Global Variables -- 8 bytes for AMD64 pointer, now at offset 40 *)
+      off := Emit.LongFixed (proc.types, 0);
+      dummy := Emit.LongFixed (proc.types, 0);
+      ConstStrings.Create (ref.symname, "__global_variables_block");
+      Res.AddReloc (proc.typeblk, Reloc.addSym, off, 8, ref);
+      (* Block list -- 8 bytes for AMD64 pointer *)
+      off := Emit.LongFixed (proc.types, 0);
+      dummy := Emit.LongFixed (proc.types, 0);
+      IF list # NIL THEN
+	 ConstStrings.Create (ref.symname, "__BLOCKLIST__START");
+	 Res.AddReloc (proc.typeblk, Reloc.addSym, off, 8, ref);
+      END;
+      (* Number of Blocks -- 4 bytes, now at offset 56 *)
+      dummy := 0;
+      WHILE list # NIL DO
+         INC (dummy);
+	 list := list.next;
+      END;
+      off := Emit.LongFixed (proc.types, dummy);
+   END GenModuleTag;
+
+
+   (* The return value is the offset of the type tag in the type tag
+    * block of the module that declares the type. *)
+   PROCEDURE GenType (proc : PC.Context; type : Sym.Type);
+
+      VAR
+         hierlen, mark, dummy, l, off : LONGINT;
+	 tmpt : Sym.Type;
+	 tmpi : Sym.Ident;
+	 basetypes, basetype : PC.TypeList;
+	 cs : Streams.Stream;
+	 sym : ConstStrings.String;
+	 ref : Reloc.SymRef;
+   BEGIN
+      tmpt := NIL;
+      ASSERT (type # NIL);
+      IF type.form = Sym.pointer THEN
+         type := type.reftype;
+      END;
+      IF (type.form # Sym.array) & (type.form # Sym.record) THEN
+         RETURN
+      END;
+      IF (type.ident # NIL) &
+         (RealName (proc.module) # RealName (type.ident.module)) THEN
+         RETURN
+      END;
+      IF TypeDone (type) THEN
+         RETURN;
+      END;
+      (* Type Descriptions are 8 byte aligned on AMD64 *)
+      off := Emit.AlignFixed (proc.types, 8);
+      mark := MarkType (proc, type, TRUE);
+      CreateLocalTagName (sym, mark);
+      Res.AddSymbol (proc.typeblk, sym, off);
+      IF type.ident # NIL THEN
+         IF Scopes.Lookup (proc.module.export, type.ident.name, tmpi) &
+	    (type.ident = tmpi) THEN
+	    CreateGlobalTagName (sym, type.ident.name);
+	    Res.AddSymbol (proc.typeblk, sym, off);
+	 END;
+      END;
+      l := Sym32.GetSize (proc.module, type, proc.errors);
+      dummy := Emit.LongFixed (proc.types, l); (* size at offset 0 *)
+      dummy := Emit.LongFixed (proc.types, 0); (* padding at offset 4 — align module to 8 *)
+      off := Emit.LongFixed (proc.types, 0);   (* module lo at offset 8 *)
+      dummy := Emit.LongFixed (proc.types, 0); (* module hi at offset 12 *)
+      NEW (ref);
+      ref.modname := RealName (proc.module);
+      ref.symname := thismod;
+      Res.AddReloc (proc.typeblk, Reloc.addSym, off, 8, ref);
+      dummy := Emit.LongFixed (proc.types, mark); (* typeno at offset 16 *)
+      hierlen := 0; tmpt := type;
+      WHILE tmpt.basetype # NIL DO
+         INC(hierlen);
+	 tmpt := tmpt.basetype;
+	 NEW (basetype);
+	 basetype.next := basetypes;
+	 basetypes := basetype;
+	 basetype.type := tmpt;
+      END;
+      dummy := Emit.LongFixed (proc.types, hierlen); (* hierlen at offset 20 *)
+      dummy := Emit.LongFixed (proc.types, 0); (* padding at offset 24 *)
+      dummy := Emit.LongFixed (proc.types, 0); (* padding at offset 28 — basetypes at 32 = 4*addrSize *)
+      basetype := basetypes;
+      basetypes := NIL;
+      WHILE hierlen > 0 DO
+         DEC (hierlen);
+	 EmitTag (proc, basetype.type);
+	 basetype := basetype.next;
+      END;
+      ASSERT (basetype = NIL);
+      GenPointerList (proc, type, 0);
+      dummy := Emit.LongFixed (proc.types, sentinel);
+   END GenType;
+
+   (* Generate an immediate Operand with the Type Tag for type. *)
+   PROCEDURE GenTag (proc : PC.Context; type : Sym.Type) : Op.Operand;
+      VAR
+         op : Op.Operand;
+	 req : Reloc.RelocRequest;
+	 ref : Reloc.SymRef;
+   BEGIN
+      op := NIL;
+      (* Tag addresses fit in 32 bits on AMD64 (code/data < 4GB).
+	 Use 4-byte immediate: CMP r64, imm32 is valid and avoids the
+	 spurious 4 zero bytes that an 8-byte immediate appends. *)
+      op := Op.ImmIntFixed (0, 4);
+      ref := TagSym (proc, type);
+      Reloc.Create (req, proc.s, Reloc.addSym, ref);
+      Op.RelocOpen (op, req);
+      RETURN op;
+   END GenTag;
+
+   (* Generate a Memory Operand that points to the type description of type *)
+   PROCEDURE GenTagRef (proc : PC.Context; type : Sym.Type) : Op.Operand;
+      VAR
+         op : Op.Operand;
+	 req : Reloc.RelocRequest;
+	 ref : Reloc.SymRef;
+   BEGIN
+      op := NIL;
+      op := Op.MemOp0 (8, 0, 4); (* AMD64: 32-bit reloc; small code model *)
+      ref := TagSym (proc, type);
+      Reloc.Create (req, proc.s, Reloc.addSym, ref);
+      Op.RelocOpen (op, req);
+      RETURN op;
+   END GenTagRef;
+
+   PROCEDURE MarkExportedTypes (proc : PC.Context);
+      VAR
+         it : Iterators.Iterator;
+	 ident : Sym.Ident;
+	 mark : LONGINT;
+   BEGIN
+      it := NIL;
+      Scopes.GetIterator (proc.module.export, it);
+      WHILE Iterators.Get (it, ident) DO
+         IF ident.class = Sym.typeC THEN
+	    IF ident.type.form IN { Sym.record, Sym.array} THEN
+	       mark := MarkType (proc, ident.type, FALSE);
+	    END;
+	 END;
+      END;
+   END MarkExportedTypes;
+
+   PROCEDURE GenAllTypes (proc : PC.Context);
+      VAR
+         type : Sym.Type;
+   BEGIN
+      type := NIL;
+      WHILE proc.typelist # NIL DO
+         type := proc.typelist.type;
+	 proc.typelist := proc.typelist.next;
+	 GenType (proc, type);
+      END;
+   END GenAllTypes;
+
+   PROCEDURE InitLocalPointers (proc : PC.Context; pident : Sym.Ident);
+      TYPE
+         Offset = POINTER TO OffsetRec;
+	 OffsetRec = RECORD
+	    next : Offset;
+	    off, len : LONGINT;
+	 END;
+
+      VAR
+         ident : Sym.Ident;
+	 list, off, tmp : Offset;
+	 min, max : LONGINT;
+	 count : INTEGER;
+	 base : LONGINT;
+	 it : Iterators.Iterator;
+	 reg, bp : Regs.Value;
+	 own : Regs.Owner;
+	 block : BOOLEAN;
+	 cx, edi : Regs.Value;
+	 ops : ARRAY 2 OF Op.Operand;
+
+      PROCEDURE TypeOff (type : Sym.Type) : Offset;
+         VAR
+	    ret, off, tmp : Offset;
+	    base : LONGINT;
+	    fld : Sym.FieldList;
+      BEGIN
+         ret := NIL;
+         ASSERT (type # NIL);
+         CASE type.form OF
+	 | Sym.pointer, Sym.address, Sym.coroutine:
+	    NEW (off);
+	    off.next := NIL;
+            off.off := 0;
+	    off.len := 8;
+	    ret := off;
+	 | Sym.array:
+	    ASSERT (~type.dyn);
+	    off := TypeOff (type.element);
+	    IF off # NIL THEN
+	       (* Array of something that contains pointers *)
+	       NEW (off);
+	       off.next := NIL;
+	       off.off := 0;
+	       off.len := Sym32.GetSize (proc.module, type, proc.errors);
+	       ret := off;
+	    END;
+	 | Sym.record:
+	    IF (type.ident # NIL) &
+	       (RealName (type.ident.module) # RealName (proc.module))
+	    THEN
+	       NEW (off);
+	       off.next := NIL;
+	       off.off := 0;
+	       off.len := Sym32.GetSize (proc.module, type, proc.errors);
+	       ret := off;
+	    ELSE
+	       ret := NIL;
+	       IF type.basetype # NIL THEN
+		  ret := TypeOff (type.basetype);
+	       END;
+	       fld := type.fields;
+	       WHILE fld # NIL DO
+	          tmp := TypeOff (fld.type);
+		  base := Sym32.GetOffset (proc.module, fld);
+		  WHILE tmp # NIL DO
+		     off := tmp; tmp := tmp.next;
+		     INC (off.off, base);
+		     off.next := ret;
+		     ret := off;
+		  END;
+		  fld := fld.next;
+	       END;
+	    END;
+	 ELSE
+	    ret := NIL;
+	 END;
+	 RETURN ret;
+      END TypeOff;
+
+   BEGIN
+      ident := NIL;
+      ASSERT (pident.class = Sym.procedureC);
+      list := NIL;
+      Scopes.GetIterator (pident.scope, it);
+      min := 0;
+      max := 0;
+      count := 0;
+      WHILE Iterators.Get (it, ident) DO
+         IF ident.varkind = Sym.noParam THEN
+	    base := AMD64OberonAnalyzer.VarOffset (ident);
+	    tmp := TypeOff (ident.type);
+	    WHILE tmp # NIL DO
+	       off := tmp; tmp := tmp.next;
+	       INC (off.off, base);
+	       off.next := list;
+	       list := off;
+	       INC (count);
+	       IF min = max THEN
+	          min := list.off;
+		  max := list.off + list.len;
+	       ELSE
+		  IF list.off < min THEN
+		     min := list.off;
+		  END;
+		  IF list.off + list.len > max THEN
+		     max := list.off + list.len
+		  END;
+	       END;
+	    END;
+	 END;
+      END;
+      IF count > 20 THEN
+         list.off := min;
+	 list.len := max - min;
+	 list.next := NIL;
+      END;
+      IF list # NIL THEN
+         own := Regs.GetOwner (proc.regs);
+         Regs.CreateValue (reg, proc.regs, own, Regs.stdM);
+	 Regs.LoadReg (reg, {Gen.genax});
+	 Regs.AddConstraint (reg, {Gen.genax});
+	 Emit.Instr2 (proc.s, Pentium.XOR, Op.RegOp (reg, 8),
+	              Op.RegOp (reg, 8));
+
+	 Regs.UntracedValue (bp, Gen.genbp);
+      END;
+      block := FALSE;
+      WHILE list # NIL DO
+         IF list.len <= 20 THEN
+	    WHILE list.len > 0 DO
+	       Emit.Instr2 (proc.s, Pentium.MOV, Op.MemOp1 (bp, 8, list.off, 0),
+			    Op.RegOp (reg, 8));
+	       INC (list.off, 8);
+	       DEC (list.len, 8);
+	    END;
+	 ELSE
+	    IF ~block THEN
+	       Regs.CreateValue (cx, proc.regs, own, Regs.stdM);
+	       Regs.LoadReg (cx, {Gen.gencx});
+	       Regs.AddConstraint (cx, {Gen.gencx});
+	       Regs.CreateValue (edi, proc.regs, own, Regs.stdM);
+	       Regs.LoadReg (edi, {Gen.gendi});
+	       Regs.AddConstraint (edi, {Gen.gendi});
+	       block := TRUE;
+	    END;
+	    Emit.Instr2 (proc.s, Pentium.LEA, Op.RegOp (edi, 8),
+	                 Op.MemOp1 (bp, 8, list.off, 0));
+	    Emit.Instr2 (proc.s, Pentium.MOV, Op.RegOp (cx, 8), Op.ImmInt (list.len DIV 8));
+	    ops[0] := Op.MemOp1 (edi, 8, 0, 0);
+	    ops[1] := Op.RegOp (reg, 8);
+	    Emit.InstrMode (proc.s, Pentium.STOS, 2, ops, {Gen.rep}, cx);
+	 END;
+	 list := list.next;
+      END;
+      (* Only then did we allocate an owner. *)
+      IF reg # NIL THEN
+	 Regs.DestroyOwnedValue (reg, own);
+      END;
+      IF block THEN
+         Regs.DestroyOwnedValue (cx, own);
+         Regs.DestroyOwnedValue (edi, own);
+      END;
+   END InitLocalPointers;
+
+   PROCEDURE SetTmpTag (obj : Disciplines.Object; tag : Regs.Value);
+      VAR
+         disc : TmpTagDisc;
+	 list : RegList;
+   BEGIN
+      IF ~Disciplines.Seek (obj, tmptagid, disc) THEN
+	 NEW (disc);
+	 disc.id := tmptagid;
+	 disc.list := NIL;
+	 Disciplines.Add (obj, disc);
+      END;
+      NEW (list);
+      list.reg := tag;
+      list.next := disc.list;
+      disc.list := list;
+   END SetTmpTag;
+
+
+   PROCEDURE GetTmpTag (obj : Disciplines.Object) : Regs.Value;
+      VAR
+         disc : TmpTagDisc;
+   BEGIN
+      IF Disciplines.Seek (obj, tmptagid, disc) & (disc.list # NIL) THEN
+         RETURN disc.list.reg;
+      END;
+      RETURN NIL;
+   END GetTmpTag;
+
+
+   PROCEDURE RemoveTmpTag (obj : Disciplines.Object) : Regs.Value;
+      VAR
+         disc : TmpTagDisc;
+	 ok : BOOLEAN;
+	 reg : Regs.Value;
+   BEGIN
+      ok := Disciplines.Seek (obj, tmptagid, disc); ASSERT (ok);
+      ASSERT (disc.list # NIL);
+      reg := disc.list.reg;
+      disc.list := disc.list.next;
+      RETURN reg;
+   END RemoveTmpTag;
+
+
+   PROCEDURE MaxTag (proc : PC.Context; tag : Regs.Value; type : Sym.Type;
+                     caller : Regs.Owner; reuse : BOOLEAN) : Regs.Value;
+      VAR
+         dim : LONGINT;
+	 ret : Regs.Value;
+	 lab : FragmentedStreams.Label;
+   BEGIN
+      dim := 0;
+      WHILE type.basetype # NIL DO
+         INC (dim);
+	 type := type.basetype;
+      END;
+      IF ~reuse THEN
+	 Regs.CreateValue (ret, proc.regs, caller, Regs.stdM);
+	 Regs.LoadReg (ret, Gen.StdRegs);
+	 Emit.Instr2 (proc.s, Pentium.MOV, Op.RegOp (ret, 8),
+	              Op.RegOp (tag, 8));
+      ELSE
+         ret := tag;
+      END;
+      Emit.Instr2 (proc.s, Pentium.CMP, Op.MemOp1 (tag, 4, sizeoff, 0),
+                   Op.ImmInt (dim));
+      FragmentedStreams.CreateLabel (lab);
+      Emit.JumpCC (proc.s, lab, Pentium.JGE-Pentium.JCC);
+      FragmentedStreams.AttachLabel (proc.s, lab);
+      RETURN ret;
+   END MaxTag;
+
+
+   (* Jump to truelab if the type test succeeds. If truelab is NIL
+    * generate a run time error if the test fails and continue otherwise. *)
+   PROCEDURE TypeGuard (proc : PC.Context; tag : Regs.Value; static : Sym.Type;
+			truelab : FragmentedStreams.Label;
+			loc : CompilerObjects.Location);
+      VAR
+	 tagop : Op.Operand;
+	 hierlen : LONGINT;
+	 false : FragmentedStreams.Label;
+	 type : Sym.Type;
+	 attach : BOOLEAN;
+   BEGIN
+      tagop := NIL;
+      IF static.form = Sym.pointer THEN
+         static := static.reftype;
+      END;
+      tagop := GenTag (proc, static);
+      hierlen := 0;
+      type := static.basetype;
+      WHILE type # NIL DO
+         INC(hierlen);
+	 type := type.basetype;
+      END;
+      FragmentedStreams.CreateLabel (false);
+      attach := FALSE;
+      IF truelab = NIL THEN
+	 FragmentedStreams.CreateLabel (truelab);
+	 attach := TRUE;
+      END;
+      ASSERT (Op.Loc (tagop) IN {Op.immediate, Op.immediateDyn});
+      Emit.Instr2 (proc.s, Pentium.CMP, Op.RegOp (tag, 8), tagop);
+      Emit.JumpCC (proc.s, truelab, Pentium.JE-Pentium.JCC);
+      Emit.Instr2 (proc.s, Pentium.CMP, Op.MemOp1 (tag, 4, hierlenoff, 0),
+                   Op.ImmInt (hierlen));
+      Emit.JumpCC (proc.s, false, Pentium.JL-Pentium.JCC);
+      Emit.Instr2 (proc.s, Pentium.CMP,
+                   Op.MemOp1 (tag, 8, pointeroff+8*hierlen, 0), tagop);
+      Emit.JumpCC (proc.s, truelab, Pentium.JE-Pentium.JCC);
+      FragmentedStreams.AttachLabel (proc.s, false);
+      IF attach THEN
+	 Regs.EnterLevel (proc.regs);
+	 EmitErrors.TypeGuard (proc, loc);
+	 Regs.LeaveLevel (proc.regs);
+	 Regs.DoneLevel (proc.regs);
+	 FragmentedStreams.AttachLabel (proc.s, truelab);
+      END;
+   END TypeGuard;
+
+
+   PROCEDURE StaticTypeGuard (proc : PC.Context; base, ext : Sym.Type;
+                              loc : CompilerObjects.Location; warn : BOOLEAN)
+			      : BOOLEAN;
+   BEGIN
+      ASSERT (base.form IN {Sym.pointer, Sym.record});
+      ASSERT (ext.form IN {Sym.pointer, Sym.record});
+      ASSERT (base.form = ext.form);
+      ASSERT (base # NIL);
+      IF ext.form = Sym.pointer THEN
+         ext := ext.reftype;
+	 base := base.reftype;
+      END;
+      WHILE (ext # NIL) & (ext # base) DO
+         ext := ext.basetype;
+      END;
+      IF ext = NIL THEN
+         CompilerErrors.Raise (proc.errors, loc,
+	                       "static failure of type guard");
+	 RETURN FALSE
+      ELSIF warn THEN
+         CompilerErrors.Raise (proc.errors, loc,
+	                       "warning: type guard satisfied by definition");
+      END;
+      RETURN TRUE
+   END StaticTypeGuard;
+
+   PROCEDURE AssignmentTypeGuard (proc : PC.Context; base, ext : Regs.Value;
+                                  loc : CompilerObjects.Location);
+      VAR
+	 ok, failed : FragmentedStreams.Label;
+	 baselen : Regs.Value;
+	 own : Regs.Owner;
+	 regarr : ARRAY 3 OF Regs.Value;
+	 possible : ARRAY 3 OF SET;
+	 done : BOOLEAN;
+   BEGIN
+      ok := NIL;
+      own := Regs.GetOwner (proc.regs);
+      ASSERT ((base # NIL) & (ext # NIL));
+      FragmentedStreams.CreateLabel (ok);
+      FragmentedStreams.CreateLabel (failed);
+      Regs.CreateValue (baselen, proc.regs, own, Regs.stdM);
+      Regs.LoadReg (baselen, Gen.StdRegs);
+      regarr[0] := baselen; possible[0] := Regs.GetConstraint (baselen);
+      regarr[1] := base; possible[1] := Regs.GetConstraint (base);
+      regarr[2] := ext; possible[2] := Regs.GetConstraint (ext);
+      done := Regs.PrepareInstruction (3, regarr, possible); ASSERT (done);
+      Emit.Instr2 (proc.s, Pentium.MOV, Op.RegOp (baselen, 4),
+                   Op.MemOp1 (base, 4, hierlenoff, 0));
+      Emit.Instr2 (proc.s, Pentium.CMP, Op.RegOp (base, 8), Op.RegOp (ext, 8));
+      Emit.JumpCC (proc.s, ok, Pentium.JE-Pentium.JCC);
+      Emit.Instr2 (proc.s, Pentium.CMP, Op.RegOp (baselen, 4),
+                   Op.MemOp1 (ext, 4, hierlenoff, 0));
+      Emit.JumpCC (proc.s, failed, Pentium.JG-Pentium.JCC);
+      Emit.Instr2 (proc.s, Pentium.CMP, Op.RegOp (base, 8),
+                   Op.MemOp2 (ext, baselen, 8, pointeroff, 0, 8 (* scale *)));
+      Emit.JumpCC (proc.s, ok, Pentium.JE-Pentium.JCC);
+      Regs.DestroyOwnedValue (baselen, own);
+      FragmentedStreams.AttachLabel (proc.s, failed);
+      Regs.EnterLevel (proc.regs);
+      EmitErrors.TypeGuard (proc, loc);
+      Regs.LeaveLevel (proc.regs);
+      Regs.DoneLevel (proc.regs);
+      Emit.Instr2 (proc.s, Pentium.MOV, Op.MemOp0 (8, 0, 0), Op.ImmInt (0));
+      FragmentedStreams.AttachLabel (proc.s, ok);
+   END AssignmentTypeGuard;
+
+
+BEGIN
+   marktypeid := Disciplines.Unique();
+   tmptagid := Disciplines.Unique();
+   ConstStrings.Create (thismod, "__TAG__THISMODULE");
+END AMD64OberonGenTypes.

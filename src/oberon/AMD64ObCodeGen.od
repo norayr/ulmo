@@ -1,0 +1,111 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2004 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   $Id: AMD64ObCodeGen.od,v 1.0 2026/01/01 00:00:00 noch Exp $
+   ----------------------------------------------------------------------------
+*)
+
+DEFINITION AMD64ObCodeGen; (* Christian Ehrhardt, AMD64 port *)
+
+   IMPORT ConstStrings, Emit := AMD64Emit, FragmentedStreams,
+      Gen := AMD64OpCodeGenerator, Op := AMD64Operands,
+      PC := AMD64OberonContexts, Regs := CompilerRegisters, RelatedEvents,
+      Res := AMD64OberonResults, StackAlloc := CompilerStackAllocations,
+      Streams, Sym := OberonSymbols;
+
+   CONST
+      setNever   = 0;
+      setTrue    = 1;
+      setFalse   = 2;
+      setAll     = 3;
+
+   TYPE
+      BoolContext = POINTER TO BoolContextRec;
+      BoolContextRec = RECORD
+	 target : Op.Operand;   (* Save the result here if not NIL *)
+         setaction : INTEGER; (* setNever .. setAll *)
+	 truelab, falselab : FragmentedStreams.Label;
+				(* Jump to this label if the expression
+				 * evaluates to true/false. Don't jump if
+				 * label is NIL *)
+         neg : BOOLEAN;
+      END;
+
+   CONST
+      identM = 1;   (* ident is the identfier of the variable,
+                     * type is the type of the attribute *)
+      stackM = 2;   (* ident is the identifier that the variable is
+                     * associated with, type should be NIL. The returned
+                     * operand will point to the data for this Variable that
+                     * was put onto the stack. This size if always 8 and
+                     * byvalue is FALSE. *)
+      offsetM = 3;  (* offsetM is like stackM except that the offset on the
+                     * stack frame is specified explicitly. It is not taken
+                     * from the Information associated with the variable.
+                     * The offset is relative to the local variable block of
+                     * the stack frame that ident is in. *)
+
+
+   TYPE
+      VarMode = INTEGER;  (* identM .. offsetM *)
+
+      VarDesc = POINTER TO VarDescRec;
+      VarDescRec = RECORD
+         mode : VarMode;
+         ident : Sym.Ident;
+         type : Sym.Type;
+         offset : Streams.Count;
+      END;
+
+
+   PROCEDURE GenStringOp (proc : PC.Context;
+			  mnem : Gen.Mnemonic; modeadd : SET;
+		          dst, src, cnt : Op.Operand;
+		          align : INTEGER; overlap : BOOLEAN;
+		          caller : Regs.Owner);
+
+   PROCEDURE GenSymVal (proc : PC.Context; possible : SET;
+                        mod : ConstStrings.String;
+                        sym : ConstStrings.String;
+			caller : Regs.Owner; inreg : BOOLEAN) : Op.Operand;
+
+   PROCEDURE GenVar (proc : PC.Context; var : VarDesc; byvalue : BOOLEAN;
+                     possible : SET; caller : Regs.Owner) : Op.Operand;
+
+
+   PROCEDURE GenReturn (proc : PC.Context);
+
+   PROCEDURE GenBool (proc : PC.Context; at : Sym.Attribute;
+		      context : BoolContext);
+
+
+   PROCEDURE GenExpr (proc : PC.Context; at : Sym.Attribute; byvalue : BOOLEAN;
+                      possible : SET; caller : Regs.Owner) : Op.Operand;
+
+   PROCEDURE GenDesignator (proc : PC.Context; lop : Sym.Attribute;
+			    possible : SET; caller : Regs.Owner) : Op.Operand;
+
+   PROCEDURE GenModule (res : Res.Result; module : Sym.Ident;
+			errors : RelatedEvents.Object) : BOOLEAN;
+
+   PROCEDURE LoadFPUReg (proc : PC.Context; op : Op.Operand; form: Sym.Form;
+			 size : LONGINT; caller : Regs.Owner) : Op.Operand;
+
+
+END AMD64ObCodeGen.

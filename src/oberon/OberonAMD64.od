@@ -1,0 +1,3 @@
+DEFINITION OberonAMD64;
+   (* Installs itself as pass2 of the Oberon compiler for the AMD64 architecture. *)
+END OberonAMD64.

@@ -52,7 +52,7 @@ MODULE Storage;
    (* storage allocating interface for the compiler *)
 
    IMPORT Coroutines, Errors, Events, Objects, Priorities, RelatedEvents,
-      Streams, Types, Write;
+      Streams, SYS := SYSTEM, Types, Write;
 
    TYPE
       Address = Types.UntracedAddress;
@@ -125,6 +125,9 @@ MODULE Storage;
                *)
          END;
    
+   CONST
+      preInitBufSize = 65536; (* 64 KB scratch buffer for pre-sif allocations *)
+
    VAR
       (* public *)
       lock: BOOLEAN;
@@ -133,6 +136,8 @@ MODULE Storage;
       (* private *)
       sif: Interface;
       sifDefined: BOOLEAN;
+      preInitBuf: ARRAY preInitBufSize OF BYTE; (* zero-init BSS scratch *)
+      preInitPos: Size;                           (* next free byte in preInitBuf *)
 
    (* === private procedures ============================================== *)
 
@@ -189,9 +194,28 @@ MODULE Storage;
          tag may be zero: in this case we assume SYS.NEW and put a
          dummy tag record behind the allocated area
       *)
+      VAR total: Size; base: Address;
    BEGIN
-      IF ~sifDefined THEN PanicExit END;
-      sif.alloc(ptr, tag, size);
+      IF ~sifDefined THEN
+         (* Fallback: allocate from static BSS scratch buffer (pre-SysStorage).
+            preInitBuf is always mapped and zero-initialized, avoiding address
+            space conflicts with the heap or code sections. *)
+         total := size + SHORT(SYS.SIZE(SYS.UNTRACEDADDRESS));
+         IF preInitPos + total <= preInitBufSize THEN
+            base := SYS.VAL(Address,
+               SYS.VAL(SYS.UNTRACEDADDRESS, SYS.ADR(preInitBuf)) +
+               SYS.VAL(SYS.UNTRACEDADDRESS, preInitPos));
+            SYS.PUT(base, tag);
+            ptr := SYS.VAL(Address,
+               SYS.VAL(SYS.UNTRACEDADDRESS, base) +
+               SHORT(SYS.SIZE(SYS.UNTRACEDADDRESS)));
+            INC(preInitPos, total);
+         ELSE
+            PanicExit
+         END;
+      ELSE
+         sif.alloc(ptr, tag, size);
+      END;
    END AllocateWithTag;
 
    PROCEDURE AllocateStack(VAR ptr: Address; size: Size; mode: SHORTINT);

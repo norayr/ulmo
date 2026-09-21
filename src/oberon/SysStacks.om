@@ -37,19 +37,21 @@ MODULE SysStacks;
    IMPORT Coroutines, Disciplines, SysTypes, SYS := SYSTEM;
 
    CONST
-      oneword = 4; (* number of bytes per register *)
+      (* pointer/register size: 4 on i386, 8 on AMD64 *)
+      oneword = SYS.SIZE(SYS.ADDRESS);
 
-      (* following offset is to be taken relative to the CR pointer *)
-      ucontextOffset = 2 * oneword;
+      (* offset of ucontext in CoroutineRec:
+         interrupts (LONGINT=4) + started (LONGINT=4) = 8 bytes on both arches *)
+      ucontextOffset = 2 * SYS.SIZE(LONGINT);
 
-      (* following offsets are to be taken relative to ucontext *)
+      (* offsets within ucontext: each saved register is address-sized *)
       crbaseOff = 0;
       crtopOff = oneword;
       crpcOff = 2 * oneword;
 
-      (* following offsets are to be taken relative to the new top/old base *)
+      (* stack frame layout: [rbp+0]=saved_rbp, [rbp+oneword]=return_addr *)
       oldbaseOff = 0;
-      returnOff = 4;
+      returnOff = oneword;
       
    TYPE
       Stack =

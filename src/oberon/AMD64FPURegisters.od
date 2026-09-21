@@ -1,0 +1,71 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2004 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+   $Id: AMD64FPURegi.od,v 1.1 2004/09/06 18:57:07 borchert Exp borchert $
+   ----------------------------------------------------------------------------
+   $Log: AMD64FPURegi.od,v $
+   Revision 1.1  2004/09/06 18:57:07  borchert
+   Initial revision
+
+   ----------------------------------------------------------------------------
+*)
+
+DEFINITION AMD64FPURegisters; (* Christian Ehrhardt *)
+
+   IMPORT Disciplines, FragmentedStreams, Gen := AMD64OpCodeGenerator,
+      Op := AMD64Operands, Regs := CompilerRegisters;
+
+
+   CONST maxregs = 8;
+
+   TYPE
+
+      RegSet = POINTER TO RegSetRec;
+      RegSetRec = RECORD
+         (Disciplines.ObjectRec)
+	 top : Regs.Register;
+      END;
+
+      Value = POINTER TO ValueRec;
+      ValueRec = RECORD
+         (Regs.ValueRec)
+	 set : RegSet;
+	 freg : Regs.Register; (* Distance counted from the stack top! *)
+      END;
+
+   PROCEDURE Create (VAR set : RegSet);
+   PROCEDURE CreateValue (VAR reg : Regs.Value; set : RegSet);
+   PROCEDURE PushReal (reg : Regs.Value; s : FragmentedStreams.Stream;
+                       op : Op.Operand);
+   PROCEDURE PushInt (reg : Regs.Value; s : FragmentedStreams.Stream;
+		      op : Op.Operand);
+   PROCEDURE StoreReal (reg : Regs.Value; s : FragmentedStreams.Stream;
+   			op : Op.Operand);
+   PROCEDURE StoreInt (reg : Regs.Value; s : FragmentedStreams.Stream;
+		       op : Op.Operand);
+
+   PROCEDURE PrepareReg (reg : Regs.Value);
+   PROCEDURE PrepareOp (op : Op.Operand);
+   PROCEDURE Instr1 (s : FragmentedStreams.Stream; mnem : Gen.Mnemonic;
+   		     op1 : Op.Operand);
+   PROCEDURE Instr2 (s : FragmentedStreams.Stream; mnem : Gen.Mnemonic;
+   		     op1, op2 : Op.Operand);
+   PROCEDURE Pop (reg : Regs.Value);
+
+END AMD64FPURegisters.

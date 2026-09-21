@@ -1,0 +1,115 @@
+DEFINITION AMD64Operands;
+
+   (* AMD64 operand representation — identical to I386Operands but
+      with 64-bit pointer/address sizes (immsz=8 for addresses, ImmNil=8). *)
+
+   IMPORT FragmentedStreams, Objects, Registers := CompilerRegisters,
+      Relocations := CompilerRelocations, SYSTEM, Types;
+
+   TYPE
+      Register = INTEGER;
+      Location = INTEGER;
+
+   CONST
+      noConst = 0;
+      integerConst = 1;
+      realConst = 2;
+      setConst = 3;
+      charConst = 4;
+      booleanConst = 5;
+      nilConst = 6;
+      dataConst = 7;
+
+   TYPE
+      ConstantKind = SHORTINT;
+      ConstantData = POINTER TO ConstantDataRec;
+      ConstantDataRec =
+	 RECORD
+	    (Objects.ObjectRec)
+	    kind: ConstantKind;
+	    intval: Types.Int32;
+	    realval: Types.Real64;
+	    setval: SET;
+	    charval: CHAR;
+	    boolval: BOOLEAN;
+	    data: POINTER TO ARRAY 16 OF BYTE;
+	 END;
+
+   TYPE
+      Operand = POINTER TO OperandRec;
+      OperandRec = RECORD
+	 (Objects.ObjectRec)
+	 reg1, reg2 : Registers.Value;
+	 immsz, memsz, dispsz : LONGINT;
+	 disp : LONGINT;
+	 data : ConstantData;
+	 volatile : BOOLEAN;
+	 next : Operand;
+	 loc : Location;
+	 scale : INTEGER;
+	 reloc : Relocations.RelocRequest;
+      END;
+
+      OperandCache = POINTER TO OperandCacheRec;
+      OperandCacheRec = RECORD
+	 (Objects.ObjectRec)
+	 ops  : Operand;
+	 nelem : LONGINT;
+      END;
+
+   CONST
+      error = 31;
+      cached = 30;
+      none = 0;
+      immediate = 1;
+      immediateDyn = 2;
+      register = 3;
+      register2 = 4;
+      memory = 5;
+      fpuRegister = 6;
+      condition = 7;
+
+   PROCEDURE CreateCache (VAR opcache : OperandCache);
+   PROCEDURE Alloc(opcache : OperandCache) : Operand;
+   PROCEDURE Free(opcache : OperandCache; op : Operand);
+   PROCEDURE Dup (op : Operand) : Operand;
+   PROCEDURE ImmOp (dyn : BOOLEAN) : Operand;
+   PROCEDURE ImmOpV (cache : OperandCache; dyn : BOOLEAN) : Operand;
+   PROCEDURE Error () : Operand;
+   PROCEDURE IsError (op : Operand) : BOOLEAN;
+   PROCEDURE ImmIntFixed (i : Types.Int32; sz : LONGINT) : Operand;
+   PROCEDURE ImmInt (i : Types.Int32) : Operand;
+   PROCEDURE ImmIntV (cache : OperandCache; i : Types.Int32) : Operand;
+   PROCEDURE ImmReal (r : Types.Real64) : Operand;
+   PROCEDURE ImmSet (s : SET) : Operand;
+   PROCEDURE ImmChar (c : CHAR) : Operand;
+   PROCEDURE ImmBool (b : BOOLEAN) : Operand;
+   PROCEDURE ImmNil () : Operand;
+   PROCEDURE ImmData (dyn : BOOLEAN; sz : LONGINT; data : ARRAY OF BYTE) : Operand;
+   PROCEDURE RegOp (reg : Registers.Value; size : LONGINT) : Operand;
+   PROCEDURE RegOpV (cache : OperandCache; reg : Registers.Value; size : LONGINT) : Operand;
+   PROCEDURE Reg2Op (reg1, reg2 : Registers.Value; size : LONGINT) : Operand;
+   PROCEDURE MemOp0 (memsz, disp, dispsz : LONGINT) : Operand;
+   PROCEDURE MemOp1 (reg : Registers.Value; memsz, disp, dispsz : LONGINT) : Operand;
+   PROCEDURE MemOp2 (reg1, reg2 : Registers.Value; memsz, disp, dispsz : LONGINT; scale : INTEGER) : Operand;
+   PROCEDURE FPUOp (reg : Registers.Value) : Operand;
+   PROCEDURE CCOp (cc : LONGINT) : Operand;
+   PROCEDURE Loc (op : Operand) : INTEGER;
+   PROCEDURE Scale (op : Operand; VAR scale : INTEGER);
+   PROCEDURE SetScale (op : Operand; newscale : INTEGER);
+   PROCEDURE SetLoc (op : Operand; newloc : Location);
+   PROCEDURE Sizes (op: Operand; VAR immsz : LONGINT; VAR memsz : LONGINT) : BOOLEAN;
+   PROCEDURE Reg (op: Operand; VAR reg : Register) : BOOLEAN;
+   PROCEDURE Reg2 (op : Operand; VAR reg1, reg2 : Register) : BOOLEAN;
+   PROCEDURE Mem16 (op : Operand; VAR reg1 : Register; VAR reg2 : Register;
+		    VAR disp : LONGINT; VAR dispsize : LONGINT) : BOOLEAN;
+   PROCEDURE Mem64 (op : Operand; VAR base : Register; VAR index : Register;
+		    VAR scale : INTEGER; VAR disp : LONGINT;
+		    VAR dispsize : LONGINT) : BOOLEAN;
+   PROCEDURE GetImmData (op : Operand; VAR arr : ARRAY OF BYTE; len : LONGINT);
+   PROCEDURE NeedReloc (op : Operand) : BOOLEAN;
+   PROCEDURE RelocOpen (op : Operand; reloc : Relocations.RelocRequest);
+   PROCEDURE RelocInstance (op : Operand; l : FragmentedStreams.Label);
+   PROCEDURE RelocInfo (op : Operand; off, len : LONGINT);
+
+END AMD64Operands.

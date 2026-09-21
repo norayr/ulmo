@@ -1,0 +1,10 @@
+DEFINITION Oberon64iUpdates;
+
+   IMPORT RelatedEvents, Sym := OberonSymbols;
+
+   PROCEDURE CheckForUpdates(public, private: Sym.Ident;
+                             updatesPermitted: BOOLEAN;
+			     VAR updated: BOOLEAN;
+			     errors: RelatedEvents.Object);
+
+END Oberon64iUpdates.

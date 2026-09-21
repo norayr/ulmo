@@ -128,7 +128,10 @@ MODULE Memory;
 	 Types.Address is a signed integer!
       *)
       bitsPerAddress = 32;
-      minSignedAddress = MIN(Address);
+         (* full 32-bit address space; for AMD64 the SysStorage guard filters
+            addresses outside [0, 4GB) before calling Memory.ReserveRegion,
+            so the tree only sees addresses that fit in LONGINT arithmetic *)
+      minSignedAddress = MIN(LONGINT);  (* = -2^31; kept for arithmetic routines *)
 
    CONST
       left = 0; right = 1; (* BlockType: left or right buddy? *)
@@ -454,7 +457,9 @@ MODULE Memory;
    PROCEDURE AddressOfRidge(addr: Address;
 			    sizeIndex: SizeIndex) : Address;
    BEGIN
-      IF (addr = 0) & (sizeIndex = bitsPerAddress) THEN
+      (* special case only needed when bitsPerAddress=32 to avoid LONGINT overflow
+         of ASH(1,31); with bitsPerAddress<=30 the shift result is always positive *)
+      IF (bitsPerAddress >= 32) & (addr = 0) & (sizeIndex = bitsPerAddress) THEN
 	 RETURN minSignedAddress
       ELSE
 	 RETURN addr + ASH(1, sizeIndex - 1)
@@ -974,6 +979,7 @@ MODULE Memory;
       END BackwardBoundary;
 
    BEGIN (* ReserveRegion *)
+      IF len = 0 THEN RETURN END; (* nothing to reserve for zero-length segment *)
       (* check params for general validity *)
       CheckSize(len, "ReserveRegion", errors);
       IF mode * modeMask = fixed THEN

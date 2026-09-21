@@ -1,0 +1,302 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-2004 by University of Ulm, SAI, D-89069 Ulm, Germany
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+   E-mail contact: oberon@mathematik.uni-ulm.de
+   ----------------------------------------------------------------------------
+*)
+
+DEFINITION AMD64Instructions;
+
+   (* instruction formats for the AMD64 processor *)
+
+   CONST
+      AAA    = 1;
+      AAD    = 2;
+      AAM    = 3;
+      AAS    = 4;
+      ADC    = 5;
+      ADD    = 6;
+      AND    = 7;
+      ARPL   = 8;
+
+      BOUND  = 20;
+      BSF    = 21;
+      BSR    = 22;
+      BSWAP  = 23;
+      BT     = 24;
+      BTC    = 25;
+      BTR    = 26;
+      BTS    = 27;
+
+      CALL   = 40;
+      CALLF  = 41;
+      CBW    = 42;   CWDE = CBW;   CWD = CBW;   CDQ = CWD;
+      CLC    = 43;
+      CLD    = 44;
+      CLI    = 45;
+      CLTS   = 46;
+      CMC    = 47;
+      CMP    = 48;
+      CMPS   = 49;
+      CMPXCHG     = 51;
+      CMPXCHG8B   = 52;
+      CPUID  = 53;
+
+      DAA    = 60;
+      DAS    = 61;
+      DECR   = 62;
+      DIVIDE = 63;
+
+      ENTER  = 70;
+      HLT    = 71;
+      IDIVIDE   = 72;
+      IMUL   = 73;
+      INCR   = 74;
+      INP    = 75;
+      INPS   = 76;
+      INT    = 79;
+      INTO   = 80;
+      INVD   = 81;
+      INVLPG = 82;
+      IRET   = 83; IRETD = IRET;
+
+      (* keep the following lines and constant values in order! *)
+      JCC    = 100;
+      JO     = 100;                                 (* add 0 *)
+      JNO    = 101;                                 (* add 1 *)
+      JB     = 102;   JNAE   = JB;   JC    = JB;    (* add 2 *)
+      JAE    = 103;   JNB    = JAE;  JNC   = JAE;   (* add 3 *)
+      JE     = 104;   JZ     = JE;                  (* add 4 *)
+      JNE    = 105;   JNZ    = JNE;                 (* add 5 *)
+      JBE    = 106;   JNA    = JBE;                 (* add 6 *)
+      JA     = 107;   JNBE   = JA;                  (* add 7 *)
+      JS     = 108;                                 (* add 8 *)
+      JNS    = 109;                                 (* add 9 *)
+      JP     = 110;   JPE    = JP;                  (* add A *)
+      JNP    = 111;   JPO    = JNP;                 (* add B *)
+      JL     = 112;   JNGE   = JL;                  (* add C *)
+      JGE    = 113;   JNL    = JGE;                 (* add D *)
+      JLE    = 114;   JNG    = JLE;                 (* add E *)
+      JG     = 115;   JNLE   = JG;                  (* add F *)
+
+      JCXZ   = 120;
+      JECXZ  = 121;
+      JMP    = 122;
+      JMPFAR = 123;
+
+      LAHF   = 130;
+      LAR    = 131;
+      LDS    = 132;
+      LES    = 133;
+      LFS    = 134;
+      LGS    = 135;
+      LSS    = 136;
+      LEA    = 137;
+      LEAVE  = 138;
+      LGDT   = 139;
+      LIDT   = 140;
+      LLDT   = 141;
+      LMSW   = 142;
+      LODS   = 143;
+      LOOPI  = 146;
+      LOOPIE = 147;   LOOPIZ   = LOOPIE;
+      LOOPINE   = 148;   LOOPINZ   = LOOPINE;
+      LSL    = 149;
+      LTR    = 150;
+
+      MOV    = 160;
+      MOVS   = 161;
+      MOVSXD = 162;  (* AMD64: sign-extend r/m32 to r64; opcode 63H with REX.W *)
+      MOVSX  = 164;
+      MOVZX  = 165;
+      MUL    = 166;
+
+      NEG    = 170;
+      NOP    = 171;
+      NOT    = 172;
+
+      ORI    = 180;
+      OUTP   = 181;
+      OUTPS  = 182;
+
+      POP    = 190;
+      POPA   = 191;
+      POPF   = 192;
+      PUSH   = 193;
+      PUSHA  = 194;
+      PUSHF  = 195;
+
+      RCL    = 200;
+      RCR    = 201;
+      ROL    = 202;
+      ROR    = 203;
+      RDMSR  = 204;
+      RDTSC  = 205;
+      RET    = 206;
+      RETFAR = 207;
+      RETP   = 208;
+      RETPFAR   = 209;
+      RSM    = 210;
+
+      SAHF   = 220;
+      SAL    = 221;   SHL   = SAL;
+      SAR    = 222;
+      SHR    = 224;
+      SBB    = 225;
+      SCAS   = 226;
+
+      (* keep the following lines and constant values in order! *)
+      SETCC   = 230;
+      SETO    = 230;                                       (* add 0 *)
+      SETNO   = 231;                                       (* add 1 *)
+      SETB    = 232;   SETNAE   = SETB;   SETC   = SETB;   (* add 2 *)
+      SETAE   = 233;   SETNB    = SETAE;  SETNC  = SETAE;  (* add 3 *)
+      SETE    = 234;   SETZ     = SETE;                    (* add 4 *)
+      SETNE   = 235;   SETNZ    = SETNE;                   (* add 5 *)
+      SETBE   = 236;   SETNA    = SETBE;                   (* add 6 *)
+      SETA    = 237;   SETNBE   = SETA;                    (* add 7 *)
+      SETS    = 238;                                       (* add 8 *)
+      SETNS   = 239;                                       (* add 9 *)
+      SETP    = 240;   SETPE    = SETP;                    (* add A *)
+      SETNP   = 241;   SETPO    = SETNP;                   (* add B *)
+      SETL    = 242;   SETNGE   = SETL;                    (* add C *)
+      SETGE   = 243;   SETNL    = SETGE;                   (* add D *)
+      SETLE   = 244;   SETNG    = SETLE;                   (* add E *)
+      SETG    = 245;   SETNLE   = SETG;                    (* add F *)
+
+      SGDT    = 250;
+      SIDT    = 251;
+      SHLD    = 252;
+      SHRD    = 253;
+      SLDT    = 255;
+      SMSW    = 256;
+      STC     = 257;
+      STD     = 258;
+      STI     = 259;
+      STOS    = 260;
+      STR     = 263;
+      SUB     = 264;
+
+      TEST    = 270;
+      VERR    = 271;
+      VERW    = 272;
+      WAIT    = 273;
+      WBINVD  = 274;
+      WRMSR   = 275;
+
+      XADD    = 280;
+      XCHG    = 281;
+      XLAT    = 282;
+      XOR     = 283;
+
+      F2XM1   = 300;
+      FABS    = 301;
+      FADD    = 302;
+      FIADD   = 700;
+      FADDP   = 303;
+      FBLD    = 304;
+      FBSTP   = 305;
+      FCHS    = 306;
+      FCLEX   = 307;
+      FNCLEX  = 701;
+      FCOM    = 308;
+      FCOMP   = 309;
+      FCOMPP  = 310;
+      FCOS    = 311;
+      FDECSTP = 312;
+      FDIV    = 313;
+      FDIVP   = 314;
+      FIDIV   = 315;
+      FDIVR   = 316;
+      FDIVRP  = 317;
+      FIDIVR  = 318;
+      FFREE   = 319;
+      FICOM   = 320;
+      FICOMP  = 321;
+      FILD    = 322;
+      FINCSTP = 323;
+      FINIT   = 324;
+      FNINIT  = 702;
+      FIST    = 325;
+      FISTP   = 326;
+      FLD     = 327;
+
+      (* keep the following lines in order *)
+      FLDCONST   = 330;
+      FLD1    = 330;   (* add 0, const = 1.0 *)
+      FLDL2T  = 331;   (* add 1, const = log10 2 *)
+      FLDL2E  = 332;   (* add 2, const = log2 e *)
+      FLDPI   = 333;   (* add 3, const = pi *)
+      FLDLG2  = 334;   (* add 4, const = log10 2 *)
+      FLDLN2  = 335;   (* add 5, const = log 2 *)
+      FLDZ    = 336;   (* add 6, const = 0.0 *)
+
+      FLDCW   = 340;   (* XXX is it FLDCW or FNLDCW? *)
+      FLDENV  = 341;
+      FMUL    = 342;
+      FMULP   = 343;
+      FIMUL   = 344;
+      FNOP    = 345;
+      FPATAN  = 346;
+      FPREM   = 347;
+      FPREM1  = 348;
+      FPTAN   = 349;
+      FRNDINT = 350;
+      FRSTOR  = 351;
+      FSAVE   = 352;
+      FNSAVE  = 703;
+      FSCALE  = 353;
+      FSIN    = 354;
+      FSINCOS = 355;
+      FSQRT   = 356;
+      FST     = 357;
+      FSTP    = 358;
+      FSTCW   = 359;
+      FNSTCW  = 704;
+      FSTENV  = 360;
+      FNSTENV = 705;
+      FSTSW   = 361;
+      FNSTSW  = 706;
+      FSUB    = 362;
+      FSUBP   = 363;
+      FISUB   = 364;
+      FSUBR   = 365;
+      FSUBRP  = 366;
+      FISUBR  = 367;
+      FTST    = 368;
+      FUCOM   = 369;
+      FUCOMP  = 370;
+      FUCOMPP = 371;
+      FWAIT   = 372;
+      FXAM    = 373;
+      FXCH    = 374;
+      FXTRACT = 375;
+      FYL2X   = 376;
+      FYL2XP1 = 377;
+
+      SYSCALL = 707;
+
+   TYPE
+      RangeRec =
+	 RECORD
+	    min, max: INTEGER;
+	 END;
+
+   VAR
+      JMPRange, JCCRange, CALLRange: RangeRec;
+
+END AMD64Instructions.
