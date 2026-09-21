@@ -1,4 +1,5 @@
-BinDir :=		$(shell pwd)/../../../bin
+ARCH ?=			i386
+BinDir :=		$(shell pwd)/../../../$(ARCH)/bin
 InstallBinDir :=	$(BinDir)
 Targets :=		tof2elf
 InstalledTargets :=	$(patsubst %,$(InstallBinDir)/%,$(Targets))
