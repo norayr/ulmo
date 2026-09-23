@@ -2128,10 +2128,28 @@ MODULE SysStorage;
       (* it is important that FaultHandler does not invoke
          the garbage collection (see PROC AssureWorkingSize)
       *)
-      IF ~initCompleted OR (lock & (criticalRegionNestLevel # 0)) THEN
-         (* main stack too small or unfinished garbage collection *)
+      IF ~initCompleted THEN
+         (* main stack too small — no runtime state to work with yet *)
          PanicExit;
       END;
+      (* Note on the removed `lock & criticalRegionNestLevel # 0` guard:
+       * historically this bailed to PanicExit whenever a fault arrived
+       * mid-GC.  Audit of the fault-servicing path shows every call it
+       * makes is heap-allocation-free:
+       *   Memory.GetStatus       — pure tree lookup
+       *   Disciplines.Seek       — linked-list walk
+       *   Memory.ExtendRegion    — calls ExtendBlock (freelist bookkeeping
+       *                            only, no NEW) + AddBlockToRegion (pointer
+       *                            splice, no NEW)
+       *   SysMemory.Map          — mmap(2) syscall
+       *   AssureWorkingSize      — no-op when criticalRegionNestLevel > 0
+       * So it is safe to service a stack-extension fault even while GC
+       * holds the storage lock.  The old guard was fatal on AMD64 because
+       * 8-byte pointers roughly double GC frame size, making it very likely
+       * to page-fault beyond ProbeStackSize's 8 KB headroom mid-collection.
+       * On i386 the guard was rarely tripped in practice because the
+       * inline CMPXCHG8B lock-free NEW fast path allowed most small-object
+       * allocations to complete without ever holding `lock`. *)
       WITH event: SysSignals.Event DO
          IF event.fixed THEN RETURN END; (* somebody else has done it *)
          IF event.sigcode # maperr THEN RETURN END;
