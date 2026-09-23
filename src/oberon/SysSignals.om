@@ -111,6 +111,13 @@ MODULE SysSignals;
       text: ARRAY allsigs OF Events.Message;
       name: ARRAY allsigs OF Name;
       eventType: ARRAY nsigs OF EventType;
+      (* Preallocated event objects per signal.  SignalHandler runs on the
+       * signal alt stack and cannot safely call NEW when the interrupted
+       * code was inside SysStorage's GC critical region (the AMD64 port has
+       * no i386-equivalent inline lock-free NEW fast path).  Preallocating
+       * lets the handler reuse a live-but-idle event per signal without
+       * touching the storage allocator. *)
+      preallocEvents: ARRAY nsigs OF Event;
 
 
    CONST
@@ -160,13 +167,22 @@ MODULE SysSignals;
 	                       old, error) THEN
 	 SysErrors.Raise(NIL, error, Sys.sigaction, text[signo]);
       END;
-      NEW(sigevent);
-      IF (signo >= 1) & (signo < nsigs) THEN
+      (* Prefer a preallocated per-signal event to avoid calling NEW on the
+       * signal alt stack.  If the preallocated slot is missing (before Init
+       * finishes, or unknown signo) fall back to NEW. *)
+      IF (signo >= 1) & (signo < nsigs) & (preallocEvents[signo] # NIL) THEN
+	 sigevent := preallocEvents[signo];
 	 sigevent.type := eventType[signo];
 	 sigevent.message := text[signo];
       ELSE
-	 sigevent.type := unknownSignal;
-	 sigevent.message := "unknown signal";
+	 NEW(sigevent);
+	 IF (signo >= 1) & (signo < nsigs) THEN
+	    sigevent.type := eventType[signo];
+	    sigevent.message := text[signo];
+	 ELSE
+	    sigevent.type := unknownSignal;
+	    sigevent.message := "unknown signal";
+	 END;
       END;
       sigevent.signo := signo;
       IF siginfo # 0 THEN
@@ -243,6 +259,7 @@ MODULE SysSignals;
       WHILE sig < nsigs DO
 	 IF (sig <= MAX(SET)) & (sig IN voidSignals) THEN
 	    eventType[sig] := NIL;
+	    preallocEvents[sig] := NIL;
 	 ELSE
 	    NEW(eventType[sig]);
 	    Services.Init(eventType[sig], eventTypeType);
@@ -266,6 +283,13 @@ MODULE SysSignals;
 	       END;
 	    END;
 	    Events.Manager(eventType[sig], SigManager);
+	    (* Preallocate a live event for this signal so SignalHandler
+	     * does not have to call NEW on the alt stack.  The `fixed`,
+	     * `signo`, `sigcode`, `addr` fields are (re)written on every
+	     * delivery; `type` and `message` are also reset then. *)
+	    NEW(preallocEvents[sig]);
+	    preallocEvents[sig].type := eventType[sig];
+	    preallocEvents[sig].signo := sig;
 	 END;
 	 INC(sig);
       END;
