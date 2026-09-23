@@ -155,6 +155,13 @@ MODULE Events;
       queue: Queue;
       lock: BOOLEAN;		(* lock critical operations *)
       psys: PrioritySystem;	(* current priority system *)
+      preallocQueue: Queue;
+	 (* single reusable Queue node for AddToQueue when it fires from the
+	  * signal alt stack during sysstorage's gc.  Ulm is single-threaded
+	  * so re-entry of Raise from a signal handler is bounded to one
+	  * pending event.  Consumed under signalsBlocked so refill is safe. *)
+      preallocError: ErrorEvent;
+	 (* likewise for Error's own NEW *)
 
    PROCEDURE ^ Define(VAR type: EventType);
    PROCEDURE ^ SetPriority(type: EventType; priority: Priority);
@@ -176,7 +183,12 @@ MODULE Events;
    PROCEDURE Error(code: SHORTINT);
       VAR event: ErrorEvent;
    BEGIN
-      NEW(event); event.type := error;
+      IF preallocError # NIL THEN
+	 event := preallocError;
+      ELSE
+	 NEW(event);
+      END;
+      event.type := error;
       event.message := errormsg[code];
       event.errorcode := code;
       Raise(event);
@@ -325,10 +337,19 @@ MODULE Events;
    PROCEDURE WorkupQueue;
       VAR
 	 ptr: Event;
+	 qptr: Queue;
    BEGIN
       WHILE (queue # NIL) & (queue.priority > psys.currentPriority) DO
 	 IF SYS.TAS(lock) THEN RETURN END;
-	 ptr := queue.head; queue := queue.next;
+	 qptr := queue;
+	 ptr := qptr.head; queue := qptr.next;
+	 (* Recycle the queue node back into preallocQueue if the slot is
+	  * empty, so a subsequent signal-handler AddToQueue can reuse it
+	  * without calling NEW. *)
+	 IF preallocQueue = NIL THEN
+	    qptr.next := NIL; qptr.head := NIL; qptr.tail := NIL;
+	    preallocQueue := qptr;
+	 END;
 	 lock := FALSE;
 	 WHILE ptr # NIL DO
 	    CallHandlers(ptr);
@@ -381,7 +402,12 @@ MODULE Events;
 	    ptr.tail.next := event;
 	    ptr.tail := event;
 	 ELSE
-	    NEW(ptr);
+	    IF preallocQueue # NIL THEN
+	       ptr := preallocQueue;
+	       preallocQueue := NIL;
+	    ELSE
+	       NEW(ptr);
+	    END;
 	    ptr.priority := priority;
 	    ptr.head := event; ptr.tail := event;
 	    IF prev = NIL THEN
@@ -545,4 +571,6 @@ BEGIN
    lock := FALSE;
 
    InitErrorHandling;
+   NEW(preallocQueue);
+   NEW(preallocError);
 END Events.

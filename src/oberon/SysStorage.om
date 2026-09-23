@@ -596,6 +596,13 @@ MODULE SysStorage;
          (* SysStorage ID for Disciplines used by the SEGV-Handler *)
       HeaderID: Disciplines.Identifier;
          (* SysStorage ID for Disciplines used by Dispose *)
+      preallocAttach: Attach;
+         (* single reusable Attach used by NewRegion / AllocateWithTag when
+          * the GC lock is held.  Without this, coroutine stacks allocated
+          * mid-GC never get a Discipline registered, so FaultHandler cannot
+          * later grow them via Disciplines.Seek and the process aborts on
+          * the next stack overflow.  Ulm is single-threaded, so at most one
+          * lock-held allocation is in flight at a time. *)
       pageSize: Size;
          (* this is the pagesize of our system; this may be different
             for different invocations of our program but remains constant
@@ -1170,10 +1177,19 @@ MODULE SysStorage;
                END;
                IF ismapped THEN
                   p.size := size;
-                  (* Skip Disciplines.Add during GC (lock=TRUE) to avoid
-                     AllocateWithTag while criticalRegionNestLevel>0. *)
+                  (* If GC lock is held we cannot NEW an Attach (would recurse
+                     into AllocateWithTag) but skipping the Discipline entirely
+                     leaves the region unrecoverable for FaultHandler.  Use the
+                     preallocated singleton in that case. *)
                   IF ~lock THEN
-                     NEW(attach); attach.id := HeaderID;
+                     NEW(attach);
+                  ELSIF preallocAttach # NIL THEN
+                     attach := preallocAttach; preallocAttach := NIL;
+                  ELSE
+                     attach := NIL;
+                  END;
+                  IF attach # NIL THEN
+                     attach.id := HeaderID;
                      attach.addr := SYS.VAL(Address, p);
                      Disciplines.Add(mregion, attach);
                   END;
@@ -1276,10 +1292,19 @@ MODULE SysStorage;
             IF mode = 0 THEN    (* new fixed region *)
                INC(storage.allocated, size);
             ELSE                (* new stack region *)
-               (* Skip Disciplines tracking when GC lock is held to avoid
-                  tagged AllocateWithTag call while criticalRegionNestLevel>0. *)
+               (* If GC lock is held we cannot NEW an Attach (would recurse
+                  into AllocateWithTag) but skipping the Discipline entirely
+                  leaves the region unrecoverable for FaultHandler.  Use the
+                  preallocated singleton in that case. *)
                IF ~lock THEN
-                  NEW(attach); attach.id := RegionID;
+                  NEW(attach);
+               ELSIF preallocAttach # NIL THEN
+                  attach := preallocAttach; preallocAttach := NIL;
+               ELSE
+                  attach := NIL;
+               END;
+               IF attach # NIL THEN
+                  attach.id := RegionID;
                   attach.addr := SYS.VAL(Address, region);
                   Disciplines.Add(mregion, attach);
                END;
@@ -2512,6 +2537,7 @@ MODULE SysStorage;
       *)
       RegionID := Disciplines.Unique();
       HeaderID := Disciplines.Unique();
+      NEW(preallocAttach);
 
       (* set pagesize value *)
       pageSize := SysMemory.GetPageSize();

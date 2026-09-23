@@ -197,6 +197,12 @@ MODULE Memory;
       log2pagesize: SizeIndex; (* the appropiate size index *)
       root: MemoryBlock; (* the memory block without buddies and parents *)
       freelist: FreeList; (* list of free blocks *)
+      preallocError: ErrorEvent;
+	 (* single reusable ErrorEvent for use during signal delivery.
+	  * Memory.Error is called from ExtendRegion/AllocateRegion which
+	  * may run on the signal alt stack while sysstorage's gc holds the
+	  * heap lock; on amd64 there is no lock-free new fast path so a
+	  * fresh NEW(event) would deadlock in AllocateWithTag. *)
 
    (* ===== error handling ================================================= *)
 
@@ -221,7 +227,11 @@ MODULE Memory;
       VAR
 	 event: ErrorEvent;
    BEGIN
-      NEW(event);
+      IF preallocError # NIL THEN
+	 event := preallocError;
+      ELSE
+	 NEW(event);
+      END;
       event.type := error;
       event.message := errormsg[code];
       event.errorcode := code;
@@ -1276,4 +1286,5 @@ BEGIN
    pageSize := 0;
    InitFreeList;
    InitRoot(root);
+   NEW(preallocError);
 END Memory.

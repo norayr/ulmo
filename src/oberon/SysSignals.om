@@ -266,7 +266,14 @@ MODULE SysSignals;
 	    Events.Init(eventType[sig]);
 	    eventType[sig].signo := sig;
 	    IF (sig <= MAX(SET)) & (sig IN memSignals) THEN
-	       Events.SetPriority(eventType[sig], Priorities.storage);
+	       (* Must be STRICTLY greater than Priorities.storage so a
+	        * SEGV raised during gc — which itself runs at storage —
+	        * is dispatched synchronously by Events.Raise instead of
+	        * being enqueued for later.  If it were enqueued, the
+	        * fault would not get fixed before sigreturn resumed the
+	        * faulting instruction, which would fault again ad infinitum.
+	        * rtserrors is the next tier above storage in Priorities.om. *)
+	       Events.SetPriority(eventType[sig], Priorities.rtserrors);
 	    ELSIF (sig <= MAX(SET)) & (sig IN hardSignals) THEN
 	       Events.SetPriority(eventType[sig], Priorities.fatalsignals);
 	    ELSE
