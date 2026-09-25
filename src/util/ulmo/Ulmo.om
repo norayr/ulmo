@@ -19,7 +19,7 @@
 MODULE Ulmo;
 
    IMPORT CL := UnixArguments, Architectures, CompilerDatabases,
-      CompilerKeys, CompilerObjects, Compilers, ConstStrings,
+      CompilerKeys, CompilerLogs, CompilerObjects, Compilers, ConstStrings,
       FilesystemDB, I386OberonBuiltIns, AMD64OberonBuiltIns, Listers,
       ModularizedStructures, OberonBuiltIns, OberonCompiler,
       OberonI386, OberonAMD64, OberonParser,
@@ -39,6 +39,8 @@ MODULE Ulmo;
       flag: CHAR;
       srcdir: ARRAY 1024 OF CHAR;
       sourcefile: ARRAY 1024 OF CHAR;
+      levelstr: ARRAY 16 OF CHAR;
+      loglevel, i: INTEGER;
 
    (* ===================================================================== *)
    (* Path helpers                                                           *)
@@ -169,6 +171,7 @@ MODULE Ulmo;
 
 BEGIN
    NEW(errors); RelatedEvents.QueueEvents(errors);
+   loglevel := -1;
 
    (* Obtain the I386 architecture object.  OberonI386 registers it in its
       module initialisation body, so it is available via Architectures.GetArch.
@@ -185,7 +188,7 @@ BEGIN
    RelatedEvents.Forward(db, errors);
 
    (* Parse command-line arguments — first pass: look for -arch before other flags *)
-   CL.Init("[-arch i386|amd64] [-I srcdir]... sourcefile [sourcefile...]");
+   CL.Init("[-arch i386|amd64] [-I srcdir]... [-v loglevel] sourcefile [sourcefile...]");
    WHILE CL.GetFlag(flag) DO
       CASE flag OF
       | "a":
@@ -205,6 +208,17 @@ BEGIN
       | "I":
             CL.FetchString(srcdir);
             FilesystemDB.AddSrcDir(db, srcdir);
+      | "v":
+            (* -v level: log the loader's decisions (why an object is
+               reused, recompiled or considered out of date) to stderr;
+               see ObjectLoader.log* for the levels, 6 = up-to-date checks *)
+            CL.FetchString(levelstr);
+            loglevel := 0; i := 0;
+            WHILE (levelstr[i] >= "0") & (levelstr[i] <= "9") DO
+               loglevel := loglevel * 10 + ORD(levelstr[i]) - ORD("0");
+               INC(i);
+            END;
+            IF (i = 0) OR (levelstr[i] # 0X) THEN CL.Usage END;
       ELSE
          CL.Usage;
       END;
@@ -225,6 +239,10 @@ BEGIN
    CompilerObjects.CreateModuleTable(context.mtab);
    context.db := db;
    context.log := NIL;
+   IF loglevel >= 0 THEN
+      CompilerLogs.Create(context.log, Streams.stderr);
+      CompilerLogs.SetLogLevel(context.log, loglevel);
+   END;
    (* Cache public objects and arch-dependent private objects; this mirrors
       the cachemode used by OberonLoader.
    *)

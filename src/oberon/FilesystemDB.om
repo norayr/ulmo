@@ -123,6 +123,7 @@ MODULE FilesystemDB;
                         type: CompilerObjects.ObjectType;
                         arch: Architectures.Architecture;
                         dirs: DirList;
+                        keys: CompilerKeys.Set;
                         VAR header: CompilerObjects.Header;
                         VAR text: PersistentTexts.Text;
                         readText: BOOLEAN) : BOOLEAN;
@@ -133,7 +134,15 @@ MODULE FilesystemDB;
       d := dirs;
       WHILE d # NIL DO
          MakeFilename(filename, d.dir, modname, type, arch);
-         IF TryReadFile(filename, header, text, readText) THEN
+         (* like CDB, accept only objects whose fingerprints agree with
+            the keys the loader has already committed to; a stale object
+            (e.g. compiled from an older source) is skipped, which makes
+            the loader recompile it from source
+         *)
+         IF TryReadFile(filename, header, text, readText) &
+               ((keys = NIL) OR
+                CompilerKeys.Compatible(keys, header.dependencies) &
+                CompilerKeys.CompatibleWith(header.key, keys)) THEN
             RETURN TRUE
          END;
          d := d.next;
@@ -156,7 +165,7 @@ MODULE FilesystemDB;
    BEGIN
       WITH dbase: Database DO
          RETURN SearchDirs(modname, type, arch, dbase.objdirs,
-                           header, text, TRUE)
+                           keys, header, text, TRUE)
       END;
    END Lookup;
 
@@ -171,7 +180,7 @@ MODULE FilesystemDB;
    BEGIN
       WITH dbase: Database DO
          RETURN SearchDirs(modname, type, arch, dbase.objdirs,
-                           header, text, FALSE)
+                           keys, header, text, FALSE)
       END;
    END LookupHeader;
 
