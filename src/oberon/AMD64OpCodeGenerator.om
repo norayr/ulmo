@@ -709,6 +709,7 @@ MODULE AMD64OpCodeGenerator; (* Christian Ehrhardt, AMD64 adaptation *)
          arr : ARRAY 20 OF BYTE;
          (* REX prefix fields *)
          rexByte : INTEGER;   (* full rex = 40H OR rexByte *)
+         rexPending : BOOLEAN; (* REX byte computed but not yet emitted *)
          rexW, rexR, rexX, rexB : INTEGER;
          (* saved rm/reg info for REX computation *)
          rmBaseReg, rmIndexReg, regOpReg : Register;
@@ -758,7 +759,11 @@ MODULE AMD64OpCodeGenerator; (* Christian Ehrhardt, AMD64 adaptation *)
             END;
          | Op.immediate: (* Immediate data. The second size should
                           * be 0 for both if not a memory pointer *)
-            IF (fimms # imms) OR (fmems # mems) THEN
+            IF ((fimms # imms) &
+                ~((imms = 8) & (fimms = 4) & Op.NeedReloc (ops[i]))) OR
+               (fmems # mems) THEN
+               (* the exception: a relocated 64-bit address encoded
+                  as sign-extended imm32, see CheckOpMatch *)
                Error (33);
                RETURN FALSE;
             END;
@@ -941,10 +946,14 @@ MODULE AMD64OpCodeGenerator; (* Christian Ehrhardt, AMD64 adaptation *)
       END;
 
       rexByte := rexW * 8 + rexR * 4 + rexX * 2 + rexB;
-      IF rexByte # 0 THEN
-         code.code[code.len] := SYSTEM.VAL(BYTE, SHORT(40H + rexByte));
-         INC(code.len);
-      END;
+      (* The REX byte must directly precede the opcode: any legacy prefix
+       * (REP F3, operand-size 66, address-size 67, segment, LOCK) that
+       * sits between REX and the opcode makes the CPU ignore REX.  So we
+       * defer it until the format loop reaches the first element that is
+       * not a ?X? prefix marker.  Previously REX was emitted first, which
+       * turned e.g. `rep stosq` (F3 48 AB) into `48 F3 AB` = `rep stosd`,
+       * clearing/copying only half the intended bytes. *)
+      rexPending := rexByte # 0;
 
       (* --- Now emit the instruction bytes --- *)
       i := 0;
@@ -952,6 +961,11 @@ MODULE AMD64OpCodeGenerator; (* Christian Ehrhardt, AMD64 adaptation *)
       regpending := FALSE;
       memop := NIL;
       LOOP
+         IF rexPending & (fmt.fmt[i] # "?") THEN
+            code.code[code.len] := SYSTEM.VAL(BYTE, SHORT(40H + rexByte));
+            INC(code.len);
+            rexPending := FALSE;
+         END;
          IF fmt.fmt[i] = 0X THEN
             ret := TRUE;
             EXIT;
@@ -1262,6 +1276,25 @@ MODULE AMD64OpCodeGenerator; (* Christian Ehrhardt, AMD64 adaptation *)
       CASE loc OF
       | Op.immediate:
          ok := Op.Sizes (op, immsz, memsz); ASSERT (ok);
+	 IF (iop.type = timm) & (immsz = 8) THEN
+	    IF iop.immregsz.opm # 0 THEN
+	       (* Operand-sized immediate (iop) with a 64-bit operand:
+		* x86-64 has no imm64 encoding for 81/F7/69/68, only
+		* imm32 sign-extended.  Matching here would emit 8 bytes
+		* after a 4-byte-immediate opcode; the CPU then executes
+		* the 4 extra bytes as `add %al,(%rax)', silently
+		* corrupting memory.  Refuse: the imm32 (id) variants or
+		* a register load must be used instead. *)
+	       RETURN FALSE;
+	    ELSIF Op.NeedReloc (op) & (iop.immregsz.base = 4) &
+		  (iop.immregsz.addrm = 0) THEN
+	       (* 8-byte immediate that is a relocated address: with the
+		* small code model every absolute address fits into a
+		* sign-extended imm32, so it may use the imm32 (id) form,
+		* exactly as Op.immediateDyn operands already do. *)
+	       RETURN TRUE;
+	    END;
+	 END;
 	 CASE iop.type OF
          | trel, timm, tmoffs:
 	    (* Note: The second size is only used for tmoffs and should

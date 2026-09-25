@@ -444,7 +444,13 @@ MODULE AMD64Operands; (* AMD64 port of I386Operands — addresses are 8 bytes *)
       ASSERT ((op # NIL) & (op.data # NIL));
       ASSERT (LEN(arr) >= len);
       ASSERT (((op.loc = immediate) & (len = op.immsz)) OR
+	      ((op.loc = immediate) & (op.immsz = 8) & (len = 4) &
+	       (op.reloc # NIL) & (op.reloc.type # Relocations.noReloc)) OR
 	      ((op.loc = immediateDyn) & (len >= op.immsz)));
+	 (* the second case: a relocated 64-bit address encoded as a
+	    sign-extended imm32 (small code model), see CheckOpMatch
+	    in AMD64OpCodeGenerator; the value is only the relocation
+	    addend, so its low 4 bytes are the full value *)
       CASE op.data.kind OF
       | integerConst:
 	 i := 0; val := op.data.intval;
