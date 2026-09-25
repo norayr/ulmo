@@ -8,6 +8,11 @@
 # DESTDIR defaults to the directory containing this script.
 # The tools are installed under DESTDIR/<arch>/bin/ and DESTDIR/<arch>/lib/.
 #
+# Sources live in three layers under src/, each archived into its own library:
+#   src/rtl       run time system, linked into every program  -> lib/librtl.a
+#   src/lib       general library                             -> lib/libo.a
+#   src/compiler  the compiler                                -> lib/libcompiler.a
+#
 # For a full build:
 #   build.sh i386  /opt/oberon
 #   build.sh amd64 /opt/oberon
@@ -35,7 +40,9 @@ if [ "$ARCH" != "i386" ] && [ "$ARCH" != "amd64" ]; then
 fi
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-SRCDIR="$ROOT/src/oberon"
+SRCROOT="$ROOT/src"
+RTLDIR="$SRCROOT/rtl"
+COMPDIR="$SRCROOT/compiler"
 ULMODIR="$ROOT/src/util/ulmo"
 OBLINKDIR="$ROOT/src/util/oblink"
 GENOBRTSDIR="$ROOT/src/util/genobrts"
@@ -59,10 +66,9 @@ build_ulmoc() {
     local TMPD
     TMPD=$(mktemp -d /tmp/ulmo-XXXXXX)
     (cd "$TMPD" && "$@" \
-        -I "$SRCDIR" \
         -m Ulmo \
         -L "$LIBDIR" \
-        "$SRCDIR/FilesystemDB.om" \
+        "$COMPDIR/FilesystemDB.om" \
         "$ULMODIR/Ulmo.om" && \
      cp Ulmo "$dest")
     rm -rf "$TMPD"
@@ -111,7 +117,8 @@ cp "$OBLINKDIR/oberon-${ARCH}.ld" "$BINDIR/oberon-${ARCH}.ld"
 
 # ── step 5: ulmo (shell script, bake in BINDIR+ARCH) ─────────────────────────
 echo "==> installing ulmo (ARCH=$ARCH)"
-"$ROOT/substparams" "BINDIR=$BINDIR" "ARCH=$ARCH" <"$ULMODIR/ulmo.sh" >"$BINDIR/ulmo"
+"$ROOT/substparams" "BINDIR=$BINDIR" "ARCH=$ARCH" "SRCROOT=$SRCROOT" \
+    <"$ULMODIR/ulmo.sh" >"$BINDIR/ulmo"
 chmod 755 "$BINDIR/ulmo"
 
 # ── arch-specific steps ───────────────────────────────────────────────────────
@@ -126,16 +133,15 @@ if [ "$ARCH" = "i386" ]; then
     cp -f "$BOOTSTRAP/obtofgen" "$BINDIR/obtofgen"
     chmod 755 "$BINDIR/obtofgen"
 
-    echo "==> [i386] building libo.a"
-    "$ULMODIR/build-libo.sh" "$BINDIR" "$SRCDIR" "$LIBDIR" I386
+    echo "==> [i386] building libraries"
+    "$ULMODIR/build-libo.sh" "$BINDIR" "$SRCROOT" "$LIBDIR" I386
 
     echo "==> [i386] building obtofgen from source"
     TMPD=$(mktemp -d /tmp/ulmo-tofgen-XXXXXX)
     (cd "$TMPD" && "$BINDIR/ulmo" \
-        -I "$SRCDIR" \
         -m OberonI386TransportableObjectFormatGenerator \
         -L "$LIBDIR" \
-        "$SRCDIR/OberonI386TransportableObjectFormatGenerator.om" && \
+        "$COMPDIR/OberonI386TransportableObjectFormatGenerator.om" && \
      mv OberonI386TransportableObjectFormatGenerator "$BINDIR/obtofgen")
     rm -rf "$TMPD"
     chmod 755 "$BINDIR/obtofgen"
@@ -167,7 +173,9 @@ else
 
     # ── amd64: requires i386 install ──────────────────────────────────────────
     [ -x "$I386BIN/ulmoc" ] || die "i386 ulmoc not found at $I386BIN/ulmoc; run 'build.sh i386' first"
-    [ -f "$I386LIB/libo.a" ] || die "i386 libo.a not found at $I386LIB/libo.a; run 'build.sh i386' first"
+    for lib in librtl.a libo.a libcompiler.a; do
+        [ -f "$I386LIB/$lib" ] || die "i386 $lib not found in $I386LIB; run 'build.sh i386' first"
+    done
 
     echo "==> [amd64] installing ulmoc (i386 cross-compiler for AMD64)"
     cp -f "$I386BIN/ulmoc" "$BINDIR/ulmoc"
@@ -176,16 +184,15 @@ else
     echo "==> [amd64] building obtofgen (AMD64 tof generator, runs as i386)"
     TMPD=$(mktemp -d /tmp/ulmo-tofgen-XXXXXX)
     (cd "$TMPD" && "$I386BIN/ulmo" \
-        -I "$SRCDIR" \
         -m OberonAMD64TransportableObjectFormatGenerator \
         -L "$I386LIB" \
-        "$SRCDIR/OberonAMD64TransportableObjectFormatGenerator.om" && \
+        "$COMPDIR/OberonAMD64TransportableObjectFormatGenerator.om" && \
      mv OberonAMD64TransportableObjectFormatGenerator "$BINDIR/obtofgen")
     rm -rf "$TMPD"
     chmod 755 "$BINDIR/obtofgen"
 
-    echo "==> [amd64] building libo.a"
-    "$ULMODIR/build-libo.sh" "$BINDIR" "$SRCDIR" "$LIBDIR" AMD64
+    echo "==> [amd64] building libraries"
+    "$ULMODIR/build-libo.sh" "$BINDIR" "$SRCROOT" "$LIBDIR" AMD64
 
     # Two-stage self-hosting: stage1 uses the i386 cross-compiler targeting AMD64;
     # stage2 uses the native AMD64 stage1.  Both use the same AMD64 backend code,
@@ -199,8 +206,8 @@ else
     # Use if/then (not case $?) so set -e doesn't abort on signal-killed ulmoc.
     TESTTMPD=$(mktemp -d)
     amd64_runnable=0
-    if (cd "$TESTTMPD" && "$BINDIR/ulmoc" -a amd64 -I "$SRCDIR" \
-            "$SRCDIR/Coroutines.om") >/dev/null 2>&1; then
+    if (cd "$TESTTMPD" && "$BINDIR/ulmoc" -a amd64 -I "$RTLDIR" \
+            "$RTLDIR/Coroutines.om") >/dev/null 2>&1; then
         amd64_runnable=1
     fi
     rm -rf "$TESTTMPD"
@@ -231,6 +238,6 @@ fi
 echo ""
 echo "Build complete: ARCH=$ARCH  DESTDIR=$DESTDIR"
 echo "  binaries: $BINDIR"
-echo "  library:  $LIBDIR/libo.a"
+echo "  libraries: $LIBDIR/librtl.a $LIBDIR/libo.a $LIBDIR/libcompiler.a"
 echo "  ulmoc:    $(file "$BINDIR/ulmoc" | sed 's/.*: //')"
 echo "  md5sum:   $(md5sum "$BINDIR/ulmoc" | awk '{print $1}')"

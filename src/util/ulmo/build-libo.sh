@@ -1,7 +1,15 @@
 #!/bin/sh
-# build-libo.sh -- compile all library modules from source and archive into libo.a
+# build-libo.sh -- compile all library modules from source and archive them
 #
-# Usage: build-libo.sh BINDIR SRCDIR LIBDIR [OBJARCH [TOFGEN_BINDIR]]
+# Usage: build-libo.sh BINDIR SRCROOT LIBDIR [OBJARCH [TOFGEN_BINDIR]]
+#
+# SRCROOT contains the three source layers, each archived separately:
+#   SRCROOT/rtl       run time system: modules linked into every program
+#                     (SRCROOT/rtl/amd64 holds AMD64-specific versions)
+#                     -> LIBDIR/librtl.a
+#   SRCROOT/lib       general library                  -> LIBDIR/libo.a
+#   SRCROOT/compiler  the compiler and its database    -> LIBDIR/libcompiler.a
+# rtl imports only rtl, lib imports rtl and lib, compiler may import all.
 #
 # OBJARCH is the uppercase arch tag used in .obj filenames (I386 or AMD64).
 # Defaults to I386.
@@ -10,24 +18,24 @@
 # Defaults to BINDIR. For AMD64 builds, pass the amd64 bin dir here since
 # amd64/bin/obtofgen knows AMD64OberonResults while i386/bin/obtofgen does not.
 #
-# Compiles every .om file in SRCDIR using BINDIR/ulmoc, converts each
-# mod-OBJARCH.obj to a .o via TOFGEN_BINDIR/obtofgen + TOFGEN_BINDIR/tof2elf,
-# and archives all .o files into LIBDIR/libo.a.
+# Compiles every .om file of the three layers using BINDIR/ulmoc, converts
+# each mod-OBJARCH.obj to a .o via TOFGEN_BINDIR/obtofgen + TOFGEN_BINDIR/tof2elf,
+# and archives the .o files of each layer.
 #
-# Runs in a temporary directory; all output goes to LIBDIR/libo.a.
+# Runs in a temporary directory; all output goes to LIBDIR.
 # Module compilation failures are reported but do not abort the build
 # (some architecture-specific or optional modules may not compile).
 
 set -e
 set -x
 BINDIR="$1"
-SRCDIR="$2"
+SRCROOT="$2"
 LIBDIR="$3"
 OBJARCH="${4:-I386}"
 TOFGEN_BINDIR="${5:-$BINDIR}"
 
-if [ -z "$BINDIR" ] || [ -z "$SRCDIR" ] || [ -z "$LIBDIR" ]; then
-    echo "Usage: $0 BINDIR SRCDIR LIBDIR [OBJARCH [TOFGEN_BINDIR]]" >&2
+if [ -z "$BINDIR" ] || [ -z "$SRCROOT" ] || [ -z "$LIBDIR" ]; then
+    echo "Usage: $0 BINDIR SRCROOT LIBDIR [OBJARCH [TOFGEN_BINDIR]]" >&2
     exit 1
 fi
 
@@ -42,11 +50,20 @@ for tool in "$ULMO_OB" "$OBTOFGEN" "$TOF2ELF"; do
     fi
 done
 
+LAYERS="rtl lib compiler"
+INCS=""
+ALLSRC=""
+for layer in $LAYERS; do
+    [ -d "$SRCROOT/$layer" ] || { echo "build-libo: missing $SRCROOT/$layer" >&2; exit 1; }
+    INCS="$INCS -I $SRCROOT/$layer"
+    ALLSRC="$ALLSRC $SRCROOT/$layer/*.om"
+done
+
 TMPDIR=$(mktemp -d /tmp/ulmo-lib-XXXXXX)
 trap "rm -rf $TMPDIR" 0 1 2 15
 
-echo "build-libo: compiling library modules from $SRCDIR ..."
-echo "build-libo: output: $LIBDIR/libo.a"
+echo "build-libo: compiling library modules from $SRCROOT ($LAYERS) ..."
+echo "build-libo: output: $LIBDIR"
 echo "build-libo: build dir: $TMPDIR"
 
 cd "$TMPDIR"
@@ -69,7 +86,7 @@ if [ "$OBJARCH" != "I386" ]; then
     # SysSignals) are compiled later.  With per-module invocations the
     # Disciplines.Add cache is lost between processes, causing size=0 for
     # imported record types whose private fields are stripped from the .def file.
-    ARCHSRCDIR="$SRCDIR/$(echo $OBJARCH | tr A-Z a-z)"
+    ARCHSRCDIR="$SRCROOT/rtl/$(echo $OBJARCH | tr A-Z a-z)"
     # Step 1: Pre-compile stub/no-op modules that need to override the batch
     # BEFORE the batch runs, so the batch reuses them.  Only pre-compile modules
     # that do NOT import Sys (to avoid poisoning the tmpdir with wrong Sys values).
@@ -80,8 +97,8 @@ if [ "$OBJARCH" != "I386" ]; then
     SYSONLY_TMP=$(mktemp -d)
     cp "$ARCHSRCDIR/Sys.od" "$SYSONLY_TMP/" 2>/dev/null || true
     cp "$ARCHSRCDIR/Sys.om" "$SYSONLY_TMP/" 2>/dev/null || true
-    total=$(ls "$SRCDIR"/*.om 2>/dev/null | wc -l)
-    if ! "$ULMO_OB" $ARCHFLAG -I "$SYSONLY_TMP" -I "$SRCDIR" "$SRCDIR"/*.om >/dev/null 2>&1; then
+    total=$(ls $ALLSRC 2>/dev/null | wc -l)
+    if ! "$ULMO_OB" $ARCHFLAG -I "$SYSONLY_TMP" $INCS $ALLSRC >/dev/null 2>&1; then
         echo "  WARNING: batch compile had failures (some modules may be missing)" >&2
         failed=1
     fi
@@ -96,7 +113,7 @@ if [ "$OBJARCH" != "I386" ]; then
             [ "$modname" = "SysTime" ] && continue  # handled in Step 5 (fresh dir)
             rm -f "${modname}-def-gen.obj" "${modname}-def-${OBJARCH}.obj" \
                   "${modname}-mod-${OBJARCH}.obj"
-            "$ULMO_OB" $ARCHFLAG -I "$ARCHSRCDIR" -I "$SRCDIR" "$archom" >/dev/null 2>&1 || true
+            "$ULMO_OB" $ARCHFLAG -I "$ARCHSRCDIR" $INCS "$archom" >/dev/null 2>&1 || true
         done
     fi
     # Step 4: Recompile SysStorage.om with AMD64 SysSegments.od so that the
@@ -119,8 +136,8 @@ if [ "$OBJARCH" != "I386" ]; then
             [ -f "$f" ] && cp "$f" "$STEP4_TMP/"
         done
         ( cd "$STEP4_TMP" && \
-          "$ULMO_OB" $ARCHFLAG -I "$ARCHSRCDIR" -I "$SRCDIR" \
-              "$SRCDIR/SysStorage.om" >/dev/null 2>&1 )
+          "$ULMO_OB" $ARCHFLAG -I "$ARCHSRCDIR" $INCS \
+              "$SRCROOT/rtl/SysStorage.om" >/dev/null 2>&1 )
         if [ -f "$STEP4_TMP/SysStorage-mod-${OBJARCH}.obj" ]; then
             cp "$STEP4_TMP/SysStorage-mod-${OBJARCH}.obj" \
                "SysStorage-mod-${OBJARCH}.obj"
@@ -141,7 +158,7 @@ if [ "$OBJARCH" != "I386" ]; then
     if [ -d "$ARCHSRCDIR" ] && [ -f "$ARCHSRCDIR/SysTime.om" ]; then
         STEP5_TMP=$(mktemp -d)
         ( cd "$STEP5_TMP" && \
-          "$ULMO_OB" $ARCHFLAG -I "$ARCHSRCDIR" -I "$SRCDIR" \
+          "$ULMO_OB" $ARCHFLAG -I "$ARCHSRCDIR" $INCS \
               "$ARCHSRCDIR/SysTime.om" >/dev/null 2>&1 )
         if [ -f "$STEP5_TMP/SysTime-mod-${OBJARCH}.obj" ]; then
             cp "$STEP5_TMP/SysTime-mod-${OBJARCH}.obj" \
@@ -156,10 +173,10 @@ if [ "$OBJARCH" != "I386" ]; then
     fi
     echo "build-libo: compiled $total modules ($failed batch failures)"
 else
-    for om in "$SRCDIR"/*.om; do
+    for om in $ALLSRC; do
         modname=$(basename "$om" .om)
         total=$((total + 1))
-        if ! "$ULMO_OB" $ARCHFLAG -I "$SRCDIR" "$om" >/dev/null 2>&1; then
+        if ! "$ULMO_OB" $ARCHFLAG $INCS "$om" >/dev/null 2>&1; then
             echo "  WARNING: $modname: compile failed (skipping)" >&2
             failed=$((failed + 1))
         fi
@@ -181,8 +198,27 @@ for obj in ./*-mod-${OBJARCH}.obj; do
 done
 echo "build-libo: converted $obj_count modules to .o"
 
-# Archive
+# Archive each layer separately; every .o must belong to exactly one layer.
 mkdir -p "$LIBDIR"
-rm -f "$LIBDIR/libo.a"
-ar q "$LIBDIR/libo.a" ./*.o
-echo "build-libo: $LIBDIR/libo.a created ($obj_count modules)"
+archived=0
+for layer in $LAYERS; do
+    case $layer in
+    rtl) archive="$LIBDIR/librtl.a" ;;
+    lib) archive="$LIBDIR/libo.a" ;;
+    compiler) archive="$LIBDIR/libcompiler.a" ;;
+    esac
+    members=""
+    for om in "$SRCROOT/$layer"/*.om; do
+        modname=$(basename "$om" .om)
+        [ -f "$modname.o" ] && members="$members $modname.o"
+    done
+    rm -f "$archive"
+    n=$(echo $members | wc -w)
+    ar q "$archive" $members
+    archived=$((archived + n))
+    echo "build-libo: $archive created ($n modules)"
+done
+if [ "$archived" -ne "$obj_count" ]; then
+    echo "build-libo: $((obj_count - archived)) .o files belong to no layer" >&2
+    exit 1
+fi

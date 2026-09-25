@@ -1,6 +1,7 @@
 # ULM Oberon AMD64 Backend — Architecture & AST Reference
 
-Source directory: `src/oberon/AMD64*.om` / `src/oberon/AMD64*.od`
+Source directory: `src/compiler/AMD64*.om` / `src/compiler/AMD64*.od`
+(AMD64-specific run time modules: `src/rtl/amd64/`)
 
 ---
 

@@ -1,14 +1,17 @@
 Look at the src/test directory.
 
+ulmo finds the library sources (src/rtl, src/lib, src/compiler) by itself;
+use -I only for your own source directories.
+
 If you want to know the compilation stages, then look below:
 
-$ ulmo -I /home/noch/oberon/src/oberon Welcome.om
+$ ulmo Welcome.om
  ulmo: Welcome.om -> Welcome.o
 
 $ genobrts Welcome > _start.s
 $ as -32 -o _start.o _start.s
 $ ld -T /home/noch/oberon/bin/oberon-i386.ld -m elf_i386 -o welcome \
-    _start.o Welcome.o /home/noch/oberon/lib/libo.a
+    _start.o Welcome.o /home/noch/oberon/lib/libo.a /home/noch/oberon/lib/librtl.a
 
 $ ./welcome
 Hello from ulmo!

@@ -12,7 +12,8 @@
 #   ulmo [-I srcdir]... -m MainModule [-o outfile] sourcefile [sourcefile...]
 #       Compile each .om/.mod to a .o, then link into a binary.
 #       ulmoc automatically compiles all transitive dependencies; any that
-#       are not already in libo.a are also converted to .o and linked in.
+#       are not already in one of the libraries are also converted to .o and
+#       linked in.
 #       We only need to list the source files you are directly building;
 #       their dependencies are found automatically via -I paths.
 #
@@ -21,10 +22,17 @@
 #       No .o or binary is produced.
 #
 # LIBDIR defaults to BINDIR/../lib; override with -L or OBERON_LIBDIR env var.
+# It holds librtl.a (run time system), libo.a (general library) and
+# libcompiler.a (the compiler).
+#
+# The sources of these libraries (SRCROOT/rtl, SRCROOT/lib, SRCROOT/compiler)
+# are searched after any -I directories.
 
 BINDIR=@BINDIR@
 ARCH=@ARCH@
+SRCROOT=@SRCROOT@
 LIBDIR="${OBERON_LIBDIR:-${BINDIR}/../lib}"
+LIBS="libcompiler.a libo.a librtl.a"   # in link order: compiler -> lib -> rtl
 
 case "$ARCH" in
   i386)  OBJARCH=I386;  LDARCH=elf_i386;   ASFLAGS="-32";  LDSCRIPT="$BINDIR/oberon-i386.ld"  ;;
@@ -41,7 +49,7 @@ Options:
   -I srcdir          Add srcdir to source search path
   -m MainModule      Link .o files into binary named MainModule (or -o name)
   -o outfile         Set output binary name (implies -m if module name omitted)
-  -L libdir          Directory containing libo.a (default: BINDIR/../lib)
+  -L libdir          Directory containing the libraries (default: BINDIR/../lib)
   -S                 Emit .tof (text IR) instead of .o; do not link
 EOF
    exit 1
@@ -72,6 +80,7 @@ done
 
 [ $# -eq 0 ] && usage
 sources="$*"
+iflags="$iflags -I $SRCROOT/rtl -I $SRCROOT/lib -I $SRCROOT/compiler"
 
 # For each .om source, ensure a .od definition file exists somewhere ulmoc
 # can find it.  ULM Oberon requires a .od (even an empty one) to generate the
@@ -152,21 +161,25 @@ done
 #  Step 3: link (only when -m / -o was given)
 [ -z "$main_module" ] && exit 0
 
-libo="$libdir/libo.a"
-if [ ! -f "$libo" ]; then
-   echo "$cmdname: libo.a not found at $libo" >&2
-   echo "$cmdname: set OBERON_LIBDIR or use -L to specify its directory" >&2
-   exit 1
-fi
+libfiles=""
+for lib in $LIBS; do
+   if [ ! -f "$libdir/$lib" ]; then
+      echo "$cmdname: $lib not found in $libdir" >&2
+      echo "$cmdname: set OBERON_LIBDIR or use -L to specify its directory" >&2
+      exit 1
+   fi
+   libfiles="$libfiles $libdir/$lib"
+done
 
 # Auto-discover dependency .o files.
 # ulmoc compiled all transitive dependencies to mod-${OBJARCH}.obj.  Any module
-# not already in libo.a must be linked explicitly — convert those to .o now.
-libo_modules=`ar t "$libo" 2>/dev/null | sed 's/\.o$//'`
+# not already in one of the libraries must be linked explicitly — convert
+# those to .o now.
+libo_modules=`for f in $libfiles; do ar t "$f"; done 2>/dev/null | sed 's/\.o$//'`
 for obj in ./*-mod-${OBJARCH}.obj; do
    [ -f "$obj" ] || continue
    mod=`basename "$obj" -mod-${OBJARCH}.obj`
-   # Skip if already in libo.a
+   # Skip if already in a library
    echo "$libo_modules" | grep -qx "$mod" && continue
    # Skip if we already produced this .o from an explicit source above
    echo "$obj_files" | grep -qw "${mod}.o" && continue
@@ -186,5 +199,5 @@ trap "rm -f ${start_s} ${start_o}" 0 1 2 15
 $BINDIR/genobrts "$main_module" > "$start_s" || exit 1
 as $ASFLAGS -o "$start_o" "$start_s" || exit 1
 ld -T "$LDSCRIPT" -m $LDARCH \
-   -o "$out_file" "$start_o" $obj_files "$libo" || exit 1
+   -o "$out_file" "$start_o" $obj_files $libfiles || exit 1
 echo "$cmdname: linked -> $out_file"

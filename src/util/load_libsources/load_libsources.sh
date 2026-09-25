@@ -2,14 +2,14 @@
 
 BASEDIR=/usr/local/oberon
 BINDIR=$BASEDIR/bin
-SRCDIR=$BASEDIR/src/oberon
+SRCROOT=$BASEDIR/src
 CDBDDIR=$BASEDIR/var/cdbd
 CDBDIR=/pub/cdb/oberon
 DBAUTH=$CDBDDIR/write
 ONS_ROOT=127.0.0.1:9880
 export ONS_ROOT
 
-cd $SRCDIR &&
+cd $SRCROOT &&
 $BINDIR/obci -a $DBAUTH -b $CDBDIR \
    -sys sys -sys unixsys -sys ulmsys -sys i386sys \
-   *.o[dm]
+   rtl/*.o[dm] lib/*.o[dm] compiler/*.o[dm]

@@ -19,7 +19,7 @@ PonsDir := $(VarDir)/pons
 CDBDDir := $(VarDir)/cdbd
 CDBDir := /pub/cdb/oberon
 ManDir := $(DestDir)/man
-SrcDir := $(DestDir)/src/oberon
+SrcDir := $(DestDir)/src
 InitDir := $(DestDir)/etc/init.d
 InstallPonsDir := $(InstallDir)/var/pons
 InstallManDir := $(InstallDir)/man
@@ -213,7 +213,10 @@ download_tof2elf:
 
 LibDir          := $(BinDir)/../lib
 BootstrapDir    := $(Root)/bootstrap
-OberonSrcDir    := $(Root)/src/oberon
+SrcRoot         := $(Root)/src
+CompilerSrcDir  := $(SrcRoot)/compiler
+LibSources      := $(wildcard $(SrcRoot)/rtl/*.om $(SrcRoot)/lib/*.om \
+                              $(SrcRoot)/compiler/*.om)
 UlmoUtilDir     := $(Root)/src/util/ulmo
 
 # For AMD64: the cross-compiler ulmoc is the i386 build (which has the AMD64 backend).
@@ -257,23 +260,23 @@ $(InstallBinDir)/oberon-amd64.ld: $(Root)/src/util/oblink/oberon-amd64.ld | ulmo
 	cp $< $@
 
 $(InstallBinDir)/ulmo: $(UlmoUtilDir)/ulmo.sh | ulmo-dirs
-	$(Root)/substparams BINDIR=$(BinDir) ARCH=$(ARCH) <$< >$@
+	$(Root)/substparams BINDIR=$(BinDir) ARCH=$(ARCH) SRCROOT=$(SrcRoot) <$< >$@
 	chmod 755 $@
 
 ifeq ($(ARCH),amd64)
-# -- AMD64 libo.a: requires AMD64-capable obtofgen and ulmoc already installed --
+# -- AMD64 libraries (librtl.a, libo.a, libcompiler.a): requires AMD64-capable obtofgen and ulmoc already installed --
 # obtofgen and ulmoc are built before libo.a (see ulmo-core-tools ordering).
 $(LibDir)/libo.a: $(InstallBinDir)/tof2elf \
                   $(InstallBinDir)/ulmo \
                   $(InstallBinDir)/ulmoc \
                   $(InstallBinDir)/obtofgen \
-                  $(wildcard $(OberonSrcDir)/*.om) \
+                  $(LibSources) \
                   | ulmo-dirs
 	$(UlmoUtilDir)/build-libo.sh \
-	   $(InstallBinDir) $(OberonSrcDir) $(LibDir) AMD64
+	   $(InstallBinDir) $(SrcRoot) $(LibDir) AMD64
 
 # -- AMD64 obtofgen: built before libo.a using i386 ulmo + i386 libo.a --------
-$(InstallBinDir)/obtofgen: $(OberonSrcDir)/$(TOFGEN_MODULE).om | ulmo-dirs
+$(InstallBinDir)/obtofgen: $(CompilerSrcDir)/$(TOFGEN_MODULE).om | ulmo-dirs
 	@if [ ! -f $(TOFGEN_LIBDIR)/libo.a ]; then \
 	   echo "ERROR: $(TOFGEN_LIBDIR)/libo.a not found."; \
 	   echo "For AMD64 builds, run 'make ARCH=i386 DestDir=$(DestDir) ulmoinstall' first."; \
@@ -281,19 +284,18 @@ $(InstallBinDir)/obtofgen: $(OberonSrcDir)/$(TOFGEN_MODULE).om | ulmo-dirs
 	fi
 	$(eval _TMPD := $(shell mktemp -d /tmp/ulmoctofgen-XXXXXX))
 	cd $(_TMPD) && $(_BUILD_ULMO) \
-	   -I $(OberonSrcDir) \
 	   -m $(TOFGEN_MODULE) \
 	   -L $(TOFGEN_LIBDIR) \
-	   $(OberonSrcDir)/$(TOFGEN_MODULE).om && \
+	   $(CompilerSrcDir)/$(TOFGEN_MODULE).om && \
 	mv $(TOFGEN_MODULE) $(InstallBinDir)/obtofgen
 	rm -rf $(_TMPD)
 	chmod 755 $(InstallBinDir)/obtofgen
 
 else
-# -- i386 libo.a: bootstrap obtofgen/ulmoc from bootstrap/ if not present -----
+# -- i386 libraries (librtl.a, libo.a, libcompiler.a): bootstrap obtofgen/ulmoc from bootstrap/ if not present -----
 $(LibDir)/libo.a: $(InstallBinDir)/tof2elf \
                   $(InstallBinDir)/ulmo \
-                  $(wildcard $(OberonSrcDir)/*.om) \
+                  $(LibSources) \
                   | ulmo-dirs
 	@if [ ! -f $(InstallBinDir)/ulmoc ]; then \
 	   echo "bootstrap: installing ulmoc from $(_CROSS_ULMOC)"; \
@@ -306,17 +308,16 @@ $(LibDir)/libo.a: $(InstallBinDir)/tof2elf \
 	   chmod 755 $(InstallBinDir)/obtofgen; \
 	fi
 	$(UlmoUtilDir)/build-libo.sh \
-	   $(InstallBinDir) $(OberonSrcDir) $(LibDir) I386
+	   $(InstallBinDir) $(SrcRoot) $(LibDir) I386
 
 # -- i386 obtofgen: built after libo.a, replaces bootstrap copy ---------------
-$(InstallBinDir)/obtofgen: $(OberonSrcDir)/$(TOFGEN_MODULE).om \
+$(InstallBinDir)/obtofgen: $(CompilerSrcDir)/$(TOFGEN_MODULE).om \
                             $(LibDir)/libo.a | ulmo-dirs
 	$(eval _TMPD := $(shell mktemp -d /tmp/ulmoctofgen-XXXXXX))
 	cd $(_TMPD) && $(_BUILD_ULMO) \
-	   -I $(OberonSrcDir) \
 	   -m $(TOFGEN_MODULE) \
 	   -L $(TOFGEN_LIBDIR) \
-	   $(OberonSrcDir)/$(TOFGEN_MODULE).om && \
+	   $(CompilerSrcDir)/$(TOFGEN_MODULE).om && \
 	mv $(TOFGEN_MODULE) $(InstallBinDir)/obtofgen
 	rm -rf $(_TMPD)
 	chmod 755 $(InstallBinDir)/obtofgen
@@ -332,14 +333,13 @@ $(InstallBinDir)/ulmoc: $(_CROSS_ULMOC) | ulmo-dirs
 else
 $(InstallBinDir)/ulmoc: $(LibDir)/libo.a \
                            $(InstallBinDir)/obtofgen \
-                           $(OberonSrcDir)/FilesystemDB.om \
+                           $(CompilerSrcDir)/FilesystemDB.om \
                            $(UlmoUtilDir)/Ulmo.om
 	$(eval _TMPD := $(shell mktemp -d /tmp/ulmo-self-XXXXXX))
 	cd $(_TMPD) && $(InstallBinDir)/ulmo \
-	   -I $(OberonSrcDir) \
 	   -m Ulmo \
 	   -L $(LibDir) \
-	   $(OberonSrcDir)/FilesystemDB.om \
+	   $(CompilerSrcDir)/FilesystemDB.om \
 	   $(UlmoUtilDir)/Ulmo.om && \
 	mv Ulmo $(InstallBinDir)/ulmoc
 	rm -rf $(_TMPD)
@@ -390,8 +390,8 @@ ulmo-db-tools: ulmo-core-tools
 	  $(eval _TMPD := $(shell mktemp -d /tmp/ulmo-dbtool-XXXXXX)) \
 	  $(shell cd $(_TMPD) && \
 	      $(InstallBinDir)/ulmo \
-	         -I $(OberonSrcDir) -m $(_MOD) -L $(LibDir) \
-	         $(OberonSrcDir)/$(_MOD).om && \
+	         -m $(_MOD) -L $(LibDir) \
+	         $(wildcard $(SrcRoot)/*/$(_MOD).om) && \
 	      mv $(_MOD) $(_DEST) && \
 	      chmod 755 $(_DEST) && \
 	      rm -rf $(_TMPD) && \
