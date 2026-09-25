@@ -1,6 +1,7 @@
 (* AMD64 SysSegments: 8-byte address/size fields matching SysStorage's types.
-   Register skips high-address segments (stack) to avoid sign-extension issues
-   in SysStorage's LONGINT-based arithmetic. *)
+   All segments are recorded, including the high-address main stack;
+   SysStorage.Init filters out addresses Memory cannot model with its own
+   64-bit range check. *)
 MODULE SysSegments;
 
    IMPORT SYS := SYSTEM;
@@ -28,10 +29,7 @@ MODULE SysSegments;
    END PanicExit;
 
    PROCEDURE Register(addr: Address; size: Size; mode: Mode);
-      (* Skip segments with addr >= 2GB to avoid sign-extension problems
-         when SysStorage reads them as signed LONGINT. *)
    BEGIN
-      IF SYS.VAL(LONGINT, addr) < 0 THEN RETURN END;
       IF nextslot = maxsegments THEN PanicExit END;
       segments[nextslot].addr := addr;
       segments[nextslot].size := size;
