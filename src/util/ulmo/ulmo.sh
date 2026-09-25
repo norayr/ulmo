@@ -25,8 +25,8 @@
 # It holds librtl.a (run time system), libo.a (general library) and
 # libcompiler.a (the compiler).
 #
-# The sources of these libraries (SRCROOT/rtl, SRCROOT/lib, SRCROOT/compiler)
-# are searched after any -I directories.
+# The sources of these libraries (SRCROOT/rtl/ARCH, SRCROOT/rtl, SRCROOT/lib,
+# SRCROOT/compiler) are searched after any -I directories.
 
 BINDIR=@BINDIR@
 ARCH=@ARCH@
@@ -80,6 +80,8 @@ done
 
 [ $# -eq 0 ] && usage
 sources="$*"
+# architecture-specific run time modules take precedence over generic ones
+[ -d "$SRCROOT/rtl/$ARCH" ] && iflags="$iflags -I $SRCROOT/rtl/$ARCH"
 iflags="$iflags -I $SRCROOT/rtl -I $SRCROOT/lib -I $SRCROOT/compiler"
 
 # For each .om source, ensure a .od definition file exists somewhere ulmoc

@@ -112,23 +112,11 @@ MODULE Oberon64iSymbols;
    VAR
       fdtype: Services.Type;
 
-   (* AMD64-specific field offset discipline: stored in Disciplines, not
-      CompilerObjects, so it doesn't conflict with the i386 pass's attachments *)
-   TYPE
-      AMD64FieldOff = POINTER TO AMD64FieldOffRec;
-      AMD64FieldOffRec =
-	 RECORD
-	    (Disciplines.DisciplineRec)
-	    offset: Size;
-	 END;
-   VAR
-      fldid: Disciplines.Identifier;
-
    TYPE
       TypeDiscipline = POINTER TO TypeDisciplineRec;
       TypeDisciplineRec =
 	 RECORD
-	    (Disciplines.DisciplineRec)
+	    (CompilerObjects.AttachmentRec)
 	    type: Sym.Type;
 	       (* usually the type we are attached to; but it may
 		  be more specific in case of constants
@@ -137,7 +125,7 @@ MODULE Oberon64iSymbols;
 	    length: Size; (* for arrays *)
 	 END;
    VAR
-      tdiscid: Disciplines.Identifier;
+      tdtype: Services.Type;
 
    VAR
       typeType: Services.Type; (* that of Sym.Type *)
@@ -303,14 +291,67 @@ MODULE Oberon64iSymbols;
       END;
    END WriteFieldDiscipline;
 
-   (* === TypeDiscipline creation =========================================== *)
+   (* === PO if of TypeDiscipline ========================================= *)
 
-   PROCEDURE NewTypeDiscipline(VAR tdisc: TypeDiscipline);
+   (* Sizes and field offsets are attachments, as in Oberon32iSymbols, so
+      that they are stored with the architecture-dependent public interface
+      and are available to importers compiled in other processes, including
+      the sizes of records with private components.
+   *)
+
+   PROCEDURE CreateTypeDiscipline(VAR object: PersistentObjects.Object);
+      VAR
+	 tdisc: TypeDiscipline;
    BEGIN
-      NEW(tdisc);
-      tdisc.id := tdiscid;
+      NEW(tdisc); PersistentObjects.Init(tdisc, tdtype);
       tdisc.size := 0; tdisc.align := 1; tdisc.length := 0;
-   END NewTypeDiscipline;
+      object := tdisc;
+   END CreateTypeDiscipline;
+
+   PROCEDURE ReadTypeDiscipline(s: Streams.Stream;
+                                object: PersistentObjects.Object) : BOOLEAN;
+   BEGIN
+      WITH object: TypeDiscipline DO
+	 RETURN CompilerObjects.GuardedRead(s, typeType, object.type) &
+	        NetIO.ReadLongInt(s, object.size) &
+	        NetIO.ReadLongInt(s, object.align) &
+		NetIO.ReadLongInt(s, object.length)
+      END;
+   END ReadTypeDiscipline;
+
+   PROCEDURE WriteTypeDiscipline(s: Streams.Stream;
+                                 object: PersistentObjects.Object) : BOOLEAN;
+   BEGIN
+      WITH object: TypeDiscipline DO
+	 RETURN CompilerObjects.Write(s, object.type) &
+	        NetIO.WriteLongInt(s, object.size) &
+	        NetIO.WriteLongInt(s, object.align) &
+		NetIO.WriteLongInt(s, object.length)
+      END;
+   END WriteTypeDiscipline;
+
+   PROCEDURE SeekTypeDisc(type: Sym.Type; VAR tdisc: TypeDiscipline) : BOOLEAN;
+      VAR
+	 attachment: CompilerObjects.Attachment;
+   BEGIN
+      CompilerObjects.GetAttachment(type, attachment);
+      IF (attachment # NIL) & (attachment IS TypeDiscipline) THEN
+	 tdisc := attachment(TypeDiscipline); RETURN TRUE
+      END;
+      RETURN FALSE
+   END SeekTypeDisc;
+
+   PROCEDURE SeekFieldDisc(field: Sym.FieldList;
+                           VAR fdisc: FieldDiscipline) : BOOLEAN;
+      VAR
+	 attachment: CompilerObjects.Attachment;
+   BEGIN
+      CompilerObjects.GetAttachment(field, attachment);
+      IF (attachment # NIL) & (attachment IS FieldDiscipline) THEN
+	 fdisc := attachment(FieldDiscipline); RETURN TRUE
+      END;
+      RETURN FALSE
+   END SeekFieldDisc;
 
    (* === recursive calculation of size and alignment ===================== *)
 
@@ -341,6 +382,7 @@ MODULE Oberon64iSymbols;
                          type: Sym.Type; VAR tdisc: TypeDiscipline;
                          errors: RelatedEvents.Object);
       VAR
+	 object: PersistentObjects.Object;
 	 size, align: Size;
 	 bitlength: INTEGER;
 	 reftypesize: Size;
@@ -515,15 +557,16 @@ MODULE Oberon64iSymbols;
 
 	 PROCEDURE SetOffset(field: Sym.FieldList);
 	    VAR
-	       fodisc: AMD64FieldOff;
+	       object: PersistentObjects.Object;
+	       fdisc: FieldDiscipline;
 	 BEGIN
-	    (* Store AMD64 field offset in Disciplines to avoid conflict with
-	       the i386 pass, which uses CompilerObjects.Attach for the same fields *)
-	    IF Disciplines.Seek(field, fldid, fodisc) THEN
-	       fodisc.offset := offset;
+	    IF SeekFieldDisc(field, fdisc) THEN
+	       fdisc.offset := offset;
 	    ELSE
-	       NEW(fodisc); fodisc.id := fldid; fodisc.offset := offset;
-	       Disciplines.Add(field, fodisc);
+	       CreateFieldDiscipline(object); fdisc := object(FieldDiscipline);
+	       CompilerObjects.Init(fdisc);
+	       fdisc.offset := offset;
+	       CompilerObjects.Attach(module, field, fdisc);
 	    END;
 	 END SetOffset;
 
@@ -571,7 +614,7 @@ MODULE Oberon64iSymbols;
       END NumberOfDynDimensions;
 
    BEGIN (* GetTypeDisc *)
-      IF Disciplines.Seek(type, tdiscid, tdisc) THEN
+      IF SeekTypeDisc(type, tdisc) THEN
          RETURN
       END;
       ASSERT(~Marked(type));
@@ -658,10 +701,11 @@ MODULE Oberon64iSymbols;
 	    size := Ob32.proceduretypeSize;
 	    align := Ob32.proceduretypeAlign;
       END;
-      NewTypeDiscipline(tdisc);
+      CreateTypeDiscipline(object); tdisc := object(TypeDiscipline);
       tdisc.type := type;
       tdisc.size := size; tdisc.align := align;
-      Disciplines.Add(type, tdisc);
+      CompilerObjects.Init(tdisc);
+      CompilerObjects.Attach(module, type, tdisc);
       CASE type.form OF
       | Sym.pointer:
 	    (* type.reftype may be NIL for NIL-type (builtin type) *)
@@ -799,8 +843,9 @@ MODULE Oberon64iSymbols;
 	 "CompilerObjects.Attachment", CreateFieldDiscipline,
 	 ReadFieldDiscipline, WriteFieldDiscipline);
       bdid := Disciplines.Unique();
-      fldid := Disciplines.Unique();
-      tdiscid := Disciplines.Unique();
+      Register(tdtype, "Oberon64iSymbols.TypeDiscipline",
+	 "CompilerObjects.Attachment", CreateTypeDiscipline,
+	 ReadTypeDiscipline, WriteTypeDiscipline);
 
       Services.SeekType("OberonSymbols.Type", typeType);
       ASSERT(typeType # NIL);
@@ -1560,26 +1605,26 @@ MODULE Oberon64iSymbols;
       VAR
 	 tdisc: TypeDiscipline;
    BEGIN
-      IF Disciplines.Seek(type, tdiscid, tdisc) THEN
+      IF SeekTypeDisc(type, tdisc) THEN
 	 tdisc.size := size;
       END;
    END PatchSize;
 
    PROCEDURE GetOffset(module: Sym.Ident; field: Sym.FieldList) : Size;
       VAR
-	 fodisc: AMD64FieldOff;
+	 fdisc: FieldDiscipline;
    BEGIN
-      ASSERT(Disciplines.Seek(field, fldid, fodisc));
-      RETURN fodisc.offset
+      ASSERT(SeekFieldDisc(field, fdisc));
+      RETURN fdisc.offset
    END GetOffset;
 
    PROCEDURE PatchOffset(module: Sym.Ident; field: Sym.FieldList;
                          offset: Size);
       VAR
-	 fodisc: AMD64FieldOff;
+	 fdisc: FieldDiscipline;
    BEGIN
-      IF Disciplines.Seek(field, fldid, fodisc) THEN
-	 fodisc.offset := offset;
+      IF SeekFieldDisc(field, fdisc) THEN
+	 fdisc.offset := offset;
       END;
    END PatchOffset;
 

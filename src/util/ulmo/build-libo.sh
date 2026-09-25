@@ -78,111 +78,28 @@ TOFARCH=""
 failed=0
 total=0
 
-if [ "$OBJARCH" != "I386" ]; then
-    # For non-i386 architectures (e.g. AMD64): compile ALL modules in a single
-    # ulmoc invocation.  This keeps AMD64 TypeDisciplines in process memory so
-    # that types with private (non-exported) fields — like Events.EventTypeRec —
-    # have their correct AMD64 sizes available when dependent modules (e.g.
-    # SysSignals) are compiled later.  With per-module invocations the
-    # Disciplines.Add cache is lost between processes, causing size=0 for
-    # imported record types whose private fields are stripped from the .def file.
-    ARCHSRCDIR="$SRCROOT/rtl/$(echo $OBJARCH | tr A-Z a-z)"
-    # Step 1: Pre-compile stub/no-op modules that need to override the batch
-    # BEFORE the batch runs, so the batch reuses them.  Only pre-compile modules
-    # that do NOT import Sys (to avoid poisoning the tmpdir with wrong Sys values).
-    # SysSignalOperations.om is the critical one: its no-op stub avoids the
-    # wrong-syscall-number crash (rtsigprocmask=175 vs AMD64 rt_sigprocmask=14).
-    # Step 2: Compile all library modules in one shot (batch).
-    # Provide AMD64 Sys.od/Sys.om to fix syscall numbers (mmap=9, brk=12 etc.).
-    SYSONLY_TMP=$(mktemp -d)
-    cp "$ARCHSRCDIR/Sys.od" "$SYSONLY_TMP/" 2>/dev/null || true
-    cp "$ARCHSRCDIR/Sys.om" "$SYSONLY_TMP/" 2>/dev/null || true
-    total=$(ls $ALLSRC 2>/dev/null | wc -l)
-    if ! "$ULMO_OB" $ARCHFLAG -I "$SYSONLY_TMP" $INCS $ALLSRC >/dev/null 2>&1; then
-        echo "  WARNING: batch compile had failures (some modules may be missing)" >&2
-        failed=1
-    fi
-    rm -rf "$SYSONLY_TMP"
-    # Step 3: Post-batch overrides for modules with AMD64-specific implementations
-    # (SysArgs, SysSegments, SysModules etc.).
-    if [ -d "$ARCHSRCDIR" ]; then
-        for archom in "$ARCHSRCDIR"/*.om; do
-            [ -f "$archom" ] || continue
-            modname=$(basename "$archom" .om)
-            [ "$modname" = "SysSignalOperations" ] && continue
-            [ "$modname" = "SysTime" ] && continue  # handled in Step 5 (fresh dir)
-            rm -f "${modname}-def-gen.obj" "${modname}-def-${OBJARCH}.obj" \
-                  "${modname}-mod-${OBJARCH}.obj"
-            "$ULMO_OB" $ARCHFLAG -I "$ARCHSRCDIR" $INCS "$archom" >/dev/null 2>&1 || true
-        done
-    fi
-    # Step 4: Recompile SysStorage.om with AMD64 SysSegments.od so that the
-    # segment record access code uses 8-byte (SYS.UNTRACEDADDRESS) reads,
-    # matching the runtime layout of the SysSegments.segments global array.
-    # The batch above compiled SysStorage with the generic LONGINT-based
-    # SysSegments.od; this step replaces that .obj with the correct one.
-    #
-    # IMPORTANT: run in a FRESH directory containing only the AMD64 SysSegments
-    # .obj files.  If we run in the main TMPDIR, ulmoc finds the batch-compiled
-    # .obj files (which have GENERIC/LONGINT SysSegments type versions) and
-    # hits an internal assertion in CompilerDatabases.LookupHeader because the
-    # type versions are inconsistent with the AMD64 SysSegments.od declaration.
-    if [ -d "$ARCHSRCDIR" ] && [ -f "$ARCHSRCDIR/SysSegments.od" ]; then
-        STEP4_TMP=$(mktemp -d)
-        # Seed the clean dir with only the AMD64-typed SysSegments obj files
-        # (produced by step 3 above).  No other batch .obj files should be here.
-        for f in "SysSegments-def-gen.obj" "SysSegments-def-${OBJARCH}.obj" \
-                 "SysSegments-mod-${OBJARCH}.obj"; do
-            [ -f "$f" ] && cp "$f" "$STEP4_TMP/"
-        done
-        ( cd "$STEP4_TMP" && \
-          "$ULMO_OB" $ARCHFLAG -I "$ARCHSRCDIR" $INCS \
-              "$SRCROOT/rtl/SysStorage.om" >/dev/null 2>&1 )
-        if [ -f "$STEP4_TMP/SysStorage-mod-${OBJARCH}.obj" ]; then
-            cp "$STEP4_TMP/SysStorage-mod-${OBJARCH}.obj" \
-               "SysStorage-mod-${OBJARCH}.obj"
-            cp "$STEP4_TMP/SysStorage-def-${OBJARCH}.obj" \
-               "SysStorage-def-${OBJARCH}.obj" 2>/dev/null || true
-            echo "build-libo: SysStorage recompiled with AMD64 SysSegments types"
-        else
-            echo "build-libo: WARNING: SysStorage step4 failed — SysStorage.o will be missing" >&2
-        fi
-        rm -rf "$STEP4_TMP"
-    fi
-    # Step 5: Compile AMD64-specific SysTime.om in a fresh directory.
-    # SysTime must use Timeval64/Tms64/Itimerval64 (lo+hi LONGINT pairs) to avoid
-    # overflowing the 8-byte Oberon TimeVal with the 16-byte kernel struct timeval.
-    # Cannot compile in TMPDIR because the batch-compiled .obj type versions cause
-    # a LookupHeader assertion when a new ulmoc process reads them and then
-    # encounters the AMD64-specific SysTime.om types.
-    if [ -d "$ARCHSRCDIR" ] && [ -f "$ARCHSRCDIR/SysTime.om" ]; then
-        STEP5_TMP=$(mktemp -d)
-        ( cd "$STEP5_TMP" && \
-          "$ULMO_OB" $ARCHFLAG -I "$ARCHSRCDIR" $INCS \
-              "$ARCHSRCDIR/SysTime.om" >/dev/null 2>&1 )
-        if [ -f "$STEP5_TMP/SysTime-mod-${OBJARCH}.obj" ]; then
-            cp "$STEP5_TMP/SysTime-mod-${OBJARCH}.obj" \
-               "SysTime-mod-${OBJARCH}.obj"
-            cp "$STEP5_TMP/SysTime-def-${OBJARCH}.obj" \
-               "SysTime-def-${OBJARCH}.obj" 2>/dev/null || true
-            echo "build-libo: SysTime recompiled with AMD64 timeval implementation"
-        else
-            echo "build-libo: WARNING: SysTime step5 failed — SysTime.o will use generic version" >&2
-        fi
-        rm -rf "$STEP5_TMP"
-    fi
-    echo "build-libo: compiled $total modules ($failed batch failures)"
-else
-    for om in $ALLSRC; do
-        modname=$(basename "$om" .om)
-        total=$((total + 1))
-        if ! "$ULMO_OB" $ARCHFLAG $INCS "$om" >/dev/null 2>&1; then
-            echo "  WARNING: $modname: compile failed (skipping)" >&2
-            failed=$((failed + 1))
-        fi
-    done
-    echo "build-libo: compiled $total modules ($failed failed)"
+# Architecture-specific versions of run time modules (SRCROOT/rtl/<arch>)
+# take precedence over the generic ones: they come first in the search path
+# and are compiled first, so that every module sees the same interfaces.
+ARCHSRCDIR="$SRCROOT/rtl/$(echo $OBJARCH | tr A-Z a-z)"
+if [ -d "$ARCHSRCDIR" ]; then
+    INCS="-I $ARCHSRCDIR $INCS"
+    ALLSRC="$ARCHSRCDIR/*.om $ALLSRC"
 fi
+
+# Compile each module; ulmoc reuses the up-to-date .obj files of modules
+# compiled before (their fingerprints are checked).
+for om in $ALLSRC; do
+    modname=$(basename "$om" .om)
+    # a generic module overridden by an architecture-specific one
+    [ -f "$ARCHSRCDIR/$modname.om" ] && [ "$om" != "$ARCHSRCDIR/$modname.om" ] && continue
+    total=$((total + 1))
+    if ! "$ULMO_OB" $ARCHFLAG $INCS "$om" >/dev/null 2>&1; then
+        echo "  WARNING: $modname: compile failed (skipping)" >&2
+        failed=$((failed + 1))
+    fi
+done
+echo "build-libo: compiled $total modules ($failed failed)"
 
 # Convert all mod-OBJARCH.obj files to ELF .o via obtofgen + tof2elf.
 obj_count=0

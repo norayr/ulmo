@@ -70,7 +70,11 @@ MODULE Oberon64iUpdates;
 	 IF (deftype.form IN Sym.specforms) & (deftype.spec = Sym.generic) THEN RETURN END;
 	 IF (modtype.form IN Sym.specforms) & (modtype.spec = Sym.generic) THEN RETURN END;
 	 defsize := Sym64i.GetSize(public, deftype, errors);
-	 modsize := Sym64i.GetSize(public, modtype, errors);
+	 (* the size of modtype belongs to the private module: it may have to
+	    be computed here (the AMD64 analyzer does not size every type),
+	    and its attachment must not end up in the public interface where
+	    it could refer to modules imported by the implementation only *)
+	 modsize := Sym64i.GetSize(private, modtype, errors);
 	 IF defsize # modsize THEN
 	    IF updatesPermitted THEN
 	       Sym64i.PatchSize(public, deftype, modsize);
