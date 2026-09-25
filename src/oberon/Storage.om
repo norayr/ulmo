@@ -52,7 +52,7 @@ MODULE Storage;
    (* storage allocating interface for the compiler *)
 
    IMPORT Coroutines, Errors, Events, Objects, Priorities, RelatedEvents,
-      Streams, SYS := SYSTEM, Types, Write;
+      Streams, SYS := SYSTEM, SysMemParams, Types, Write;
 
    TYPE
       Address = Types.UntracedAddress;
@@ -125,9 +125,6 @@ MODULE Storage;
                *)
          END;
    
-   CONST
-      preInitBufSize = 65536; (* 64 KB scratch buffer for pre-sif allocations *)
-
    VAR
       (* public *)
       lock: BOOLEAN;
@@ -136,8 +133,6 @@ MODULE Storage;
       (* private *)
       sif: Interface;
       sifDefined: BOOLEAN;
-      preInitBuf: ARRAY preInitBufSize OF BYTE; (* zero-init BSS scratch *)
-      preInitPos: Size;                           (* next free byte in preInitBuf *)
 
    (* === private procedures ============================================== *)
 
@@ -194,25 +189,35 @@ MODULE Storage;
          tag may be zero: in this case we assume SYS.NEW and put a
          dummy tag record behind the allocated area
       *)
-      VAR total: Size; base: Address;
+      CONST
+         Nil = SYS.VAL(Address, NIL);
+         tagAreaSize = SYS.SIZE(Address);
+         wordSize = SYS.SIZE(INTEGER);
+      VAR
+         rem: Size;
    BEGIN
       IF ~sifDefined THEN
-         (* Fallback: allocate from static BSS scratch buffer (pre-SysStorage).
-            preInitBuf is always mapped and zero-initialized, avoiding address
-            space conflicts with the heap or code sections. *)
-         total := size + SHORT(SYS.SIZE(SYS.UNTRACEDADDRESS));
-         IF preInitPos + total <= preInitBufSize THEN
-            base := SYS.VAL(Address,
-               SYS.VAL(SYS.UNTRACEDADDRESS, SYS.ADR(preInitBuf)) +
-               SYS.VAL(SYS.UNTRACEDADDRESS, preInitPos));
-            SYS.PUT(base, tag);
-            ptr := SYS.VAL(Address,
-               SYS.VAL(SYS.UNTRACEDADDRESS, base) +
-               SHORT(SYS.SIZE(SYS.UNTRACEDADDRESS)));
-            INC(preInitPos, total);
-         ELSE
-            PanicExit
-         END;
+         (* No storage interface yet (module initializations running before
+            SysStorage): bump-allocate from the start up region
+            [end - left, end) that the run time start up code has set up.
+            This is what the inline NEW of the i386 compiler does for every
+            small allocation; AMD64 has no inline NEW, so these calls end up
+            here.  SysStorage later adopts the start up region including
+            the objects allocated so far.
+
+            size includes the tag area, as for sif.alloc.  SYS.NEW objects
+            (tag = Nil) need a dummy tag in the layout of SysStorage and
+            are not supported before its initialization.
+         *)
+         IF (tag = Nil) OR (end = Nil) THEN PanicExit END;
+         rem := size MOD SysMemParams.minAlignment;
+         IF rem # 0 THEN INC(size, SysMemParams.minAlignment - rem) END;
+         IF left < size THEN PanicExit END;
+         ptr := end - left;
+         DEC(left, size);
+         SYS.WCLEAR(ptr, size DIV wordSize);
+         SYS.PUT(ptr, tag);
+         INC(ptr, tagAreaSize);
       ELSE
          sif.alloc(ptr, tag, size);
       END;
