@@ -1,205 +1,190 @@
 #!/bin/sh
-# ulmo - shell script to compile and link.
-#
-# compiles Oberon source files (.od/.om/.mod) without pons/cdbd.
-# by default, compiles to .o only (-c mode).
-# use -m MainModule to also link a resulting binary.
+# ulmo -- compile and link programs written in Ulm's Oberon
 #
 # Usage:
-#   ulmo [-I srcdir]... sourcefile [sourcefile...]
-#       Compile each .om/.mod to a .o  (like gcc -c)
+#   ulmo [options] sourcefile...
+#       compile each .om (or .mod) to a .o
+#   ulmo [options] -m MainModule [-o outfile] sourcefile...
+#       compile, then link a program whose main module is MainModule
+#   ulmo [options] -S sourcefile...
+#       compile each .om and emit the .tof intermediate text instead of a .o
 #
-#   ulmo [-I srcdir]... -m MainModule [-o outfile] sourcefile [sourcefile...]
-#       Compile each .om/.mod to a .o, then link into a binary.
-#       ulmoc automatically compiles all transitive dependencies; any that
-#       are not already in one of the libraries are also converted to .o and
-#       linked in.
-#       We only need to list the source files you are directly building;
-#       their dependencies are found automatically via -I paths.
+# ulmoc compiles the imported modules as needed; the library modules are
+# linked from the libraries of the target architecture, all other imported
+# modules are converted to .o files and linked in, too.
 #
-#   ulmo [-I srcdir]... -S sourcefile [sourcefile...]
-#       Compile each .om/.mod and emit a .tof file (text IR, like -S for asm).
-#       No .o or binary is produced.
-#
-# LIBDIR defaults to BINDIR/../lib; override with -L or OBERON_LIBDIR env var.
-# It holds librtl.a (run time system), libo.a (general library) and
-# libcompiler.a (the compiler).
-#
-# The sources of these libraries (SRCROOT/rtl/ARCH, SRCROOT/rtl, SRCROOT/lib,
-# SRCROOT/compiler) are searched after any -I directories.
+# Files used (make install replaces the two defaults below):
+#   ULMOLIBDIR/tof2elf              TOF to ELF converter
+#   ULMOLIBDIR/ARCH/                ulmoc, obtofgen, genobrts, linker script,
+#                                   librtl.a, libo.a, libcompiler.a
+#   ULMOSRCDIR/{rtl,lib,compiler}   sources of the libraries; rtl/ARCH holds
+#                                   architecture-specific run time modules
 
-BINDIR=@BINDIR@
-ARCH=@ARCH@
-SRCROOT=@SRCROOT@
-LIBDIR="${OBERON_LIBDIR:-${BINDIR}/../lib}"
-LIBS="libcompiler.a libo.a librtl.a"   # in link order: compiler -> lib -> rtl
+here=`dirname "$0"`
+here=`cd "$here" && pwd`
+ULMOLIBDIR=${ULMOLIBDIR:-$here/../lib/ulmo}
+ULMOSRCDIR=${ULMOSRCDIR:-$here/../share/ulmo/src}
+AS=${AS:-as}
+LD=${LD:-ld}
 
-case "$ARCH" in
-  i386)  OBJARCH=I386;  LDARCH=elf_i386;   ASFLAGS="-32";  LDSCRIPT="$BINDIR/oberon-i386.ld"  ;;
-  amd64) OBJARCH=AMD64; LDARCH=elf_x86_64; ASFLAGS="--64"; LDSCRIPT="$BINDIR/oberon-amd64.ld" ;;
-  *)     echo "ulmo: unknown arch: $ARCH" >&2; exit 1 ;;
-esac
-
-cmdname=`basename $0`
+cmdname=`basename "$0"`
 
 usage() {
    cat >&2 <<EOF
-Usage: $cmdname [options] sourcefile [sourcefile...]
+Usage: $cmdname [options] sourcefile...
 Options:
-  -I srcdir          Add srcdir to source search path
-  -m MainModule      Link .o files into binary named MainModule (or -o name)
-  -o outfile         Set output binary name (implies -m if module name omitted)
-  -L libdir          Directory containing the libraries (default: BINDIR/../lib)
-  -S                 Emit .tof (text IR) instead of .o; do not link
+  -arch ARCH      target architecture (installed: `ls "$ULMOLIBDIR" 2>/dev/null | grep -v tof2elf | tr '\n' ' '`)
+  -I dir          add dir to the source search path
+  -m MainModule   link a program with MainModule as main module
+  -o outfile      name of the program (default: name of the main module)
+  -L dir          take the libraries from dir instead of ULMOLIBDIR/ARCH
+  -S              emit .tof files instead of .o files; do not link
 EOF
    exit 1
 }
 
-if [ $# -eq 0 ]; then usage; fi
+# default architecture: the host's if installed, else the only one installed
+case `uname -m` in
+x86_64|amd64)  arch=amd64 ;;
+i?86)          arch=i386 ;;
+*)             arch=`uname -m` ;;
+esac
+if [ ! -d "$ULMOLIBDIR/$arch" ]; then
+   installed=`ls "$ULMOLIBDIR" 2>/dev/null | grep -v '^tof2elf$'`
+   [ `echo $installed | wc -w` -eq 1 ] && arch=$installed
+fi
 
 iflags=""
 main_module=""
 out_file=""
-libdir="$LIBDIR"
+libdir=""
 asm_only=0
 
 while [ $# -gt 0 ]; do
    case "$1" in
-   -I)  [ $# -lt 2 ] && usage; iflags="$iflags -I $2"; shift 2 ;;
-   -I*) iflags="$iflags -I${1#-I}"; shift ;;
-   -m)  [ $# -lt 2 ] && usage; main_module="$2"; shift 2 ;;
-   -o)  [ $# -lt 2 ] && usage; out_file="$2"; shift 2 ;;
-   -L)  [ $# -lt 2 ] && usage; libdir="$2"; shift 2 ;;
-   -L*) libdir="${1#-L}"; shift ;;
-   -S)  asm_only=1; shift ;;
-   --)  shift; break ;;
-   -*)  echo "$cmdname: unknown option: $1" >&2; usage ;;
-   *)   break ;;
+   -arch) [ $# -lt 2 ] && usage; arch="$2"; shift 2 ;;
+   -I)    [ $# -lt 2 ] && usage; iflags="$iflags -I $2"; shift 2 ;;
+   -I*)   iflags="$iflags -I${1#-I}"; shift ;;
+   -m)    [ $# -lt 2 ] && usage; main_module="$2"; shift 2 ;;
+   -o)    [ $# -lt 2 ] && usage; out_file="$2"; shift 2 ;;
+   -L)    [ $# -lt 2 ] && usage; libdir="$2"; shift 2 ;;
+   -L*)   libdir="${1#-L}"; shift ;;
+   -S)    asm_only=1; shift ;;
+   --)    shift; break ;;
+   -*)    echo "$cmdname: unknown option: $1" >&2; usage ;;
+   *)     break ;;
    esac
 done
-
 [ $# -eq 0 ] && usage
 sources="$*"
-# architecture-specific run time modules take precedence over generic ones
-[ -d "$SRCROOT/rtl/$ARCH" ] && iflags="$iflags -I $SRCROOT/rtl/$ARCH"
-iflags="$iflags -I $SRCROOT/rtl -I $SRCROOT/lib -I $SRCROOT/compiler"
 
-# For each .om source, ensure a .od definition file exists somewhere ulmoc
-# can find it.  ULM Oberon requires a .od (even an empty one) to generate the
-# public interface object.  For program modules with no exports, we create a
-# minimal stub in the current directory.
+case "$arch" in
+i386)  objarch=I386;  asflags=--32; ldemul=elf_i386 ;;
+amd64) objarch=AMD64; asflags=--64; ldemul=elf_x86_64 ;;
+*)     echo "$cmdname: unsupported architecture: $arch" >&2; exit 1 ;;
+esac
+tooldir="$ULMOLIBDIR/$arch"
+if [ ! -x "$tooldir/ulmoc" ]; then
+   echo "$cmdname: no $arch compiler installed in $ULMOLIBDIR" >&2
+   exit 1
+fi
+[ -z "$libdir" ] && libdir="$tooldir"
+
+# the library sources come after the directories given with -I;
+# architecture-specific run time modules take precedence over generic ones
+[ -d "$ULMOSRCDIR/rtl/$arch" ] && iflags="$iflags -I $ULMOSRCDIR/rtl/$arch"
+iflags="$iflags -I $ULMOSRCDIR/rtl -I $ULMOSRCDIR/lib -I $ULMOSRCDIR/compiler"
+
+# ulmoc needs a definition (.od) for every module, even for a main module
+# which exports nothing; create an empty one where none exists
 for sourcefile in $sources; do
+   if [ ! -f "$sourcefile" ]; then
+      echo "$cmdname: $sourcefile: no such file" >&2
+      exit 1
+   fi
    base=`basename "$sourcefile"`
-   suffix="${base##*.}"
    modname="${base%.*}"
    srcdir=`dirname "$sourcefile"`
-   if [ "$suffix" = "om" ] || [ "$suffix" = "mod" ]; then
-      # Look for .od alongside the source file and in CWD
+   case "$base" in
+   *.om|*.mod)
       if [ ! -f "$srcdir/$modname.od" ] && [ ! -f "$modname.od" ]; then
          printf "DEFINITION %s;\nEND %s.\n" "$modname" "$modname" > "$modname.od"
       fi
-   fi
+      ;;
+   esac
 done
 
-# -o without -m: derive module name from output filename
 if [ -n "$out_file" ] && [ -z "$main_module" ]; then
    main_module=`basename "$out_file"`
 fi
-# -m without -o: binary name == module name
 if [ -n "$main_module" ] && [ -z "$out_file" ]; then
    out_file="$main_module"
 fi
 
-#  Step 1: run the Oberon compiler for all source files
-# ulmoc compiles each file and all transitive dependencies, writing .obj
-# files to the current directory.  (Cached deps are reused on re-runs.)
-# Include CWD so ulmoc finds any .od stubs we created above.
-archflag=""
-[ "$ARCH" != "i386" ] && archflag="-a $ARCH"
-if ! $BINDIR/ulmoc $archflag -I . $iflags "$@"; then
-   exit 1
-fi
+# step 1: compile the sources and the modules they import
+"$tooldir/ulmoc" -a $arch -I . $iflags $sources || exit 1
 
-#  Step 2: convert each listed .om/.mod to .o (or .tof if -S)
+# step 2: convert each given module to a .o (or a .tof with -S)
+tof() { # module objfile toffile
+   "$tooldir/obtofgen" -o "$3" "$2" || exit 1
+}
+elf() { # module objfile ofile
+   tof "$1" "$2" "$1-mod-$objarch.tof"
+   "$ULMOLIBDIR/tof2elf" -arch $arch -o "$3" "$1-mod-$objarch.tof" ||
+      { rm -f "$1-mod-$objarch.tof"; exit 1; }
+   rm -f "$1-mod-$objarch.tof"
+}
 obj_files=""
 for sourcefile in $sources; do
    base=`basename "$sourcefile"`
-   suffix="${base##*.}"
    modname="${base%.*}"
-
-   case "$suffix" in
-   om|mod)
-      objfile="${modname}-mod-${OBJARCH}.obj"
-      if [ ! -f "$objfile" ]; then
-         echo "$cmdname: expected $objfile not found" >&2
-         exit 1
-      fi
-      if [ "$asm_only" -eq 1 ]; then
-         toffile="${modname}.tof"
-         $BINDIR/obtofgen -o "$toffile" "$objfile" || exit 1
-         echo "$cmdname: $sourcefile -> $toffile"
-      else
-         toffile="${modname}-mod-${OBJARCH}.tof"
-         ofile="${modname}.o"
-         $BINDIR/obtofgen -o "$toffile" "$objfile" || exit 1
-         $BINDIR/tof2elf -arch $ARCH -o "$ofile" "$toffile" || { rm -f "$toffile"; exit 1; }
-         rm -f "$toffile"
-         echo "$cmdname: $sourcefile -> $ofile"
-         obj_files="$obj_files $ofile"
-      fi
-      ;;
-   od)
-      # Definition-only: produces ModName-def-gen.obj.  No code output.
-      ;;
-   *)
-      echo "$cmdname: unknown suffix: $suffix" >&2
-      exit 1
-      ;;
+   case "$base" in
+   *.om|*.mod) ;;
+   *) continue ;;
    esac
-done
-
-[ "$asm_only" -eq 1 ] && exit 0
-
-#  Step 3: link (only when -m / -o was given)
-[ -z "$main_module" ] && exit 0
-
-libfiles=""
-for lib in $LIBS; do
-   if [ ! -f "$libdir/$lib" ]; then
-      echo "$cmdname: $lib not found in $libdir" >&2
-      echo "$cmdname: set OBERON_LIBDIR or use -L to specify its directory" >&2
+   objfile="$modname-mod-$objarch.obj"
+   if [ ! -f "$objfile" ]; then
+      echo "$cmdname: expected $objfile not found" >&2
       exit 1
    fi
-   libfiles="$libfiles $libdir/$lib"
+   if [ $asm_only -eq 1 ]; then
+      tof "$modname" "$objfile" "$modname.tof"
+      echo "$cmdname: $sourcefile -> $modname.tof"
+   else
+      elf "$modname" "$objfile" "$modname.o"
+      echo "$cmdname: $sourcefile -> $modname.o"
+      obj_files="$obj_files $modname.o"
+   fi
+done
+[ $asm_only -eq 1 ] && exit 0
+[ -z "$main_module" ] && exit 0
+
+# step 3: link; imported modules which are not part of the libraries
+# are converted to .o files and linked, too
+libs="$libdir/libcompiler.a $libdir/libo.a $libdir/librtl.a" # link order
+for lib in $libs; do
+   if [ ! -f "$lib" ]; then
+      echo "$cmdname: library $lib not found" >&2
+      exit 1
+   fi
+done
+libmodules=`for lib in $libs; do ar t "$lib"; done | sed 's/\.o$//'`
+for objfile in ./*-mod-$objarch.obj; do
+   [ -f "$objfile" ] || continue
+   mod=`basename "$objfile" -mod-$objarch.obj`
+   echo "$libmodules" | grep -qx "$mod" && continue
+   echo "$obj_files" | grep -qw "$mod.o" && continue
+   elf "$mod" "$objfile" "$mod.o"
+   echo "$cmdname: dependency $mod -> $mod.o"
+   obj_files="$obj_files $mod.o"
 done
 
-# Auto-discover dependency .o files.
-# ulmoc compiled all transitive dependencies to mod-${OBJARCH}.obj.  Any module
-# not already in one of the libraries must be linked explicitly — convert
-# those to .o now.
-libo_modules=`for f in $libfiles; do ar t "$f"; done 2>/dev/null | sed 's/\.o$//'`
-for obj in ./*-mod-${OBJARCH}.obj; do
-   [ -f "$obj" ] || continue
-   mod=`basename "$obj" -mod-${OBJARCH}.obj`
-   # Skip if already in a library
-   echo "$libo_modules" | grep -qx "$mod" && continue
-   # Skip if we already produced this .o from an explicit source above
-   echo "$obj_files" | grep -qw "${mod}.o" && continue
-   toffile="${mod}-mod-${OBJARCH}.tof"
-   ofile="${mod}.o"
-   $BINDIR/obtofgen -o "$toffile" "$obj" || exit 1
-   $BINDIR/tof2elf -arch $ARCH -o "$ofile" "$toffile" || { rm -f "$toffile"; exit 1; }
-   rm -f "$toffile"
-   echo "$cmdname: dep $mod -> $ofile"
-   obj_files="$obj_files $ofile"
-done
-
-start_s="${out_file}.__start.s"
-start_o="${out_file}.__start.o"
-trap "rm -f ${start_s} ${start_o}" 0 1 2 15
-
-$BINDIR/genobrts "$main_module" > "$start_s" || exit 1
-as $ASFLAGS -o "$start_o" "$start_s" || exit 1
-ld -T "$LDSCRIPT" -m $LDARCH \
-   -o "$out_file" "$start_o" $obj_files $libfiles || exit 1
+start="$out_file.start"
+trap 'rm -f "$start.s" "$start.o"' 0 1 2 15
+# Oberon programs consist of one writable and executable segment by design
+norwxwarn=`"$LD" --help 2>/dev/null | grep -o -- --no-warn-rwx-segments | head -1`
+"$tooldir/genobrts" "$main_module" > "$start.s" || exit 1
+"$AS" $asflags -o "$start.o" "$start.s" || exit 1
+"$LD" -T "$tooldir/oberon-$arch.ld" -m $ldemul $norwxwarn $LDFLAGS \
+   -o "$out_file" "$start.o" $obj_files $libs || exit 1
 echo "$cmdname: linked -> $out_file"

@@ -393,8 +393,8 @@ void addblock(Elf *elf) {
   if (!bss) {
     buf = malloc(datalen > memlen ? datalen : memlen);
     for (i = 0; i < datalen; ++i) {
-      shrt = 0;
-      fscanf(in, "%hu ", &shrt);
+      if (fscanf(in, "%hu ", &shrt) != 1)
+        UNEXPECTED_EOF;
       buf[i] = shrt;
     }
     for (; i < memlen; ++i)

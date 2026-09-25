@@ -1,415 +1,244 @@
-# DestDir, BinDir etc are the paths that get burnt into the scripts
-# InstallDir, InstallBinDir etc are the paths where we copy the files to;
-# both sets are by default equal; however in case of package constructions
-# we set InstallDir etc to the package construction area and DestDir etc
-# to the final destination which is created later on by the package
-Root := $(shell pwd)
-ARCH ?= i386
-DestDir := $(Root)
-InstallDir := $(DestDir)
-BinDir := $(DestDir)/$(ARCH)/bin
-EtcDir := $(DestDir)/etc
-IntensityDir := $(EtcDir)/intensity
-InstallBinDir := $(InstallDir)/$(ARCH)/bin
-DBDir := $(DestDir)/var/cdbd
-InstallDBDir := $(InstallDir)/var/cdbd
-DBAuth := $(DBDir)/write
-VarDir := $(DestDir)/var
-PonsDir := $(VarDir)/pons
-CDBDDir := $(VarDir)/cdbd
-CDBDir := /pub/cdb/oberon
-ManDir := $(DestDir)/man
-SrcDir := $(DestDir)/src
-InitDir := $(DestDir)/etc/init.d
-InstallPonsDir := $(InstallDir)/var/pons
-InstallManDir := $(InstallDir)/man
-InstallSrcDir := $(InstallDir)/src
-InstallEtcDir := $(InstallDir)/etc
-InstallIntensityDir := $(InstallEtcDir)/intensity
-InstallVarDir := $(InstallDir)/var
-InstallInitDir := $(InstallDir)/etc/init.d
-RcFile := $(InstallDir)/rc
-ONSRoot := 127.0.0.1:9880
-ONSPort := 127.0.0.1:9881
-CDBDPort := 127.0.0.1:9882
-ONSRootOfStage1 := 127.0.0.1:9883
-ONSPortOfStage1 := 127.0.0.1:9884
-CDBDPortOfStage1 := 127.0.0.1:9885
-Lib := $(Root)/build/libo.a
-ScriptDir := $(Root)/build/scripts
-Binaries := cdbd nsh obci obco obdeps obload obtofgen obzap pons onsstat \
-	onsshut onsmkdir onswait
-InstalledBinaries := $(patsubst %,$(InstallBinDir)/%,$(Binaries))
-InitScripts := cdbd pons
-InstalledInitScripts := $(patsubst %,$(InstallInitDir)/%,$(InitScripts))
-InsertableInitScripts := $(patsubst %,$(InitDir)/%,$(InitScripts))
-MakeParams := DestDir=$(DestDir) BinDir=$(BinDir) DBAuth=$(DBAuth) \
-	ONSRoot=$(ONSRoot) PonsDir=$(PonsDir) CDBDDir=$(CDBDDir) \
-	CDBDir=$(CDBDir) SrcDir=$(SrcDir) IntensityDir=$(IntensityDir) \
-	InstallDir=$(InstallDir) InstallBinDir=$(InstallBinDir) \
-	InstallDBDir=$(InstallDBDir) InstallPonsDir=$(InstallPonsDir) \
-	InstallIntensityDir=$(InstallIntensityDir) ONSPort=$(ONSPort) \
-	CDBDPort=$(CDBDPort)
-Stage1Dir := $(Root)/stage1
-Stage2Dir := $(Root)/stage2
-
-.PHONY:	install
-install: ulmoinstall installsrc
-
-.PHONY:	installsuse
-installsuse: install installsuseinit
-
-.PHONY:	runsuse
-runsuse:	installsuse suserun
-
-.PHONY:	bindir
-bindir:
-	mkdir -p $(InstallBinDir)
-
-.PHONY:	installbin
-installbin:	ulmo-core-tools
-
-.PHONY:	installman
-installman:	mandir
-ifneq ($(InstallManDir),$(Root)/man)
-	cp -a $(Root)/man/* $(InstallManDir)
-endif
-
-.PHONY:	mandir
-mandir:
-	mkdir -p $(InstallManDir)
-
-.PHONY:	installsrc
-installsrc:	srcdir
-ifneq ($(InstallSrcDir),$(Root)/src)
-	cp -a $(Root)/src/* $(InstallSrcDir)
-endif
-
-.PHONY:	srcdir
-srcdir:
-	mkdir -p $(InstallSrcDir)
-
-.PHONY:	installvar
-installvar:
-	mkdir -p $(PonsDir)
-	mkdir -p $(CDBDDir)
-
-.PHONY:	installetc
-installetc:	gcintensity
-
-.PHONY:	installutil
-installutil:	bindir
-	cd src/util && $(MAKE) $(MakeParams) install
-
-.PHONY:	scripts
-scripts:
-	cd src/util && $(MAKE) $(MakeParams) InstallDir=$(Root) InstallBinDir=$(Root)/build/scripts DestDir=$(Root) BinDir=$(Root)/build/scripts IntensityDir=$(IntensityDir) install
-
-.PHONY: mkoblib
-mkoblib: scripts $(Lib)
-$(Lib):	installutil build/tofs.tgz
-	$(ScriptDir)/mkoblib build
-
-# Note: binary targets are now built via ulmoinstall (ulmo-based, no pons/cdbd).
-# The old pons/cdbd-based rules have been replaced.  For the old DB-based build,
-# use the scripts/mkoblib/oblink targets manually, or use the pons/cdbd system.
-
-.PHONY:	installrc
-installrc:	$(RcFile)
-$(RcFile):
-	echo OBERON=$(DestDir) >$@
-	echo PATH=$(BinDir):\$$PATH >>$@
-	echo MANPATH=$(ManDir):\$$MANPATH >>$@
-	echo ONS_ROOT=$(ONSRoot) >>$@
-	echo ONS_PORT=$(ONSPort) >>$@
-	echo CDBD_PORT=$(CDBDPort) >>$@
-	echo CDB_BASEDIR=$(CDBDir) >>$@
-	echo CDB_AUTH=$(DBAuth) >>$@
-	echo export OBERON PATH MANPATH ONS_ROOT ONS_PORT \
-	   CDBD_PORT CDB_BASEDIR CDB_AUTH >>$@
-
-.PHONY:	installsuseinit initdir
-installsuseinit:	initdir $(InstalledInitScripts)
-initdir:
-	mkdir -p $(InstallInitDir)
-$(InstallInitDir)/cdbd:		scripts
-	BASEDIR=$(DestDir) BINDIR=$(BinDir) \
-	   $(ScriptDir)/obmk_suse_init_cdbd \
-	      -c $(CDBDir) -d $(CDBDDir) -r $(ONSRoot) >$@
-	chmod 755 $@
-$(InstallInitDir)/pons:		$(ScriptDir)/obmk_suse_init_pons
-	ONS_ROOT=$(ONSRoot) ONS_PORT=$(ONSPort) \
-	   BASEDIR=$(DestDir) BINDIR=$(BinDir) \
-	   $(ScriptDir)/obmk_suse_init_pons \
-	      -d $(PonsDir) >$@
-	chmod 755 $@
-
-.PHONY:	gcintensity
-gcintensity:
-	mkdir -p $(InstallIntensityDir)
-	$(ScriptDir)/obgcdflts $(InstallIntensityDir)
-
-.PHONY:	suseinsserv
-suseinsserv:	$(InsertableInitScripts) 
-	insserv $(InitDir)/pons
-	insserv $(InitDir)/cdbd
-.PHONY:	suserun
-suserun:	suseinsserv
-	sh $(InitDir)/pons start
-	sh $(InitDir)/cdbd start
-.PHONY:	stdsuserun
-stdsuserun:
-	$(MAKE) $(MakeParams) \
-	   InitDir=/etc/init.d \
-	   InstallInitDir=/etc/init.d \
-	   suserun
-
-.PHONY:	stage1 runstage1 stage2 stage12cmp steadystatetest finishstage1
-stage1:
-	$(SHELL) -c 'time $(BinDir)/mk_obstage \
-	   $(Stage1Dir) $(BinDir) $(BinDir) $(ONSRoot) $(CDBDir) $(DBAuth)'
-runstage1:
-	$(BinDir)/run_obstage $(Stage1Dir) $(BinDir) \
-	   $(ONSRootOfStage1) $(ONSPortOfStage1) $(CDBDPortOfStage1)
-stage2:
-	$(SHELL) -c 'time $(BinDir)/mk_obstage \
-	   $(Stage2Dir) $(BinDir) $(Stage1Dir) $(ONSRootOfStage1) \
-	   $(CDBDir) $(Stage1Dir)/var/cdbd/write'
-finishstage1:
-	-ONS_ROOT=$(ONSRootOfStage1) \
-	   $(Stage1Dir)/onsshut -a $(Stage1Dir)/var/pons/shutdown /pub/pons
-stage12cmp:
-	cmp $(Stage1Dir)/cdbd $(Stage2Dir)/cdbd
-	cmp $(Stage1Dir)/nsh $(Stage2Dir)/nsh
-	cmp $(Stage1Dir)/obci $(Stage2Dir)/obci
-	cmp $(Stage1Dir)/obco $(Stage2Dir)/obco
-	cmp $(Stage1Dir)/obdeps $(Stage2Dir)/obdeps
-	cmp $(Stage1Dir)/obload $(Stage2Dir)/obload
-	cmp $(Stage1Dir)/obtofgen $(Stage2Dir)/obtofgen
-	cmp $(Stage1Dir)/obzap $(Stage2Dir)/obzap
-	cmp $(Stage1Dir)/pons $(Stage2Dir)/pons
-	cmp $(Stage1Dir)/onsstat $(Stage2Dir)/onsstat
-	cmp $(Stage1Dir)/onsshut $(Stage2Dir)/onsshut
-	cmp $(Stage1Dir)/onsmkdir $(Stage2Dir)/onsmkdir
-	cmp $(Stage1Dir)/onswait $(Stage2Dir)/onswait
-steadystatetest:	stage1 runstage1 stage2 finishstage1 stage12cmp
-
-.PHONY:	download_tof2elf
-download_tof2elf:
-	wget -O src/util/tof2elf/tof2elf ftp://ftp.mathematik.uni-ulm.de/pub/soft/oberon/ulm/i386/tof2elf
-	chmod 755 src/util/tof2elf/tof2elf
-	touch src/util/tof2elf/tof2elf
-
-# ============================================================
-# ulmoinstall: DB-free build and install — no pons/cdbd needed
+# Makefile -- build and install ulmo, the compiler for Ulm's Oberon
 #
-# Bootstrap binaries (bootstrap/ulmoc, bootstrap/obtofgen) seed the
-# build.  Everything is then compiled from source and the bootstrap copies
-# are replaced by freshly-built binaries.
+#   make [ARCH=amd64|i386]   build the compiler and its libraries
+#   make check               stage 3 self-hosting check and a test program
+#   make install             install (PREFIX, BINDIR, LIBDIR, DATADIR, DESTDIR)
+#   make uninstall
+#   make clean
+#   make cdb-tools           programs of the (legacy) compiler database
 #
-# Usage:
-#   make ulmoinstall [DestDir=/path/to/install]
-# ============================================================
-
-LibDir          := $(BinDir)/../lib
-BootstrapDir    := $(Root)/bootstrap
-SrcRoot         := $(Root)/src
-CompilerSrcDir  := $(SrcRoot)/compiler
-LibSources      := $(wildcard $(SrcRoot)/rtl/*.om $(SrcRoot)/lib/*.om \
-                              $(SrcRoot)/compiler/*.om)
-UlmoUtilDir     := $(Root)/src/util/ulmo
-
-# For AMD64: the cross-compiler ulmoc is the i386 build (which has the AMD64 backend).
-# Falls back to system ulmoc if i386 install is not present.
-ifeq ($(ARCH),amd64)
-_I386BIN        := $(DestDir)/i386/bin
-_CROSS_ULMOC    := $(or $(wildcard $(_I386BIN)/ulmoc),/home/noch/oberon/bin/ulmoc)
-TOFGEN_MODULE   := OberonAMD64TransportableObjectFormatGenerator
-TOFGEN_LIBDIR   := $(DestDir)/i386/lib
-_BUILD_ULMO     := $(_I386BIN)/ulmo
-else
-_CROSS_ULMOC    := $(BootstrapDir)/ulmoc
-TOFGEN_MODULE   := OberonI386TransportableObjectFormatGenerator
-TOFGEN_LIBDIR   := $(LibDir)
-_BUILD_ULMO     := $(InstallBinDir)/ulmo
-endif
-
-# -- Directories ----------------------------------------------
-.PHONY: ulmo-dirs
-ulmo-dirs:
-	mkdir -p $(InstallBinDir) $(LibDir)
-
-# -- tof2elf: the one C tool in the pipeline ------------------
-$(InstallBinDir)/tof2elf: $(Root)/src/util/tof2elf/tof2elf.c | ulmo-dirs
-	gcc -O2 -o $@ $< -lelf
-	chmod 755 $@
-
-# -- Script/data tools -----------------------------------------
-$(InstallBinDir)/genobrts: $(Root)/src/util/genobrts/genobrts.pl | ulmo-dirs
-	cp $< $@
-	chmod 755 $@
-
-$(InstallBinDir)/oblink: $(Root)/src/util/oblink/oblink.sh | ulmo-dirs
-	$(Root)/substparams BINDIR=$(BinDir) ARCH=$(ARCH) <$< >$@
-	chmod 755 $@
-
-$(InstallBinDir)/oberon-i386.ld: $(Root)/src/util/oblink/oberon-i386.ld | ulmo-dirs
-	cp $< $@
-
-$(InstallBinDir)/oberon-amd64.ld: $(Root)/src/util/oblink/oberon-amd64.ld | ulmo-dirs
-	cp $< $@
-
-$(InstallBinDir)/ulmo: $(UlmoUtilDir)/ulmo.sh | ulmo-dirs
-	$(Root)/substparams BINDIR=$(BinDir) ARCH=$(ARCH) SRCROOT=$(SrcRoot) <$< >$@
-	chmod 755 $@
-
-ifeq ($(ARCH),amd64)
-# -- AMD64 libraries (librtl.a, libo.a, libcompiler.a): requires AMD64-capable obtofgen and ulmoc already installed --
-# obtofgen and ulmoc are built before libo.a (see ulmo-core-tools ordering).
-$(LibDir)/libo.a: $(InstallBinDir)/tof2elf \
-                  $(InstallBinDir)/ulmo \
-                  $(InstallBinDir)/ulmoc \
-                  $(InstallBinDir)/obtofgen \
-                  $(LibSources) \
-                  | ulmo-dirs
-	$(UlmoUtilDir)/build-libo.sh \
-	   $(InstallBinDir) $(SrcRoot) $(LibDir) AMD64
-
-# -- AMD64 obtofgen: built before libo.a using i386 ulmo + i386 libo.a --------
-$(InstallBinDir)/obtofgen: $(CompilerSrcDir)/$(TOFGEN_MODULE).om | ulmo-dirs
-	@if [ ! -f $(TOFGEN_LIBDIR)/libo.a ]; then \
-	   echo "ERROR: $(TOFGEN_LIBDIR)/libo.a not found."; \
-	   echo "For AMD64 builds, run 'make ARCH=i386 DestDir=$(DestDir) ulmoinstall' first."; \
-	   exit 1; \
-	fi
-	$(eval _TMPD := $(shell mktemp -d /tmp/ulmoctofgen-XXXXXX))
-	cd $(_TMPD) && $(_BUILD_ULMO) \
-	   -m $(TOFGEN_MODULE) \
-	   -L $(TOFGEN_LIBDIR) \
-	   $(CompilerSrcDir)/$(TOFGEN_MODULE).om && \
-	mv $(TOFGEN_MODULE) $(InstallBinDir)/obtofgen
-	rm -rf $(_TMPD)
-	chmod 755 $(InstallBinDir)/obtofgen
-
-else
-# -- i386 libraries (librtl.a, libo.a, libcompiler.a): bootstrap obtofgen/ulmoc from bootstrap/ if not present -----
-$(LibDir)/libo.a: $(InstallBinDir)/tof2elf \
-                  $(InstallBinDir)/ulmo \
-                  $(LibSources) \
-                  | ulmo-dirs
-	@if [ ! -f $(InstallBinDir)/ulmoc ]; then \
-	   echo "bootstrap: installing ulmoc from $(_CROSS_ULMOC)"; \
-	   cp -f $(_CROSS_ULMOC) $(InstallBinDir)/ulmoc; \
-	   chmod 755 $(InstallBinDir)/ulmoc; \
-	fi
-	@if [ ! -f $(InstallBinDir)/obtofgen ]; then \
-	   echo "bootstrap: installing obtofgen from $(BootstrapDir)"; \
-	   cp -f $(BootstrapDir)/obtofgen $(InstallBinDir)/obtofgen; \
-	   chmod 755 $(InstallBinDir)/obtofgen; \
-	fi
-	$(UlmoUtilDir)/build-libo.sh \
-	   $(InstallBinDir) $(SrcRoot) $(LibDir) I386
-
-# -- i386 obtofgen: built after libo.a, replaces bootstrap copy ---------------
-$(InstallBinDir)/obtofgen: $(CompilerSrcDir)/$(TOFGEN_MODULE).om \
-                            $(LibDir)/libo.a | ulmo-dirs
-	$(eval _TMPD := $(shell mktemp -d /tmp/ulmoctofgen-XXXXXX))
-	cd $(_TMPD) && $(_BUILD_ULMO) \
-	   -m $(TOFGEN_MODULE) \
-	   -L $(TOFGEN_LIBDIR) \
-	   $(CompilerSrcDir)/$(TOFGEN_MODULE).om && \
-	mv $(TOFGEN_MODULE) $(InstallBinDir)/obtofgen
-	rm -rf $(_TMPD)
-	chmod 755 $(InstallBinDir)/obtofgen
-
-endif
-
-# -- ulmoc: build from source (i386) or copy cross-compiler (amd64) -------
-# AMD64 has no native ulmoc yet; amd64/bin/ulmoc is just the i386 cross-compiler.
-ifeq ($(ARCH),amd64)
-$(InstallBinDir)/ulmoc: $(_CROSS_ULMOC) | ulmo-dirs
-	cp -f $(_CROSS_ULMOC) $@
-	chmod 755 $@
-else
-$(InstallBinDir)/ulmoc: $(LibDir)/libo.a \
-                           $(InstallBinDir)/obtofgen \
-                           $(CompilerSrcDir)/FilesystemDB.om \
-                           $(UlmoUtilDir)/Ulmo.om
-	$(eval _TMPD := $(shell mktemp -d /tmp/ulmo-self-XXXXXX))
-	cd $(_TMPD) && $(InstallBinDir)/ulmo \
-	   -m Ulmo \
-	   -L $(LibDir) \
-	   $(CompilerSrcDir)/FilesystemDB.om \
-	   $(UlmoUtilDir)/Ulmo.om && \
-	mv Ulmo $(InstallBinDir)/ulmoc
-	rm -rf $(_TMPD)
-	chmod 755 $(InstallBinDir)/ulmoc
-endif
-
-# -- DB tools: optional, built from source with ulmo ----------
-# These provide the pons/cdbd infrastructure for users who want it.
-# Each is an Oberon main module linked with libo.a; no DB needed to BUILD.
-# Built via a phony target (loop) to avoid conflicting with the old pons/cdbd
-# rules for the same target file names.
+# ARCH defaults to the architecture of the host.  The build starts with the
+# compiler in bootstrap/$(ARCH) and builds the compiler and its libraries
+# twice: stage 1 with the bootstrap compiler, stage 2 with the compiler of
+# stage 1.  Stage 2 is installed.  "make check" builds stage 3 with the
+# compiler of stage 2; both must be identical.
 #
-# Module name → binary name mapping:
-#   OberonI386TransportableObjectFormatGenerator → obtofgen  (already above)
-#   OberonLoader        → obload
-#   CDBDaemon           → cdbd
-#   PersistentNameServer→ pons
-#   OberonCheckIn       → obci
-#   CDBCheckoutSource   → obco
-#   OberonZap           → obzap
-#   OberonDependencies  → obdeps
-#   NamesShell          → nsh
-#   NodeStatus          → onsstat
-#   ShutdownNode        → onsshut
-#   MakeDirectory       → onsmkdir
-#   PathWaiter          → onswait
+# Sources and libraries (see src/):
+#   src/rtl       run time system, linked into every program  -> librtl.a
+#   src/rtl/ARCH  architecture-specific versions of rtl modules
+#   src/lib       general library                             -> libo.a
+#   src/compiler  the compiler                                -> libcompiler.a
+#
+# Installed files:
+#   BINDIR/ulmo                        the only command users need
+#   LIBDIR/ulmo/tof2elf                converts TOF text to ELF objects
+#   LIBDIR/ulmo/ARCH/                  compiler, tools, linker script and
+#                                      libraries for one target architecture
+#   DATADIR/ulmo/src/                  sources of the libraries
+#
+# build/root has the same layout as an installation; build/root/bin/ulmo
+# can be used without installing.
 
-UlmoDbTools := \
-	OberonLoader:obload \
-	CDBDaemon:cdbd \
-	PersistentNameServer:pons \
-	OberonCheckIn:obci \
-	CDBCheckoutSource:obco \
-	OberonZap:obzap \
-	OberonDependencies:obdeps \
-	NamesShell:nsh \
-	NodeStatus:onsstat \
-	ShutdownNode:onsshut \
-	MakeDirectory:onsmkdir \
-	PathWaiter:onswait
+# === configuration ========================================================
 
-.PHONY: ulmo-db-tools
-ulmo-db-tools: ulmo-core-tools
-	$(foreach pair,$(UlmoDbTools), \
-	  $(eval _MOD  := $(word 1,$(subst :, ,$(pair)))) \
-	  $(eval _BIN  := $(word 2,$(subst :, ,$(pair)))) \
-	  $(eval _DEST := $(InstallBinDir)/$(_BIN)) \
-	  $(eval _TMPD := $(shell mktemp -d /tmp/ulmo-dbtool-XXXXXX)) \
-	  $(shell cd $(_TMPD) && \
-	      $(InstallBinDir)/ulmo \
-	         -m $(_MOD) -L $(LibDir) \
-	         $(wildcard $(SrcRoot)/*/$(_MOD).om) && \
-	      mv $(_MOD) $(_DEST) && \
-	      chmod 755 $(_DEST) && \
-	      rm -rf $(_TMPD) && \
-	      echo "  built: $(_BIN)") \
-	)
+ARCH ?= $(shell uname -m)
+override ARCH := $(patsubst i%86,i386,$(patsubst x86,i386,$(patsubst x86_64,amd64,$(ARCH))))
 
-# -- Top-level ulmoinstall target ------------------------------
-.PHONY: ulmoinstall ulmo-core-tools
-ulmo-core-tools: ulmo-dirs \
-	$(InstallBinDir)/tof2elf \
-	$(InstallBinDir)/genobrts \
-	$(InstallBinDir)/oblink \
-	$(InstallBinDir)/oberon-$(ARCH).ld \
-	$(InstallBinDir)/ulmo \
-	$(LibDir)/libo.a \
-	$(InstallBinDir)/obtofgen \
-	$(InstallBinDir)/ulmoc
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+LIBDIR ?= $(PREFIX)/lib
+DATADIR ?= $(PREFIX)/share
+DESTDIR ?=
+CFLAGS ?= -O2
+INSTALL ?= install
 
-ulmoinstall: ulmo-core-tools
-	@echo "ulmoinstall complete (ARCH=$(ARCH), DestDir=$(DestDir))."
-	@echo "To also build DB tools (cdbd, pons, etc.): make ulmo-db-tools"
+ULMOLIBDIR := $(LIBDIR)/ulmo
+ULMOSRCDIR := $(DATADIR)/ulmo/src
+
+ifeq ($(ARCH),i386)
+OBJARCH := I386
+ARCH_ASFLAGS := --32
+LDEMUL := elf_i386
+TOFGEN_MAIN := OberonI386TransportableObjectFormatGenerator
+else ifeq ($(ARCH),amd64)
+OBJARCH := AMD64
+ARCH_ASFLAGS := --64
+LDEMUL := elf_x86_64
+TOFGEN_MAIN := OberonAMD64TransportableObjectFormatGenerator
+else
+$(error unsupported ARCH=$(ARCH), use ARCH=amd64 or ARCH=i386)
+endif
+
+# Oberon programs consist of one writable and executable segment by design
+NORWXWARN := $(shell $(LD) --help 2>/dev/null | grep -o -- --no-warn-rwx-segments | head -1)
+
+# === sources ==============================================================
+
+# modules in src/rtl/$(ARCH) replace the generic ones of the same name
+RTL_ARCH_SRC := $(wildcard src/rtl/$(ARCH)/*.om)
+RTL_SRC := $(RTL_ARCH_SRC) \
+	$(filter-out $(addprefix src/rtl/,$(notdir $(RTL_ARCH_SRC))), \
+		$(wildcard src/rtl/*.om))
+COMPILER_SRC := $(wildcard src/compiler/*.om)
+LIB_SRC := $(wildcard src/lib/*.om)
+ALL_SRC := $(RTL_SRC) $(COMPILER_SRC) $(LIB_SRC)
+ALL_DEF := $(wildcard src/rtl/$(ARCH)/*.od src/rtl/*.od \
+	src/compiler/*.od src/lib/*.od)
+
+SRCDIRS := $(wildcard src/rtl/$(ARCH)) src/rtl src/lib src/compiler
+INCS := $(foreach dir,$(SRCDIRS),-I $(CURDIR)/$(dir))
+
+modules = $(basename $(notdir $(1)))
+
+# === build tree ===========================================================
+
+B := build/$(ARCH)
+ROOT := build/root
+ROOTARCH := $(ROOT)/lib/ulmo/$(ARCH)
+TOF2ELF := $(ROOT)/lib/ulmo/tof2elf
+GENOBRTS := src/util/genobrts/genobrts-$(ARCH)
+LDSCRIPT := src/util/oblink/oberon-$(ARCH).ld
+
+# shell command linking the main module $$main into the program $$prog
+# with the libraries in the directory $$libs
+LINK = echo "  LINK    $$prog" && \
+	perl $(GENOBRTS) $$main >$$prog.start.s && \
+	$(AS) $(ARCH_ASFLAGS) -o $$prog.start.o $$prog.start.s && \
+	$(LD) -T $(LDSCRIPT) -m $(LDEMUL) $(NORWXWARN) -o $$prog $$prog.start.o \
+		$$libs/libcompiler.a $$libs/libo.a $$libs/librtl.a && \
+	rm -f $$prog.start.s $$prog.start.o
+
+.PHONY: all stage1 stage2 stage3 root check install uninstall clean cdb-tools
+
+all: root
+	@if cmp -s $(B)/stage1/ulmoc $(B)/stage2/ulmoc; then \
+		echo "ulmo for $(ARCH) built; stages 1 and 2 are identical"; \
+	else \
+		echo "ulmo for $(ARCH) built; stage 2 differs from stage 1" \
+			"(the bootstrap compiler is older), see make check"; \
+	fi
+
+stage1: $(TOF2ELF)
+	@$(MAKE) --no-print-directory stage STAGE=1 \
+		OC=bootstrap/$(ARCH)/ulmoc TOFGEN=bootstrap/$(ARCH)/obtofgen
+
+stage2: stage1
+	@$(MAKE) --no-print-directory stage STAGE=2 \
+		OC=$(B)/stage1/ulmoc TOFGEN=$(B)/stage1/obtofgen
+
+stage3: stage2
+	@$(MAKE) --no-print-directory stage STAGE=3 \
+		OC=$(B)/stage2/ulmoc TOFGEN=$(B)/stage2/obtofgen
+
+$(TOF2ELF): src/util/tof2elf/tof2elf.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< -lelf
+
+root: stage2
+	@mkdir -p $(ROOT)/bin $(ROOTARCH) $(ROOT)/share/ulmo
+	@cp -p $(B)/stage2/ulmoc $(B)/stage2/obtofgen $(B)/stage2/lib/*.a \
+		$(LDSCRIPT) $(ROOTARCH)/
+	@cp -p $(GENOBRTS) $(ROOTARCH)/genobrts
+	@cp -p src/util/ulmo/ulmo.sh $(ROOT)/bin/ulmo
+	@chmod 755 $(ROOT)/bin/ulmo $(ROOTARCH)/genobrts
+	@ln -sfn ../../../../src $(ROOT)/share/ulmo/src
+
+# === one stage: compile all modules with $(OC), archive them, link tools ===
+
+ifdef STAGE
+S := $(B)/stage$(STAGE)
+MOD_OBJ := $(foreach m,$(call modules,$(ALL_SRC)),$(S)/obj/$(m)-mod-$(OBJARCH).obj)
+objects = $(addprefix $(S)/obj/,$(addsuffix .o,$(call modules,$(1))))
+
+.PHONY: stage
+stage: $(S)/ulmoc $(S)/obtofgen
+	@echo "stage $(STAGE) ($(ARCH)): ulmoc $$(md5sum < $(S)/ulmoc | cut -c1-32)"
+
+# objects compiled by another compiler are not reused
+$(S)/compiler.id: $(OC) $(TOFGEN)
+	@mkdir -p $(S)
+	@cat $(OC) $(TOFGEN) | md5sum > $@.new
+	@if cmp -s $@.new $@; then rm $@.new; \
+	else rm -rf $(S)/obj $(S)/lib; mv $@.new $@; fi
+
+# the run time system and the compiler first, then the rest of the library;
+# ulmoc compiles imported modules as needed and keeps up-to-date objects
+$(S)/compiled: $(S)/compiler.id $(ALL_SRC) $(ALL_DEF)
+	@mkdir -p $(S)/obj
+	@for src in $(ALL_SRC); do \
+		echo "  OC      $$src"; \
+		(cd $(S)/obj && $(abspath $(OC)) -a $(ARCH) $(INCS) \
+			$(CURDIR)/$$src) || exit 1; \
+	done
+	@touch $@
+
+$(MOD_OBJ): $(S)/compiled ;
+
+$(S)/obj/%.o: $(S)/obj/%-mod-$(OBJARCH).obj
+	@$(abspath $(TOFGEN)) -o $(@:.o=.tof) $<
+	@$(TOF2ELF) -arch $(ARCH) -o $@ $(@:.o=.tof)
+	@rm -f $(@:.o=.tof)
+
+$(S)/lib/librtl.a: $(call objects,$(RTL_SRC))
+$(S)/lib/libo.a: $(call objects,$(LIB_SRC))
+$(S)/lib/libcompiler.a: $(call objects,$(COMPILER_SRC))
+$(S)/lib/%.a:
+	@echo "  AR      $@"
+	@mkdir -p $(@D)
+	@rm -f $@
+	@$(AR) rcD $@ $^
+
+$(S)/ulmoc: $(S)/lib/libcompiler.a $(S)/lib/libo.a $(S)/lib/librtl.a
+	@main=Ulmo prog=$@ libs=$(S)/lib; $(LINK)
+
+$(S)/obtofgen: $(S)/lib/libcompiler.a $(S)/lib/libo.a $(S)/lib/librtl.a
+	@main=$(TOFGEN_MAIN) prog=$@ libs=$(S)/lib; $(LINK)
+endif
+
+# === check ================================================================
+
+check: all stage3
+	@cmp $(B)/stage2/ulmoc $(B)/stage3/ulmoc
+	@cmp $(B)/stage2/obtofgen $(B)/stage3/obtofgen
+	@echo "self-hosting: stages 2 and 3 are identical"
+	@rm -rf $(B)/test
+	@mkdir -p $(B)/test
+	@cd $(B)/test && $(CURDIR)/$(ROOT)/bin/ulmo -arch $(ARCH) -m Hello \
+		$(CURDIR)/src/test/Greeter.om $(CURDIR)/src/test/Hello.om >build.log
+	@$(B)/test/Hello | cmp -s - src/test/Hello.expected
+	@echo "test program: ok"
+
+# === installation =========================================================
+
+install: all
+	$(INSTALL) -d $(DESTDIR)$(BINDIR) $(DESTDIR)$(ULMOLIBDIR)/$(ARCH) \
+		$(DESTDIR)$(ULMOSRCDIR)
+	sed -e 's|^ULMOLIBDIR=.*|ULMOLIBDIR=$${ULMOLIBDIR:-$(ULMOLIBDIR)}|' \
+		-e 's|^ULMOSRCDIR=.*|ULMOSRCDIR=$${ULMOSRCDIR:-$(ULMOSRCDIR)}|' \
+		src/util/ulmo/ulmo.sh >$(DESTDIR)$(BINDIR)/ulmo
+	chmod 755 $(DESTDIR)$(BINDIR)/ulmo
+	$(INSTALL) -m 755 $(TOF2ELF) $(DESTDIR)$(ULMOLIBDIR)/tof2elf
+	$(INSTALL) -m 755 $(ROOTARCH)/ulmoc $(ROOTARCH)/obtofgen \
+		$(ROOTARCH)/genobrts $(DESTDIR)$(ULMOLIBDIR)/$(ARCH)/
+	$(INSTALL) -m 644 $(ROOTARCH)/oberon-$(ARCH).ld $(ROOTARCH)/librtl.a \
+		$(ROOTARCH)/libo.a $(ROOTARCH)/libcompiler.a \
+		$(DESTDIR)$(ULMOLIBDIR)/$(ARCH)/
+	cp -R src/rtl src/lib src/compiler $(DESTDIR)$(ULMOSRCDIR)/
+
+# the command, the converter and the sources are shared by all installed
+# architectures and removed with the last one
+uninstall:
+	rm -rf $(DESTDIR)$(ULMOLIBDIR)/$(ARCH)
+	@if [ -z "$$(ls $(DESTDIR)$(ULMOLIBDIR) | grep -v '^tof2elf$$')" ]; then \
+		echo "rm -rf $(DESTDIR)$(ULMOLIBDIR) $(DESTDIR)$(DATADIR)/ulmo" \
+			"$(DESTDIR)$(BINDIR)/ulmo"; \
+		rm -rf $(DESTDIR)$(ULMOLIBDIR) $(DESTDIR)$(DATADIR)/ulmo \
+			$(DESTDIR)$(BINDIR)/ulmo; \
+	fi
+
+clean:
+	rm -rf build
+
+# === programs of the compiler database (see Makefile.cdb) =================
+
+CDB_TOOLS := OberonLoader:obload CDBDaemon:cdbd PersistentNameServer:pons \
+	OberonCheckIn:obci CDBCheckoutSource:obco OberonZap:obzap \
+	OberonDependencies:obdeps NamesShell:nsh NodeStatus:onsstat \
+	ShutdownNode:onsshut MakeDirectory:onsmkdir PathWaiter:onswait
+
+cdb-tools: stage2
+	@mkdir -p $(B)/cdb
+	@for tool in $(CDB_TOOLS); do \
+		main=$${tool%%:*} prog=$(B)/cdb/$${tool#*:} libs=$(B)/stage2/lib; \
+		$(LINK) || exit 1; \
+	done

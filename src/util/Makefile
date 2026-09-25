@@ -2,7 +2,7 @@
 ARCH ?= i386
 Dirs := genobrts load_libsources mkoblib obbuild oblink \
 	obmkinit obstage obgcdflts \
-	start_cdbd start_pons tof2elf ulmo
+	start_cdbd start_pons tof2elf
 #------------------------------------------------------------------------------
 define propagate-target
 @for dir in $(Dirs) ;\
