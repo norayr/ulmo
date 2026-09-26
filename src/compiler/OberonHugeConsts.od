@@ -1,0 +1,45 @@
+(* Ulm's Oberon Library
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+*)
+
+DEFINITION OberonHugeConsts;
+
+   (* folding of 64-bit integer constants (HUGEINT)
+
+      The compiler holds integer constants in 32 bits (intval); a constant
+      beyond that range keeps its low word in intval and its high word in
+      setval (setval = {} for all other constants).  The values between
+      2^31 and 2^32-1 cannot be represented this way; Join fails for them
+      and the expression is left to run time.
+   *)
+
+   TYPE
+      Value = RECORD lo, hi: LONGINT END;
+
+   PROCEDURE Split(intval: LONGINT; setval: SET; VAR value: Value);
+   PROCEDURE Join(value: Value; VAR intval: LONGINT; VAR setval: SET) : BOOLEAN;
+      (* FALSE if value cannot be represented *)
+
+   PROCEDURE Add(a, b: Value; VAR sum: Value) : BOOLEAN;
+   PROCEDURE Sub(a, b: Value; VAR diff: Value) : BOOLEAN;
+   PROCEDURE Neg(a: Value; VAR neg: Value) : BOOLEAN;
+      (* FALSE on overflow *)
+
+   PROCEDURE Compare(a, b: Value) : INTEGER;
+      (* < 0, = 0, > 0 if a < b, a = b, a > b *)
+
+END OberonHugeConsts.

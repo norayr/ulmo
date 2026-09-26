@@ -1,0 +1,98 @@
+(* Ulm's Oberon Library
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+*)
+
+MODULE OberonHugeConsts;
+
+   (* A value is hi * 2^32 + lo, where lo is taken unsigned.  The compiler
+      itself computes with 32-bit LONGINTs, which wrap around. *)
+
+   IMPORT SYS := SYSTEM;
+
+   TYPE
+      Value = RECORD lo, hi: LONGINT END;
+
+   PROCEDURE Below(x, y: LONGINT) : BOOLEAN;
+      (* x < y, taken unsigned *)
+   BEGIN
+      RETURN (x < y) # ((x < 0) # (y < 0))
+   END Below;
+
+   PROCEDURE Split(intval: LONGINT; setval: SET; VAR value: Value);
+   BEGIN
+      value.lo := intval;
+      IF setval # {} THEN
+	 value.hi := SYS.VAL(LONGINT, setval);
+      ELSIF intval < 0 THEN
+	 value.hi := -1;
+      ELSE
+	 value.hi := 0;
+      END;
+   END Split;
+
+   PROCEDURE Join(value: Value; VAR intval: LONGINT; VAR setval: SET) : BOOLEAN;
+   BEGIN
+      intval := value.lo;
+      IF (value.hi = 0) & (value.lo >= 0) OR
+	    (value.hi = -1) & (value.lo < 0) THEN
+	 setval := {}; (* fits into 32 bits *)
+      ELSIF value.hi = 0 THEN
+	 RETURN FALSE (* 2^31 .. 2^32-1: high word would be {} *)
+      ELSE
+	 setval := SYS.VAL(SET, value.hi);
+      END;
+      RETURN TRUE
+   END Join;
+
+   PROCEDURE Add(a, b: Value; VAR sum: Value) : BOOLEAN;
+   BEGIN
+      sum.lo := a.lo + b.lo;
+      sum.hi := a.hi + b.hi;
+      IF Below(sum.lo, a.lo) THEN INC(sum.hi) END; (* carry *)
+      (* overflow: operands of the same sign, result of the other *)
+      RETURN ~((a.hi < 0) = (b.hi < 0)) OR ((sum.hi < 0) = (a.hi < 0))
+   END Add;
+
+   PROCEDURE Neg(a: Value; VAR neg: Value) : BOOLEAN;
+   BEGIN
+      IF (a.hi = MIN(LONGINT)) & (a.lo = 0) THEN RETURN FALSE END;
+      neg.lo := -a.lo;
+      neg.hi := -a.hi;
+      IF a.lo # 0 THEN DEC(neg.hi) END; (* borrow *)
+      RETURN TRUE
+   END Neg;
+
+   PROCEDURE Sub(a, b: Value; VAR diff: Value) : BOOLEAN;
+   BEGIN
+      diff.lo := a.lo - b.lo;
+      diff.hi := a.hi - b.hi;
+      IF Below(a.lo, b.lo) THEN DEC(diff.hi) END; (* borrow *)
+      (* overflow: operands of different signs, result not of a's *)
+      RETURN ((a.hi < 0) = (b.hi < 0)) OR ((diff.hi < 0) = (a.hi < 0))
+   END Sub;
+
+   PROCEDURE Compare(a, b: Value) : INTEGER;
+   BEGIN
+      IF a.hi < b.hi THEN RETURN -1
+      ELSIF a.hi > b.hi THEN RETURN 1
+      ELSIF a.lo = b.lo THEN RETURN 0
+      ELSIF Below(a.lo, b.lo) THEN RETURN -1
+      ELSE RETURN 1
+      END;
+   END Compare;
+
+END OberonHugeConsts.

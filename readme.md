@@ -296,9 +296,10 @@ information (no DWARF). gdb works on the machine level:
   time). On i386 its values are kept in register pairs, and `DIV` and
   `MOD` use the x87 floating point unit, so a CPU with FPU is needed
   (486DX or later; any CPU of the last decades). Integer literals are
-  still limited to the range of `LONGINT`; larger constants have to be
-  computed, and expressions with `MIN(HUGEINT)` or `MAX(HUGEINT)` are
-  evaluated at run time.
+  still limited to the range of `LONGINT`; larger constants are built from
+  `MIN(HUGEINT)` and `MAX(HUGEINT)`: sums, differences and comparisons of
+  such constants are computed by the compiler (`CONST big = MAX(HUGEINT) -
+  5`), other operations on them at run time.
 - The amd64 backend is new. It compiles the compiler and the whole library,
   and the compiler reproduces itself, but it has seen far less use than the
   i386 backend.

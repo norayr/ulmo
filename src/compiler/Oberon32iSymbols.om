@@ -35,10 +35,11 @@ MODULE Oberon32iSymbols;
    *)
 
    IMPORT NetIO, IEEE754Double, BaseTypes := OberonBaseTypes,
-      CompilerErrors, CompilerObjects, Disciplines, IEEE, Lex := OberonLex,
+      CompilerErrors, CompilerObjects, Disciplines, Huge := OberonHugeConsts,
+      IEEE, Lex := OberonLex,
       Oberon32i, Oberon32iIntegers, Oberon8Chars, OberonTypes,
       PersistentObjects, RelatedEvents, Services, Streams,
-      Sym := OberonSymbols, Texts, Write;
+      Sym := OberonSymbols, SYS := SYSTEM, Texts, Write;
 
    TYPE
       Integer = Oberon32i.Integer;
@@ -56,6 +57,7 @@ MODULE Oberon32iSymbols;
       stringConst = 5;
       nilConst = 6;
       noConst = 7; (* not a constant; carries just type information *)
+      hugeConstTag = 100; (* kind of written 64-bit constants: low and high word *)
    TYPE
       ConstantKind = SHORTINT; (* integerConst .. *)
       Attribute = POINTER TO AttributeRec;
@@ -213,11 +215,23 @@ MODULE Oberon32iSymbols;
 
    PROCEDURE ReadAttribute(s: Streams.Stream;
                            object: PersistentObjects.Object) : BOOLEAN;
+      VAR
+	 hiWord: LONGINT;
    BEGIN
       WITH object: Attribute DO
 	 IF ~CompilerObjects.GuardedRead(s, typeType, object.type) OR
 	       ~NetIO.ReadShortInt(s, object.kind) THEN
 	    RETURN FALSE
+	 END;
+	 IF object.kind = hugeConstTag THEN
+	    (* 64-bit constant: low and high word *)
+	    object.kind := integerConst;
+	    IF ~NetIO.ReadLongInt(s, object.intval) OR
+		  ~NetIO.ReadLongInt(s, hiWord) THEN
+	       RETURN FALSE
+	    END;
+	    object.setval := SYS.VAL(SET, hiWord);
+	    RETURN TRUE
 	 END;
 	 CASE object.kind OF
 	 | integerConst:   RETURN NetIO.ReadLongInt(s, object.intval)
@@ -238,6 +252,14 @@ MODULE Oberon32iSymbols;
                             object: PersistentObjects.Object) : BOOLEAN;
    BEGIN
       WITH object: Attribute DO
+	 IF (object.kind = integerConst) & (object.setval # {}) THEN
+	    (* 64-bit constant: written with its own tag, so that the
+	       format of all other constants remains unchanged *)
+	    RETURN CompilerObjects.Write(s, object.type) &
+		   NetIO.WriteShortInt(s, hugeConstTag) &
+		   NetIO.WriteLongInt(s, object.intval) &
+		   NetIO.WriteLongInt(s, SYS.VAL(LONGINT, object.setval))
+	 END;
 	 IF ~CompilerObjects.Write(s, object.type) OR
 	       ~NetIO.WriteShortInt(s, object.kind) THEN
 	    RETURN FALSE
@@ -699,7 +721,7 @@ MODULE Oberon32iSymbols;
       new.type := orig.type;
       new.kind := orig.kind;
       CASE orig.kind OF
-      | integerConst:   new.intval := orig.intval;
+      | integerConst:   new.intval := orig.intval; new.setval := orig.setval;
       | realConst:      new.realval := orig.realval;
       | setConst:       new.setval := orig.setval;
       | charConst:      new.charval := orig.charval;
@@ -973,6 +995,7 @@ MODULE Oberon32iSymbols;
 
       PROCEDURE UnaryOp(at: Sym.Attribute);
 	 VAR
+	    hv1, hres: Huge.Value; hint: Integer; hset: SET;
 	    atdisc, new: Attribute;
 	    loc: CompilerObjects.Location;
 	    es: Streams.Stream;
@@ -985,10 +1008,16 @@ MODULE Oberon32iSymbols;
 	 ASSERT((opsy = Lex.plus) OR (opsy = Lex.minus) OR (opsy = Lex.tilde));
 	 IF atdisc = NIL THEN RETURN END;
 	 IF (atdisc.kind = integerConst) & (atdisc.setval # {}) THEN
-	    (* 64-bit constants (MIN/MAX(HUGEINT)) are not folded yet:
-	       computed at run time *)
+	    (* 64-bit constants (MIN/MAX(HUGEINT)) *)
 	    InternalCreateAttribute(new);
 	    new.type := atdisc.type; new.kind := noConst;
+	    Huge.Split(atdisc.intval, atdisc.setval, hv1);
+	    IF (opsy = Lex.plus) & Huge.Join(hv1, hint, hset) OR
+		  (opsy = Lex.minus) & Huge.Neg(hv1, hres) &
+		  Huge.Join(hres, hint, hset) THEN
+	       new.kind := integerConst;
+	       new.intval := hint; new.setval := hset;
+	    END;
 	    CompilerObjects.Attach(module, at, new);
 	    RETURN
 	 END;
@@ -1035,6 +1064,7 @@ MODULE Oberon32iSymbols;
 	    op1, op2: Sym.Attribute;
 	    new, atdisc1, atdisc2: Attribute;
 	    type1, type2: Sym.Type;
+	    hv1, hv2, hres: Huge.Value; hint: Integer; hset: SET; cmp: INTEGER;
 
 	 PROCEDURE IntegerCompare(relop: Lex.Symbol;
 	                          i1, i2: Integer) : BOOLEAN;
@@ -1336,6 +1366,38 @@ MODULE Oberon32iSymbols;
 	 IF IsIntegerConst(atdisc2) & (IsReal(op1) OR (opsy = Lex.slash)) THEN
 	    ConvertToReal(atdisc2);
 	 END;
+	 (* 64-bit constants (MIN/MAX(HUGEINT)): +, - and comparisons *)
+	 IF (atdisc1 # NIL) & (atdisc2 # NIL) &
+	       (atdisc1.kind = integerConst) & (atdisc2.kind = integerConst) &
+	       ((atdisc1.setval # {}) OR (atdisc2.setval # {})) THEN
+	    Huge.Split(atdisc1.intval, atdisc1.setval, hv1);
+	    Huge.Split(atdisc2.intval, atdisc2.setval, hv2);
+	    IF (opsy >= Lex.eql) & (opsy <= Lex.geq) THEN
+	       cmp := Huge.Compare(hv1, hv2);
+	       InternalCreateAttribute(new);
+	       new.type := BaseTypes.boolean;
+	       new.kind := booleanConst;
+	       CASE opsy OF
+	       | Lex.eql: new.boolval := cmp = 0
+	       | Lex.neq: new.boolval := cmp # 0
+	       | Lex.lst: new.boolval := cmp < 0
+	       | Lex.leq: new.boolval := cmp <= 0
+	       | Lex.grt: new.boolval := cmp > 0
+	       | Lex.geq: new.boolval := cmp >= 0
+	       END;
+	       CompilerObjects.Attach(module, at, new);
+	       RETURN
+	    ELSIF ((opsy = Lex.plus) & Huge.Add(hv1, hv2, hres) OR
+		   (opsy = Lex.minus) & Huge.Sub(hv1, hv2, hres)) &
+		  Huge.Join(hres, hint, hset) THEN
+	       InternalCreateAttribute(new);
+	       new.type := BaseTypes.int64; (* HUGEINT *)
+	       new.kind := integerConst;
+	       new.intval := hint; new.setval := hset;
+	       CompilerObjects.Attach(module, at, new);
+	       RETURN
+	    END;
+	 END;
 	 new := NIL;
 	 IF IsIntegerConst(atdisc1) & IsIntegerConst(atdisc2) THEN
 	    InternalCreateAttribute(new);
@@ -1558,7 +1620,9 @@ MODULE Oberon32iSymbols;
 	    RETURN
 	 END;
 	 ASSERT(atdisc.kind = integerConst);
-	 IF Fits(atdisc.intval, Oberon32i.int8Size) THEN
+	 IF atdisc.setval # {} THEN
+	    atdisc.type := BaseTypes.int64; (* 64-bit constant: HUGEINT *)
+	 ELSIF Fits(atdisc.intval, Oberon32i.int8Size) THEN
 	    atdisc.type := BaseTypes.int8;
 	 ELSIF Fits(atdisc.intval, Oberon32i.int16Size) THEN
 	    atdisc.type := BaseTypes.int16;
