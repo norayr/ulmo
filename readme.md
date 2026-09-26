@@ -172,7 +172,9 @@ How compilation works:
 
 - ulmoc compiles your modules and those they import, as far as there are
   no up-to-date compiled files for them (see below). It writes its
-  compiled files into the current directory.
+  compiled files into the current directory. When linking, ulmo compiles
+  the implementations of imported modules of your own, too, so it is
+  enough to name the main module's source.
 - Library modules are taken precompiled from the installation, as long as
   their sources are unchanged.
 - A modified copy of a library module in the current directory (or in a

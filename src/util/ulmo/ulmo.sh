@@ -133,6 +133,36 @@ lflags=""
 [ -d "$libdir/obj" ] && lflags="-L $libdir/obj"
 "$tooldir/ulmoc" -a $arch $vflags -I . $iflags $lflags $sources || exit 1
 
+# step 1b: a program needs the implementations of the modules it imports,
+# ulmoc compiles their interfaces only; compile the implementations of
+# the imported modules whose interfaces were compiled here (the modules
+# of the library are not, as long as they are up to date)
+if [ -n "$main_module" ] && [ $asm_only -eq 0 ]; then
+   dirs=`echo ". $iflags" | sed 's/-I *//g'`
+   tried=""
+   while :; do
+      missing=""
+      for def in ./*-def-gen.obj; do
+         [ -f "$def" ] || continue
+         mod=`basename "$def" -def-gen.obj`
+         [ -f "$mod-mod-$objarch.obj" ] && continue
+         for dir in $dirs; do
+            if [ -f "$dir/$mod.om" ]; then
+               missing="$missing $dir/$mod.om"
+               break
+            fi
+         done
+      done
+      [ -z "$missing" ] && break
+      if [ "$missing" = "$tried" ]; then
+         echo "$cmdname: cannot compile$missing" >&2
+         exit 1
+      fi
+      tried="$missing"
+      "$tooldir/ulmoc" -a $arch $vflags -I . $iflags $lflags $missing || exit 1
+   done
+fi
+
 # step 2: convert each given module to a .o (or a .tof with -S)
 tof() { # module objfile toffile
    "$tooldir/obtofgen" -o "$3" "$2" || exit 1
