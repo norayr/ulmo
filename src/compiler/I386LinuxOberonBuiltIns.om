@@ -375,6 +375,175 @@ MODULE I386LinuxOberonBuiltIns; (* Christian Ehrhardt *)
    END Allocate;
 
 
+   PROCEDURE HugeBuiltIn(proc : ProcContext; at : Sym.Attribute;
+                         type : OberonStdProcedures.StdProc; possible : SET;
+                         caller : Regs.Owner;
+			 VAR result : Op.Operand) : BOOLEAN;
+      (* standard procedures with HUGEINT arguments or results; FALSE if
+       * at is none of them *)
+      VAR
+	 own : Regs.Owner;
+	 param : Sym.Attribute;
+	 op, rhs, cnt : Op.Operand;
+	 reg : Regs.Value;
+	 lab, lab2, done : FragmentedStreams.Label;
+	 typ, typ2 : Sym.Type;
+	 size : LONGINT;
+	 signed : BOOLEAN;
+   BEGIN
+      param := at.firstparam;
+      IF param = NIL THEN RETURN FALSE END;
+      own := Regs.GetOwner(proc.regs);
+      CASE type OF
+      | OberonStdProcedures.abs:
+	 IF ~CodeGen.HugeExpr(proc, param) THEN RETURN FALSE END;
+	 op := CodeGen.GenExpr(proc, param, TRUE, Gen.StdRegs, own);
+	 CodeGen.LoadHuge(proc, op, TRUE, own);
+	 FragmentedStreams.CreateLabel(done);
+	 Emit.Instr2(proc.s, Pentium.TEST, CodeGen.Half(op, TRUE, TRUE),
+		     CodeGen.Half(op, TRUE, TRUE));
+	 Emit.JumpCC(proc.s, done, Pentium.JNS - Pentium.JCC);
+	 Emit.Instr1(proc.s, Pentium.NEG, CodeGen.Half(op, FALSE, TRUE));
+	 Emit.Instr2(proc.s, Pentium.ADC, CodeGen.Half(op, TRUE, TRUE),
+		     Op.ImmInt(0));
+	 Emit.Instr1(proc.s, Pentium.NEG, CodeGen.Half(op, TRUE, TRUE));
+	 FragmentedStreams.AttachLabel(proc.s, done);
+      | OberonStdProcedures.ash, OberonStdProcedures.lsh:
+	 IF ~CodeGen.HugeExpr(proc, param) THEN RETURN FALSE END;
+	 (* shifted one bit per step: HUGEINT shifts are rare *)
+	 op := CodeGen.GenExpr(proc, param, TRUE, Gen.StdRegs, own);
+	 CodeGen.LoadHuge(proc, op, param.type.form # Sym.cardinal, own);
+	 cnt := CodeGen.GenExpr(proc, param.next, TRUE, Gen.StdRegs, own);
+	 Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+	 Regs.LoadReg(reg, Gen.StdRegs);
+	 Emit.Instr2(proc.s, Pentium.MOV, Op.RegOp(reg, 4), cnt);
+	 Regs.DestroyOwnedValue(cnt.reg1, own);
+	 Regs.DestroyOwnedValue(cnt.reg2, own);
+	 FragmentedStreams.CreateLabel(lab);
+	 FragmentedStreams.CreateLabel(lab2);
+	 FragmentedStreams.CreateLabel(done);
+	 Emit.Instr2(proc.s, Pentium.TEST, Op.RegOp(reg, 4), Op.RegOp(reg, 4));
+	 Emit.JumpCC(proc.s, done, Pentium.JE - Pentium.JCC);
+	 Emit.JumpCC(proc.s, lab2, Pentium.JS - Pentium.JCC);
+	 FragmentedStreams.AttachLabel(proc.s, lab); (* left *)
+	 Emit.Instr2(proc.s, Pentium.SHL, CodeGen.Half(op, FALSE, TRUE),
+		     Op.ImmIntFixed(1, 1));
+	 Emit.Instr2(proc.s, Pentium.RCL, CodeGen.Half(op, TRUE, TRUE),
+		     Op.ImmIntFixed(1, 1));
+	 Emit.Instr1(proc.s, Pentium.DECR, Op.RegOp(reg, 4));
+	 Emit.JumpCC(proc.s, lab, Pentium.JNE - Pentium.JCC);
+	 Emit.Jump(proc.s, done);
+	 FragmentedStreams.AttachLabel(proc.s, lab2); (* right *)
+	 IF type = OberonStdProcedures.ash THEN
+	    Emit.Instr2(proc.s, Pentium.SAR, CodeGen.Half(op, TRUE, TRUE),
+			Op.ImmIntFixed(1, 1));
+	 ELSE
+	    Emit.Instr2(proc.s, Pentium.SHR, CodeGen.Half(op, TRUE, TRUE),
+			Op.ImmIntFixed(1, 1));
+	 END;
+	 Emit.Instr2(proc.s, Pentium.RCR, CodeGen.Half(op, FALSE, TRUE),
+		     Op.ImmIntFixed(1, 1));
+	 Emit.Instr1(proc.s, Pentium.INCR, Op.RegOp(reg, 4));
+	 Emit.JumpCC(proc.s, lab2, Pentium.JNE - Pentium.JCC);
+	 FragmentedStreams.AttachLabel(proc.s, done);
+	 Regs.DestroyOwnedValue(reg, own);
+      | OberonStdProcedures.dec, OberonStdProcedures.inc:
+	 Sym32.GetType(param, typ);
+	 IF ~CodeGen.IsHuge(proc, typ) THEN RETURN FALSE END;
+	 op := CodeGen.GenDesignator(proc, param, Gen.StdRegs, own);
+	 IF at.paramcnt > 1 THEN
+	    rhs := CodeGen.GenExpr(proc, param.next, TRUE, Gen.StdRegs, own);
+	    IF ~(Op.Loc(rhs) IN {Op.immediate, Op.immediateDyn}) THEN
+	       CodeGen.LoadHuge(proc, rhs,
+				param.next.type.form # Sym.cardinal, own);
+	    END;
+	 ELSE
+	    rhs := Op.ImmInt(1);
+	 END;
+	 IF type = OberonStdProcedures.inc THEN
+	    Emit.Instr2(proc.s, Pentium.ADD, CodeGen.Half(op, FALSE, TRUE),
+			CodeGen.Half(rhs, FALSE, TRUE));
+	    Emit.Instr2(proc.s, Pentium.ADC, CodeGen.Half(op, TRUE, TRUE),
+			CodeGen.Half(rhs, TRUE, TRUE));
+	 ELSE
+	    Emit.Instr2(proc.s, Pentium.SUB, CodeGen.Half(op, FALSE, TRUE),
+			CodeGen.Half(rhs, FALSE, TRUE));
+	    Emit.Instr2(proc.s, Pentium.SBB, CodeGen.Half(op, TRUE, TRUE),
+			CodeGen.Half(rhs, TRUE, TRUE));
+	 END;
+	 CodeGen.DestroyHuge(rhs, own);
+	 CodeGen.DestroyHuge(op, own);
+	 result := NIL;
+	 RETURN TRUE
+      | OberonStdProcedures.long:
+	 IF ~CodeGen.HugeExpr(proc, at) THEN RETURN FALSE END;
+	 op := CodeGen.GenExpr(proc, param, TRUE, Gen.StdRegs, own);
+	 CodeGen.LoadHuge(proc, op, param.type.form # Sym.cardinal, own);
+      | OberonStdProcedures.odd:
+	 IF ~CodeGen.HugeExpr(proc, param) THEN RETURN FALSE END;
+	 op := CodeGen.GenExpr(proc, param, TRUE, Gen.StdRegs, own);
+	 CodeGen.LoadHuge(proc, op, TRUE, own);
+	 Emit.Instr2(proc.s, Pentium.TEST, CodeGen.Half(op, FALSE, TRUE),
+		     Op.ImmInt(1));
+	 CodeGen.DestroyHuge(op, own);
+	 result := Op.CCOp(Pentium.JNE - Pentium.JCC);
+	 RETURN TRUE
+      | OberonStdProcedures.short:
+	 IF ~CodeGen.HugeExpr(proc, param) THEN RETURN FALSE END;
+	 (* HUGEINT -> LONGINT: the high word must be the sign of the low *)
+	 op := CodeGen.GenExpr(proc, param, TRUE, Gen.StdRegs, own);
+	 CodeGen.LoadHuge(proc, op, TRUE, own);
+	 Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+	 Regs.LoadReg(reg, Gen.StdRegs);
+	 Emit.Instr2(proc.s, Pentium.MOV, Op.RegOp(reg, 4),
+		     CodeGen.Half(op, FALSE, TRUE));
+	 Emit.Instr2(proc.s, Pentium.SAR, Op.RegOp(reg, 4),
+		     Op.ImmIntFixed(31, 1));
+	 FragmentedStreams.CreateLabel(done);
+	 Emit.Instr2(proc.s, Pentium.CMP, Op.RegOp(reg, 4),
+		     CodeGen.Half(op, TRUE, TRUE));
+	 Emit.JumpCC(proc.s, done, Pentium.JE - Pentium.JCC);
+	 Regs.EnterLevel(proc.regs);
+	 EmitErrors.Conversion(proc, at.loc, CodeGen.Half(op, FALSE, TRUE));
+	 Regs.LeaveLevel(proc.regs);
+	 Regs.DoneLevel(proc.regs);
+	 FragmentedStreams.AttachLabel(proc.s, done);
+	 Regs.DestroyOwnedValue(reg, own);
+	 Regs.DestroyOwnedValue(op.reg2, own);
+	 op := Op.RegOp(op.reg1, 4);
+      | OberonStdProcedures.val:
+	 Sym32.GetType(param, typ);
+	 size := Sym32.GetSize(proc.module, typ, proc.errors);
+	 Sym32.GetType(param.next, typ2);
+	 IF ~CodeGen.IsHuge(proc, typ) & ~CodeGen.HugeExpr(proc, param.next) THEN
+	    RETURN FALSE
+	 END;
+	 IF ~(typ2.form IN Sym.numeric + {Sym.address}) OR
+	       ~(typ.form IN Sym.numeric + {Sym.address}) THEN
+	    RETURN FALSE
+	 END;
+	 op := CodeGen.GenExpr(proc, param.next, TRUE, Gen.StdRegs, own);
+	 IF size = 8 THEN
+	    (* the bits of a shorter value, zero-extended *)
+	    CodeGen.LoadHuge(proc, op, FALSE, own);
+	 ELSIF Op.Loc(op) = Op.register2 THEN
+	    (* the low word *)
+	    Regs.DestroyOwnedValue(op.reg2, own);
+	    op := Op.RegOp(op.reg1, 4);
+	 ELSE
+	    CodeGen.LoadHuge(proc, op, TRUE, own);
+	    Regs.DestroyOwnedValue(op.reg2, own);
+	    op := Op.RegOp(op.reg1, 4);
+	 END;
+      ELSE
+	 RETURN FALSE
+      END;
+      Regs.Chown(op.reg1, caller);
+      IF op.reg2 # NIL THEN Regs.Chown(op.reg2, caller) END;
+      result := op;
+      RETURN TRUE
+   END HugeBuiltIn;
+
    PROCEDURE GenBuiltIn(proc : ProcContext; at : Sym.Attribute;
 			 possible : SET; caller : Regs.Owner) : Op.Operand;
       VAR
@@ -745,6 +914,9 @@ MODULE I386LinuxOberonBuiltIns; (* Christian Ehrhardt *)
 	 END;
       ELSIF at.proc.type.builtinproc IS OberonStdProcedures.StdProcedure THEN
 	 type := at.proc.type.builtinproc(OberonStdProcedures.StdProcedure).stdproc;
+	 IF HugeBuiltIn(proc, at, type, possible, caller, op) THEN
+	    RETURN op
+	 END;
 	 CASE type OF
 	 | OberonStdProcedures.abs:
 	    op := CodeGen.GenExpr(proc, at.firstparam, TRUE, possible, own);

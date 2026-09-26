@@ -1047,6 +1047,14 @@ MODULE Oberon64iSymbols;
 	 CompilerObjects.GetAttachment(op, atdisc);
 	 ASSERT((opsy = Lex.plus) OR (opsy = Lex.minus) OR (opsy = Lex.tilde));
 	 IF atdisc = NIL THEN RETURN END;
+	 IF (atdisc.kind = integerConst) & (atdisc.setval # {}) THEN
+	    (* 64-bit constants (MIN/MAX(HUGEINT)) are not folded yet:
+	       computed at run time *)
+	    InternalCreateAttribute(new);
+	    new.type := atdisc.type; new.kind := noConst;
+	    CompilerObjects.Attach(module, at, new);
+	    RETURN
+	 END;
 	 IF opsy = Lex.plus THEN
 	    CreateCopyAttribute(new, atdisc);
 	 ELSE
@@ -1222,6 +1230,13 @@ MODULE Oberon64iSymbols;
 	 (* get type from attachment or from the node's declared type *)
 	 IF atdisc1 # NIL THEN type1 := atdisc1.type ELSE type1 := op1.type END;
 	 IF atdisc2 # NIL THEN type2 := atdisc2.type ELSE type2 := op2.type END;
+	 IF (atdisc1 # NIL) & (atdisc2 # NIL) &
+	       ((atdisc1.kind = integerConst) & (atdisc1.setval # {}) OR
+		(atdisc2.kind = integerConst) & (atdisc2.setval # {})) THEN
+	    (* 64-bit constants (MIN/MAX(HUGEINT)) are not folded yet:
+	       computed at run time *)
+	    atdisc1 := NIL;
+	 END;
 	 IF (atdisc1 = NIL) OR (atdisc2 = NIL) THEN
 	    (* unable to fold; if result type is generic, resolve it to allow
 	       downstream code gen to determine operand sizes correctly *)

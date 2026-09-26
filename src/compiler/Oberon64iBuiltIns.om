@@ -448,7 +448,11 @@ MODULE Oberon64iBuiltIns;
       | Sym.standard:   
 	    CASE type.stdlength OF
 	    | Sym.long:
-		  Error("is already as long as possible");
+		  IF type.form = Sym.integer THEN
+		     type := BaseTypes.int64; (* HUGEINT *)
+		  ELSE
+		     Error("is already as long as possible");
+		  END;
 	    | Sym.medium:
 		  CASE type.form OF
 		  | Sym.integer:    type := BaseTypes.longint;
@@ -464,7 +468,9 @@ MODULE Oberon64iBuiltIns;
 	    END;
       | Sym.explicit:   
 	    IF type.form = Sym.integer THEN
-	       IF type.bits >= Oberon32i.intLen THEN
+	       IF type.bits >= 64 THEN
+		  Error("is already as long as possible");
+	       ELSIF type.bits >= Oberon32i.intLen THEN
 		  type := BaseTypes.longint;
 	       ELSE
 		  type := BaseTypes.integer;
@@ -770,7 +776,9 @@ MODULE Oberon64iBuiltIns;
 	    END;
       | Sym.explicit:   
 	    IF type.form = Sym.integer THEN
-	       IF type.bits > Oberon32i.intLen THEN
+	       IF type.bits > Oberon32i.longIntLen THEN
+		  type := BaseTypes.longint; (* HUGEINT -> LONGINT *)
+	       ELSIF type.bits > Oberon32i.intLen THEN
 		  type := BaseTypes.integer;
 	       ELSE
 		  type := BaseTypes.shortint;

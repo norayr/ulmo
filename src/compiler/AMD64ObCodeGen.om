@@ -187,6 +187,90 @@ MODULE AMD64ObCodeGen; (* Christian Ehrhardt *)
       END;
    END SetMode;
 
+   (* === 64-bit integers (HUGEINT) ===================================== *)
+
+   (* Integer expressions are computed in 4-byte registers, those of a
+    * 64-bit integer type (HUGEINT) in 8-byte registers.  Wherever both
+    * meet, the 4-byte value is sign-extended (zero-extended for cardinals).
+    *)
+
+   PROCEDURE IsHuge(proc: PC.Context; type: Sym.Type) : BOOLEAN;
+      (* is type a 64-bit integer type? *)
+   BEGIN
+      RETURN (type # NIL) & (type.form IN {Sym.integer, Sym.cardinal}) &
+             (Sym32.GetSize(proc.module, type, proc.errors) = 8)
+   END IsHuge;
+
+   PROCEDURE HugeExpr(proc: PC.Context; at: Sym.Attribute) : BOOLEAN;
+      (* is at computed as 64-bit integer?  Arithmetic mixing HUGEINT with
+       * constants or LONGINT has a generic type; it is as wide as its
+       * widest operand *)
+   BEGIN
+      IF at = NIL THEN RETURN FALSE END;
+      IF (at.type # NIL) & (at.type.form IN {Sym.integer, Sym.cardinal}) &
+	    (at.type.spec = Sym.generic) THEN
+	 CASE at.mode OF
+	 | Sym.binaryAt:
+	    RETURN HugeExpr(proc, at.leftop) OR HugeExpr(proc, at.rightop)
+	 | Sym.unaryAt:
+	    RETURN HugeExpr(proc, at.rightop)
+	 ELSE
+	    RETURN FALSE
+	 END;
+      END;
+      RETURN IsHuge(proc, at.type)
+   END HugeExpr;
+
+   PROCEDURE Extend(proc: PC.Context; VAR op: Op.Operand; signed: BOOLEAN;
+                    own: Regs.Owner);
+      (* turn a register or memory operand of up to 4 bytes into an 8-byte
+       * register; immediates are left alone as they are sign-extended by
+       * the instructions that take them *)
+      VAR
+         reg: Regs.Value;
+         src: Op.Operand;
+   BEGIN
+      IF Op.Loc(op) IN {Op.immediate, Op.immediateDyn} THEN RETURN END;
+      IF (Op.Loc(op) = Op.register) & (op.memsz = 8) THEN RETURN END;
+      src := op;
+      reg := NIL;
+      IF Op.Loc(op) = Op.register THEN
+         reg := op.reg1;
+      ELSE
+         Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+         Regs.LoadReg(reg, Gen.StdRegs);
+      END;
+      IF op.memsz = 8 THEN
+         (* a HUGEINT in memory *)
+         Emit.Instr2(proc.s, Pentium.MOV, Op.RegOp(reg, 8), src);
+      ELSIF op.memsz < 4 THEN
+         (* widen to 4 bytes first *)
+         IF signed THEN
+            Emit.Instr2(proc.s, Pentium.MOVSX, Op.RegOp(reg, 4), src);
+         ELSE
+            Emit.Instr2(proc.s, Pentium.MOVZX, Op.RegOp(reg, 4), src);
+         END;
+         src := Op.RegOp(reg, 4);
+      END;
+      IF op.memsz = 8 THEN
+         (* loaded above *)
+      ELSIF signed THEN
+         Emit.Instr2(proc.s, Pentium.MOVSXD, Op.RegOp(reg, 8), src);
+      ELSE
+         (* writing a 32-bit register clears the upper half *)
+         Emit.Instr2(proc.s, Pentium.MOV, Op.RegOp(reg, 4), src);
+      END;
+      IF Op.Loc(op) # Op.register THEN
+         IF (op.reg1 # NIL) & (op.reg1 # reg) THEN
+            Regs.DestroyOwnedValue(op.reg1, own);
+         END;
+         IF (op.reg2 # NIL) & (op.reg2 # reg) THEN
+            Regs.DestroyOwnedValue(op.reg2, own);
+         END;
+      END;
+      op := Op.RegOp(reg, 8);
+   END Extend;
+
    PROCEDURE CreateLabel(VAR lab: FragmentedStreams.Label; desc: ARRAY OF CHAR; loc: CompilerObjects.Location; s: FragmentedStreams.Stream);
       VAR
          l: TrackedLabel;
@@ -863,8 +947,9 @@ MODULE AMD64ObCodeGen; (* Christian Ehrhardt *)
          reg := op.reg2;
       END;
       IF reg = NIL THEN
-	 (* AMD64: pointer/address values need 64-bit registers *)
-	 IF size >= 8 THEN
+	 (* AMD64: pointer/address values need 64-bit registers;
+	  * 8-byte integers (HUGEINT) are no addresses *)
+	 IF (size >= 8) & ~(form IN {Sym.integer, Sym.cardinal}) THEN
 	    Regs.CreateValue(reg, proc.regs, caller, Regs.addrM);
 	 ELSE
 	    Regs.CreateValue(reg, proc.regs, caller, Regs.stdM);
@@ -1954,6 +2039,7 @@ MODULE AMD64ObCodeGen; (* Christian Ehrhardt *)
 	 it: Iterators.Iterator;
 	 tmpat: Sym.Attribute;
 	 msize: LONGINT;
+	 isz: LONGINT; (* 4, or 8 for HUGEINT *)
 	 sym: ConstStrings.String;
 	 attype: Sym.Type;
 	 ref: Relocations.SymRef;
@@ -2095,6 +2181,8 @@ MODULE AMD64ObCodeGen; (* Christian Ehrhardt *)
 	     *     * for div we must substract 1 from the result.
 	     *     * for mod we must add the divisor to the result.
 	     *)
+	    isz := 4;
+	    IF HugeExpr(proc, at) THEN isz := 8 END;
 	    rhs := GenExpr(proc, at.rightop, FALSE,
 			    Gen.StdRegs - {Gen.genax, Gen.gendx}, own);
             IF Op.IsError(rhs) THEN
@@ -2106,10 +2194,14 @@ MODULE AMD64ObCodeGen; (* Christian Ehrhardt *)
 	    IF Op.Loc(ops[1]) IN {Op.immediate, Op.immediateDyn} THEN
 	       Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
                Regs.LoadReg(reg, Gen.StdRegs - {Gen.genax, Gen.gendx});
-	       ops[0] := Op.RegOp(reg, 4);
+	       ops[0] := Op.RegOp(reg, isz);
 	       Emit.Instr(proc.s, Pentium.MOV, 2, ops);
 	       ops[1] := ops[0];
                SetMode(reg, at.rightop.type);
+            ELSIF isz = 8 THEN
+	       Extend(proc, ops[1], at.rightop.type.form = Sym.integer, own);
+	       Regs.AddConstraint(ops[1].reg1,
+				  Gen.StdRegs - {Gen.genax, Gen.gendx});
             ELSIF ops[1].memsz # 4 THEN
 	       reg := ops[1].reg1;
 	       IF (reg = NIL) OR ~Regs.Traced(reg) THEN
@@ -2154,15 +2246,17 @@ MODULE AMD64ObCodeGen; (* Christian Ehrhardt *)
 	       ops2[1] := ops2[0];
 	       Regs.CreateValue(regax, proc.regs, own, Regs.stdM);
 	       Regs.LoadReg(regax, {Gen.genax});
-	       ops2[0] := Op.RegOp(regax, 4);
+	       ops2[0] := Op.RegOp(regax, isz);
 	       Emit.Instr(proc.s, Pentium.MOV, 2, ops2);
+	    ELSIF isz = 8 THEN
+	       Extend(proc, ops2[0], at.leftop.type.form = Sym.integer, own);
 	    END;
 	    ASSERT(regax # NIL);
 	    Regs.AddConstraint(regax, {Gen.genax});
 	    Regs.CreateValue(regdx, proc.regs, own, Regs.stdM);
 	    Regs.LoadReg(regdx, {Gen.gendx});
 	    Regs.AddConstraint(regdx, {Gen.gendx});
-	    ops2[0] := Op.Reg2Op(regax, regdx, 4);
+	    ops2[0] := Op.Reg2Op(regax, regdx, isz);
 	    ops[0] := ops2[0];
 	    Sym32.GetType(at.leftop, type);
 	    IF type.form IN {Sym.integer, Sym.address} THEN
@@ -2186,33 +2280,33 @@ MODULE AMD64ObCodeGen; (* Christian Ehrhardt *)
 		   * needed because Pentium.DIV rounds towards 0 but
 		   * Oberon.DIV rounds towards -oo. *)
 		  (* First set the carry flag iff regdx < 0 ... *)
-		  ops[0] := Op.RegOp(regdx, 4);
+		  ops[0] := Op.RegOp(regdx, isz);
 		  ops[1] := ops[0];
 		  Emit.Instr(proc.s, Pentium.ADD, 2, ops);
 		  (* ... then substract zero with borrow. *)
-		  ops[0] := Op.RegOp(regax, 4);
+		  ops[0] := Op.RegOp(regax, isz);
 		  ops[1] := Op.ImmInt(0);
 		  Emit.Instr(proc.s, Pentium.SBB, 2, ops);
 	       END;
-	       result := Op.RegOp(regax, 4);
+	       result := Op.RegOp(regax, isz);
 	       Regs.Chown(regax, caller);
 	       Regs.DestroyOwnedValue(regdx, own);
             ELSE(* Lex.mod *)
 	       Regs.RemoveConstraint(regax);
 	       Regs.RemoveConstraint(regdx);
 	       IF signed THEN
-		  ops[0] := Op.RegOp(regax, 4);
-		  ops[1] := Op.RegOp(regdx, 4);
+		  ops[0] := Op.RegOp(regax, isz);
+		  ops[1] := Op.RegOp(regdx, isz);
 		  Emit.Instr(proc.s, Pentium.MOV, 2, ops);
-		  ops[1] := Op.ImmIntFixed(31, 1);
+		  ops[1] := Op.ImmIntFixed(8 * isz - 1, 1);
 		  Emit.Instr(proc.s, Pentium.SAR, 2, ops);
 		  ops[1] := rhs;
 		  Emit.Instr(proc.s, Pentium.AND, 2, ops);
-		  ops[0] := Op.RegOp(regdx, 4);
-		  ops[1] := Op.RegOp(regax, 4);
+		  ops[0] := Op.RegOp(regdx, isz);
+		  ops[1] := Op.RegOp(regax, isz);
 		  Emit.Instr(proc.s, Pentium.ADD, 2, ops);
                END;
-	       result := Op.RegOp(regdx, 4);
+	       result := Op.RegOp(regdx, isz);
 	       Regs.Chown(regdx, caller);
 	       Regs.DestroyOwnedValue(regax, own);
 	    END;
@@ -2292,6 +2386,10 @@ MODULE AMD64ObCodeGen; (* Christian Ehrhardt *)
 	       Regs.DestroyOwnerOnError(proc.regs, own);
 	       RETURN ops[1]
 	    END;
+	    IF HugeExpr(proc, at) THEN
+	       Extend(proc, ops[0], at.leftop.type.form = Sym.integer, own);
+	       Extend(proc, ops[1], at.rightop.type.form = Sym.integer, own);
+	    END;
             IF (Op.Loc(ops[1]) = Op.memory) & (ops[1].memsz # 4) THEN
 	       reg := ops[1].reg1;
 	       IF (reg = NIL) OR ~Regs.Traced(reg) THEN
@@ -2367,6 +2465,18 @@ MODULE AMD64ObCodeGen; (* Christian Ehrhardt *)
 	       ops[0] := ops[1];
 	       ops[1] := op;
 	    END;
+	    IF Op.Loc(ops[0]) IN {Op.immediate, Op.immediateDyn} THEN
+	       (* two constants that were not folded (64-bit constants) *)
+	       Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+	       Regs.LoadReg(reg, possible);
+	       IF HugeExpr(proc, at) THEN
+		  Emit.Instr2(proc.s, Pentium.MOV, Op.RegOp(reg, 8), ops[0]);
+		  ops[0] := Op.RegOp(reg, 8);
+	       ELSE
+		  Emit.Instr2(proc.s, Pentium.MOV, Op.RegOp(reg, 4), ops[0]);
+		  ops[0] := Op.RegOp(reg, 4);
+	       END;
+	    END;
 	    ASSERT(Op.Loc(ops[0]) = Op.register);
 	    (* AMD64: ADD/OR have no imm64 form; materialize 64-bit immediate via MOV *)
 	    IF (Op.Loc(ops[1]) IN {Op.immediate, Op.immediateDyn}) &
@@ -2422,6 +2532,9 @@ MODULE AMD64ObCodeGen; (* Christian Ehrhardt *)
 		     RETURN ops[0]
 		  END;
                   ASSERT(Op.Loc(ops[0]) = Op.register);
+		  IF HugeExpr(proc, at) THEN
+		     Extend(proc, ops[0], at.rightop.type.form = Sym.integer, own);
+		  END;
                   Emit.Instr(proc.s, Pentium.NEG, 1, ops);
 		  (* AMD64: ADD has no imm64 form; materialize 64-bit immediate via MOV *)
 		  IF (Op.Loc(ops[1]) IN {Op.immediate, Op.immediateDyn}) &
@@ -2452,6 +2565,10 @@ MODULE AMD64ObCodeGen; (* Christian Ehrhardt *)
 	             Regs.DestroyOwnerOnError(proc.regs, own);
 		     RETURN ops[1]
 		  END;
+		  IF HugeExpr(proc, at) THEN
+		     Extend(proc, ops[0], at.leftop.type.form = Sym.integer, own);
+		     Extend(proc, ops[1], at.rightop.type.form = Sym.integer, own);
+		  END;
                   IF (Op.Loc(ops[1]) = Op.memory) &
 		     (ops[1].memsz # 4) THEN
 		     reg := ops[1].reg1;
@@ -2474,7 +2591,7 @@ MODULE AMD64ObCodeGen; (* Christian Ehrhardt *)
 		        Regs.DestroyOwnedValue(ops[1].reg2, own);
 		     END;
 		     ops[1] := Op.RegOp(reg, 4);
-		  ELSIF Op.Loc(ops[1]) = Op.register THEN
+		  ELSIF (Op.Loc(ops[1]) = Op.register) & (ops[1].memsz # 8) THEN
 		     ops[1].memsz := 4;
 		  END;
                   (* AMD64: for address arithmetic, sign/zero-extend 32-bit ops[1] to 64-bit *)
@@ -2583,6 +2700,9 @@ MODULE AMD64ObCodeGen; (* Christian Ehrhardt *)
 	            Regs.DestroyOwnerOnError(proc.regs, own);
 		    RETURN ops[0]
 		 END;
+		 IF HugeExpr(proc, at) THEN
+		    Extend(proc, ops[0], at.rightop.type.form = Sym.integer, own);
+		 END;
 		 ops[1] := ops[0];
                  Emit.Instr(proc.s, Pentium.IMUL, 3, ops);
 	      ELSE
@@ -2591,6 +2711,10 @@ MODULE AMD64ObCodeGen; (* Christian Ehrhardt *)
                  IF Op.IsError(ops[1]) THEN
 	            Regs.DestroyOwnerOnError(proc.regs, own);
 		    RETURN ops[1]
+		 END;
+		 IF HugeExpr(proc, at) THEN
+		    Extend(proc, ops[0], at.leftop.type.form = Sym.integer, own);
+		    Extend(proc, ops[1], at.rightop.type.form = Sym.integer, own);
 		 END;
 		 IF (Op.Loc(ops[1]) = Op.memory) & (ops[1].memsz < 4) THEN
 		    ops[1] := GenValue(proc, ops[1], at.rightop.type.form,
@@ -3454,6 +3578,21 @@ MODULE AMD64ObCodeGen; (* Christian Ehrhardt *)
 	       ops[1].memsz := 1;
 	    END;
          | Sym.integer, Sym.cardinal:
+	    IF ops[0].memsz = 8 THEN
+	       (* HUGEINT variable: extend a LONGINT (or shorter) value *)
+	       Extend(proc, ops[1], leftop.type.form = Sym.integer, own);
+	       IF (Op.Loc(ops[1]) IN {Op.immediate, Op.immediateDyn}) &
+		     (ops[1].immsz = 8) THEN
+		  (* a 64-bit constant: there is no MOV r/m64, imm64 *)
+		  Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+		  Regs.LoadReg(reg, Gen.StdRegs);
+		  Emit.Instr2(proc.s, Pentium.MOV, Op.RegOp(reg, 8), ops[1]);
+		  ops[1] := Op.RegOp(reg, 8);
+	       ELSIF Op.Loc(ops[1]) IN {Op.immediate, Op.immediateDyn} THEN
+		  (* MOV r/m64, imm32 sign-extends *)
+		  ops[1].immsz := 4;
+	       END;
+	    ELSE
 	    CASE Op.Loc(ops[1]) OF
 	    | Op.register:
 	       ASSERT(ops[1].memsz = 4 (* LONGINT *));
@@ -3484,6 +3623,7 @@ MODULE AMD64ObCodeGen; (* Christian Ehrhardt *)
                   Regs.DestroyOwnerOnError(proc.regs, own);
 		  RETURN
 	        END;
+	    END;
 	    END;
 	 END;
 	 IF leftop.needdptrs & (rightop.type.form = Sym.address) &
@@ -5172,7 +5312,9 @@ MODULE AMD64ObCodeGen; (* Christian Ehrhardt *)
 	    ops1[1] := Op.MemOp1 (reg, 8, offset, 0);  (* AMD64: read 8-byte pointer *)
 	    Emit.Instr(proc.s, Pentium.MOV, 2, ops1);
 	    msize := Sym32.GetSize(proc.module, proc.ident.type.restype, proc.errors);
-	    IF proc.ident.type.restype.form IN {Sym.integer, Sym.cardinal} THEN
+	    IF (proc.ident.type.restype.form IN {Sym.integer, Sym.cardinal}) &
+		  (msize < 8) THEN
+	       (* integer results are stored as LONGINT; HUGEINT as is *)
 	       msize := 4;
 	    END;
 	    IF proc.ident.type.restype.form = Sym.real THEN

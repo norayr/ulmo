@@ -448,7 +448,11 @@ MODULE Oberon32iBuiltIns;
       | Sym.standard:   
 	    CASE type.stdlength OF
 	    | Sym.long:
-		  Error("is already as long as possible");
+		  IF type.form = Sym.integer THEN
+		     type := BaseTypes.int64; (* HUGEINT *)
+		  ELSE
+		     Error("is already as long as possible");
+		  END;
 	    | Sym.medium:
 		  CASE type.form OF
 		  | Sym.integer:    type := BaseTypes.longint;
@@ -464,7 +468,9 @@ MODULE Oberon32iBuiltIns;
 	    END;
       | Sym.explicit:   
 	    IF type.form = Sym.integer THEN
-	       IF type.bits >= Oberon32i.intLen THEN
+	       IF type.bits >= 64 THEN
+		  Error("is already as long as possible");
+	       ELSIF type.bits >= Oberon32i.intLen THEN
 		  type := BaseTypes.longint;
 	       ELSE
 		  type := BaseTypes.integer;
@@ -548,6 +554,10 @@ MODULE Oberon32iBuiltIns;
 	    IF bits <= Oberon32i.integerLen THEN
 	       (* assuming 2-complement *)
 	       result.intval := ASH(1, bits-2) - 1 + ASH(1, bits-2);
+	    ELSIF bits = 64 THEN
+	       (* HUGEINT: low word intval, high word setval *)
+	       result.intval := -1;
+	       result.setval := SYS.VAL(SET, MAX(INTEGER));
 	    ELSIF bits <= Oberon32i.maxIntegerLenOnTarget THEN
 	       Error("implementation restriction: representable on target architecture only");
 	       RETURN FALSE
@@ -619,6 +629,10 @@ MODULE Oberon32iBuiltIns;
 	    IF bits <= Oberon32i.integerLen THEN
 	       (* assuming 2-complement *)
 	       result.intval := ASH(1, bits-2) * (-2);
+	    ELSIF bits = 64 THEN
+	       (* HUGEINT: low word intval, high word setval *)
+	       result.intval := 0;
+	       result.setval := SYS.VAL(SET, MIN(INTEGER));
 	    ELSIF bits <= Oberon32i.maxIntegerLenOnTarget THEN
 	       Error("implementation restriction: representable on target architecture only");
 	       RETURN FALSE
@@ -758,7 +772,9 @@ MODULE Oberon32iBuiltIns;
 	    END;
       | Sym.explicit:   
 	    IF type.form = Sym.integer THEN
-	       IF type.bits > Oberon32i.intLen THEN
+	       IF type.bits > Oberon32i.longIntLen THEN
+		  type := BaseTypes.longint; (* HUGEINT -> LONGINT *)
+	       ELSIF type.bits > Oberon32i.intLen THEN
 		  type := BaseTypes.integer;
 	       ELSE
 		  type := BaseTypes.shortint;

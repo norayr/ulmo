@@ -115,5 +115,24 @@ DEFINITION I386ObCodeGen; (* Christian Ehrhardt *)
    PROCEDURE LoadFPUReg (proc : PC.Context; op : Op.Operand; form: Sym.Form;
 			 size : LONGINT; caller : Regs.Owner) : Op.Operand;
 
+   (* 64-bit integers (HUGEINT): register pairs (location register2,
+      reg1: low word, reg2: high word) or 8 bytes of memory *)
+
+   PROCEDURE IsHuge (proc : PC.Context; type : Sym.Type) : BOOLEAN;
+      (* is type a 64-bit integer type? *)
+
+   PROCEDURE HugeExpr (proc : PC.Context; at : Sym.Attribute) : BOOLEAN;
+      (* is at computed as 64-bit integer (also if its type is generic)? *)
+
+   PROCEDURE Half (op : Op.Operand; high, signed : BOOLEAN) : Op.Operand;
+      (* the low or high word of a register pair, 8 bytes of memory or an
+       * immediate *)
+
+   PROCEDURE LoadHuge (proc : PC.Context; VAR op : Op.Operand;
+                       signed : BOOLEAN; own : Regs.Owner);
+      (* turn op into a register pair, extending shorter values *)
+
+   PROCEDURE DestroyHuge (op : Op.Operand; own : Regs.Owner);
+
 
 END I386ObCodeGen.

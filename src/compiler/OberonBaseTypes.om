@@ -125,7 +125,7 @@ MODULE OberonBaseTypes;
       CreateSpecNumType(int8, "INT8", Sym.integer, 8);
       CreateSpecNumType(int16, "INT16", Sym.integer, 16);
       CreateSpecNumType(int32, "INT32", Sym.integer, 32);
-      CreateSpecNumType(int64, "INT64", Sym.integer, 64);
+      CreateSpecNumType(int64, "HUGEINT", Sym.integer, 64);
 
       CreateSpecNumType(card8, "CARD8", Sym.cardinal, 8);
       CreateSpecNumType(card16, "CARD16", Sym.cardinal, 16);

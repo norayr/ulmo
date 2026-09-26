@@ -128,6 +128,9 @@ $(TOF2ELF): src/util/tof2elf/tof2elf.c
 
 root: stage2
 	@mkdir -p $(ROOT)/bin $(ROOTARCH) $(ROOT)/share/ulmo
+	@# remove first: the old programs may still be running
+	@rm -f $(ROOTARCH)/ulmoc $(ROOTARCH)/obtofgen $(ROOTARCH)/genobrts \
+		$(ROOT)/bin/ulmo
 	@cp -p $(B)/stage2/ulmoc $(B)/stage2/obtofgen $(B)/stage2/lib/*.a \
 		$(LDSCRIPT) $(ROOTARCH)/
 	@rm -rf $(ROOTARCH)/obj

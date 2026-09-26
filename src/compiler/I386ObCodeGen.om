@@ -160,6 +160,7 @@ MODULE I386ObCodeGen; (* Christian Ehrhardt *)
    VAR
       labeltrackid: LONGINT;
       trackedlabels: TrackedLabel;
+      hugeHigh: Regs.Value; (* high word of the HUGEINT result of GenCall *)
 
 
 
@@ -186,6 +187,141 @@ MODULE I386ObCodeGen; (* Christian Ehrhardt *)
          Regs.SetMode(reg, new);
       END;
    END SetMode;
+
+   (* === 64-bit integers (HUGEINT) ===================================== *)
+
+   (* The i386 has no 64-bit registers: a HUGEINT value is held in a pair
+    * of registers (location register2; reg1: low word, reg2: high word)
+    * or in 8 bytes of memory (low word first).  Integer values of up to
+    * 4 bytes are sign-extended (zero-extended for cardinals) where they
+    * meet a HUGEINT.
+    *)
+
+   PROCEDURE IsHuge(proc: PC.Context; type: Sym.Type) : BOOLEAN;
+      (* is type a 64-bit integer type? *)
+   BEGIN
+      RETURN (type # NIL) & (type.form IN {Sym.integer, Sym.cardinal}) &
+             (Sym32.GetSize(proc.module, type, proc.errors) = 8)
+   END IsHuge;
+
+   PROCEDURE HugeExpr(proc: PC.Context; at: Sym.Attribute) : BOOLEAN;
+      (* is at computed as 64-bit integer?  Arithmetic mixing HUGEINT with
+       * constants or LONGINT has a generic type; it is as wide as its
+       * widest operand *)
+   BEGIN
+      IF at = NIL THEN RETURN FALSE END;
+      IF (at.type # NIL) & (at.type.form IN {Sym.integer, Sym.cardinal}) &
+	    (at.type.spec = Sym.generic) THEN
+	 CASE at.mode OF
+	 | Sym.binaryAt:
+	    RETURN HugeExpr(proc, at.leftop) OR HugeExpr(proc, at.rightop)
+	 | Sym.unaryAt:
+	    RETURN HugeExpr(proc, at.rightop)
+	 ELSE
+	    RETURN FALSE
+	 END;
+      END;
+      RETURN IsHuge(proc, at.type)
+   END HugeExpr;
+
+   PROCEDURE Half(op: Op.Operand; high, signed: BOOLEAN) : Op.Operand;
+      (* the low or high word of op: a register pair, 8 bytes of memory or
+       * an immediate (a 4-byte one is extended) *)
+      VAR
+	 h: Op.Operand;
+	 bytes: ARRAY 8 OF BYTE;
+	 word, i: LONGINT;
+   BEGIN
+      CASE Op.Loc(op) OF
+      | Op.register2:
+	 IF high THEN RETURN Op.RegOp(op.reg2, 4) END;
+	 RETURN Op.RegOp(op.reg1, 4)
+      | Op.memory:
+	 ASSERT(op.memsz = 8);
+	 h := Op.Dup(op); h.memsz := 4;
+	 IF high THEN INC(h.disp, 4) END;
+	 RETURN h
+      | Op.immediate, Op.immediateDyn:
+	 IF (op.data # NIL) & (op.data.kind = Op.integerConst) THEN
+	    IF ~high THEN RETURN Op.ImmIntFixed(op.data.intval, 4) END;
+	    IF signed & (op.data.intval < 0) THEN
+	       RETURN Op.ImmIntFixed(-1, 4)
+	    END;
+	    RETURN Op.ImmIntFixed(0, 4)
+	 END;
+	 ASSERT(op.immsz = 8);
+	 Op.GetImmData(op, bytes, 8);
+	 (* little endian: bytes 0..3 are the low, 4..7 the high word *)
+	 i := 3;
+	 IF high THEN i := 7 END;
+	 word := 0;
+	 WHILE i >= 0 DO
+	    word := word * 100H + ORD(SYSTEM.VAL(CHAR, bytes[i]));
+	    IF (i = 4) & high THEN i := 0 END;
+	    DEC(i);
+	 END;
+	 RETURN Op.ImmIntFixed(word, 4)
+      END;
+   END Half;
+
+   PROCEDURE LoadHuge(proc: PC.Context; VAR op: Op.Operand; signed: BOOLEAN;
+                      own: Regs.Owner);
+      (* turn op into a register pair *)
+      VAR
+	 lo, hi: Regs.Value;
+	 src: Op.Operand;
+   BEGIN
+      IF Op.Loc(op) = Op.register2 THEN RETURN END;
+      Regs.CreateValue(lo, proc.regs, own, Regs.stdM);
+      Regs.LoadReg(lo, Gen.StdRegs);
+      Regs.CreateValue(hi, proc.regs, own, Regs.stdM);
+      Regs.LoadReg(hi, Gen.StdRegs);
+      IF (Op.Loc(op) IN {Op.immediate, Op.immediateDyn}) OR
+	    (Op.Loc(op) = Op.memory) & (op.memsz = 8) THEN
+	 Emit.Instr2(proc.s, Pentium.MOV, Op.RegOp(lo, 4),
+		     Half(op, FALSE, signed));
+	 Emit.Instr2(proc.s, Pentium.MOV, Op.RegOp(hi, 4),
+		     Half(op, TRUE, signed));
+      ELSE
+	 src := op;
+	 IF op.memsz < 4 THEN
+	    IF signed THEN
+	       Emit.Instr2(proc.s, Pentium.MOVSX, Op.RegOp(lo, 4), src);
+	    ELSE
+	       Emit.Instr2(proc.s, Pentium.MOVZX, Op.RegOp(lo, 4), src);
+	    END;
+	 ELSE
+	    src := Op.Dup(op); src.memsz := 4;
+	    Emit.Instr2(proc.s, Pentium.MOV, Op.RegOp(lo, 4), src);
+	 END;
+	 IF signed THEN
+	    Emit.Instr2(proc.s, Pentium.MOV, Op.RegOp(hi, 4), Op.RegOp(lo, 4));
+	    Emit.Instr2(proc.s, Pentium.SAR, Op.RegOp(hi, 4),
+			Op.ImmIntFixed(31, 1));
+	 ELSE
+	    Emit.Instr2(proc.s, Pentium.XOR, Op.RegOp(hi, 4), Op.RegOp(hi, 4));
+	 END;
+      END;
+      Regs.DestroyOwnedValue(op.reg1, own);
+      Regs.DestroyOwnedValue(op.reg2, own);
+      op := Op.Reg2Op(lo, hi, 8);
+   END LoadHuge;
+
+   PROCEDURE StoreHuge(proc: PC.Context; dest, src: Op.Operand;
+                       signed: BOOLEAN);
+      (* dest: 8 bytes of memory; src: register pair or immediate *)
+   BEGIN
+      Emit.Instr2(proc.s, Pentium.MOV, Half(dest, FALSE, signed),
+		  Half(src, FALSE, signed));
+      Emit.Instr2(proc.s, Pentium.MOV, Half(dest, TRUE, signed),
+		  Half(src, TRUE, signed));
+   END StoreHuge;
+
+   PROCEDURE DestroyHuge(op: Op.Operand; own: Regs.Owner);
+   BEGIN
+      Regs.DestroyOwnedValue(op.reg1, own);
+      Regs.DestroyOwnedValue(op.reg2, own);
+   END DestroyHuge;
 
    PROCEDURE CreateLabel(VAR lab: FragmentedStreams.Label; desc: ARRAY OF CHAR; loc: CompilerObjects.Location; s: FragmentedStreams.Stream);
       VAR
@@ -489,6 +625,8 @@ MODULE I386ObCodeGen; (* Christian Ehrhardt *)
 	 reloc: Relocations.RelocRequest;
 	 ok: BOOLEAN;
 	 ch: CHAR;
+	 bytes64: ARRAY 8 OF BYTE;
+	 w: LONGINT;
 
       PROCEDURE GetCh(s: Streams.Stream; VAR ch: CHAR) : BOOLEAN;
 	 VAR
@@ -511,7 +649,20 @@ MODULE I386ObCodeGen; (* Christian Ehrhardt *)
       ASSERT(attach # NIL);
       CASE attach.kind OF
       | Sym32.integerConst:
-	 op := Op.ImmInt(attach.intval);
+	 IF attach.setval = {} THEN
+	    op := Op.ImmInt(attach.intval);
+	 ELSE
+	    (* 64-bit constant: low word intval, high word setval *)
+	    w := attach.intval;
+	    i := 0;
+	    WHILE i < 8 DO
+	       IF i = 4 THEN w := SYSTEM.VAL(LONGINT, attach.setval) END;
+	       bytes64[i] := SYSTEM.VAL(BYTE, w MOD 100H);
+	       w := w DIV 100H;
+	       INC(i);
+	    END;
+	    op := Op.ImmData(FALSE, 8, bytes64);
+	 END;
       | Sym32.realConst:
          op := Op.ImmReal(attach.realval);
       | Sym32.setConst:
@@ -830,9 +981,14 @@ MODULE I386ObCodeGen; (* Christian Ehrhardt *)
    BEGIN
       ASSERT(possible # {});
       ops[0] := NIL;
-      ASSERT((op # NIL) & ((size <= 4) OR((size = 8) & (form = Sym.real))));
+      ASSERT((op # NIL) & ((size <= 4) OR (size = 8) &
+	 (form IN {Sym.real, Sym.integer, Sym.cardinal})));
       IF form = Sym.real THEN
 	 RETURN LoadFPUReg(proc, op, form, size, caller);
+      END;
+      IF size = 8 THEN (* HUGEINT *)
+	 LoadHuge(proc, op, form = Sym.integer, caller);
+	 RETURN op
       END;
       IF (Op.Loc(op) = Op.immediateDyn) & (form # Sym.real) THEN
 	 RETURN CheckOp(op);
@@ -1890,6 +2046,224 @@ MODULE I386ObCodeGen; (* Christian Ehrhardt *)
 
    (* If byvalue is false we may return a reference(i.e.
     * an Op.memory Operand) for the expression. *)
+   (* === HUGEINT arithmetic =========================================== *)
+
+   PROCEDURE HugeMul(proc: PC.Context; a, b: Op.Operand;
+                     own: Regs.Owner) : Op.Operand;
+      (* low 64 bits of a * b; a, b: register pairs or 8 bytes of memory;
+       * returns a register pair (EAX, EDX) *)
+      VAR
+	 t1, t2, regax, regdx: Regs.Value;
+	 ops: ARRAY 3 OF Op.Operand;
+   BEGIN
+      (* high word: a.lo * b.hi + a.hi * b.lo + high word of a.lo * b.lo *)
+      Regs.CreateValue(t1, proc.regs, own, Regs.stdM);
+      Regs.LoadReg(t1, Gen.StdRegs - {Gen.genax, Gen.gendx});
+      Regs.AddConstraint(t1, Gen.StdRegs - {Gen.genax, Gen.gendx});
+      Emit.Instr2(proc.s, Pentium.MOV, Op.RegOp(t1, 4), Half(a, FALSE, TRUE));
+      Emit.Instr2(proc.s, Pentium.IMUL, Op.RegOp(t1, 4), Half(b, TRUE, TRUE));
+      Regs.CreateValue(t2, proc.regs, own, Regs.stdM);
+      Regs.LoadReg(t2, Gen.StdRegs - {Gen.genax, Gen.gendx});
+      Regs.AddConstraint(t2, Gen.StdRegs - {Gen.genax, Gen.gendx});
+      Emit.Instr2(proc.s, Pentium.MOV, Op.RegOp(t2, 4), Half(a, TRUE, TRUE));
+      Emit.Instr2(proc.s, Pentium.IMUL, Op.RegOp(t2, 4), Half(b, FALSE, TRUE));
+      Emit.Instr2(proc.s, Pentium.ADD, Op.RegOp(t1, 4), Op.RegOp(t2, 4));
+      Regs.DestroyOwnedValue(t2, own);
+      Regs.CreateValue(regax, proc.regs, own, Regs.stdM);
+      Regs.LoadReg(regax, {Gen.genax});
+      Regs.AddConstraint(regax, {Gen.genax});
+      Regs.CreateValue(regdx, proc.regs, own, Regs.stdM);
+      Regs.LoadReg(regdx, {Gen.gendx});
+      Regs.AddConstraint(regdx, {Gen.gendx});
+      Emit.Instr2(proc.s, Pentium.MOV, Op.RegOp(regax, 4), Half(a, FALSE, TRUE));
+      ops[0] := Op.Reg2Op(regax, regdx, 4);
+      ops[1] := Op.RegOp(regax, 4);
+      ops[2] := Half(b, FALSE, TRUE);
+      Emit.Instr(proc.s, Pentium.MUL, 3, ops);
+      Emit.Instr2(proc.s, Pentium.ADD, Op.RegOp(regdx, 4), Op.RegOp(t1, 4));
+      Regs.DestroyOwnedValue(t1, own);
+      Regs.RemoveConstraint(regax);
+      Regs.RemoveConstraint(regdx);
+      RETURN Op.Reg2Op(regax, regdx, 8)
+   END HugeMul;
+
+   PROCEDURE HugeDivMod(proc: PC.Context; a, b: Op.Operand; div: BOOLEAN;
+                        own: Regs.Owner) : Op.Operand;
+      (* a DIV b or a MOD b for b > 0; a, b: register pairs.
+       * The x87 computes the quotient from the exact 64-bit integers with
+       * its 64-bit mantissa; the rounded result is within 1 of the true
+       * quotient and is corrected with the remainder (0 <= r < b). *)
+      VAR
+	 ta, tb, tq: LONGINT;
+	 bp: Regs.Value;
+	 ma, mb, mq, p, r: Op.Operand;
+	 fa, fb, scratch: Regs.Value;
+	 notneg, done: FragmentedStreams.Label;
+   BEGIN
+      ta := StackAlloc.Allocate(proc.stack, 8, 4, FALSE);
+      tb := StackAlloc.Allocate(proc.stack, 8, 4, FALSE);
+      tq := StackAlloc.Allocate(proc.stack, 8, 4, FALSE);
+      Regs.UntracedValue(bp, Gen.genbp);
+      ma := Op.MemOp1(bp, 8, ta, 0);
+      mb := Op.MemOp1(bp, 8, tb, 0);
+      mq := Op.MemOp1(bp, 8, tq, 0);
+      StoreHuge(proc, ma, a, TRUE); DestroyHuge(a, own);
+      StoreHuge(proc, mb, b, TRUE); DestroyHuge(b, own);
+      I386FPURegisters.CreateValue(fa, proc.fpuregs);
+      I386FPURegisters.PushInt(fa, proc.s, ma);
+      I386FPURegisters.CreateValue(fb, proc.fpuregs);
+      I386FPURegisters.PushInt(fb, proc.s, mb);
+      I386FPURegisters.Instr2(proc.s, Pentium.FDIVP, Op.FPUOp(fa),
+			      Op.FPUOp(fb));
+      I386FPURegisters.Pop(fb);
+      I386FPURegisters.StoreInt(fa, proc.s, mq);
+      (* r := a - q * b *)
+      p := HugeMul(proc, mq, mb, own);
+      r := ma;
+      LoadHuge(proc, r, TRUE, own);
+      Emit.Instr2(proc.s, Pentium.SUB, Half(r, FALSE, TRUE), Half(p, FALSE, TRUE));
+      Emit.Instr2(proc.s, Pentium.SBB, Half(r, TRUE, TRUE), Half(p, TRUE, TRUE));
+      DestroyHuge(p, own);
+      (* correct q by one if r is not in [0, b) *)
+      Regs.CreateValue(scratch, proc.regs, own, Regs.stdM);
+      Regs.LoadReg(scratch, Gen.StdRegs);
+      FragmentedStreams.CreateLabel(notneg);
+      FragmentedStreams.CreateLabel(done);
+      Emit.Instr2(proc.s, Pentium.TEST, Half(r, TRUE, TRUE), Half(r, TRUE, TRUE));
+      Emit.JumpCC(proc.s, notneg, Pentium.JNS - Pentium.JCC);
+      Emit.Instr2(proc.s, Pentium.ADD, Half(r, FALSE, TRUE), Half(mb, FALSE, TRUE));
+      Emit.Instr2(proc.s, Pentium.ADC, Half(r, TRUE, TRUE), Half(mb, TRUE, TRUE));
+      Emit.Instr2(proc.s, Pentium.SUB, Half(mq, FALSE, TRUE), Op.ImmInt(1));
+      Emit.Instr2(proc.s, Pentium.SBB, Half(mq, TRUE, TRUE), Op.ImmInt(0));
+      Emit.Jump(proc.s, done);
+      FragmentedStreams.AttachLabel(proc.s, notneg);
+      (* r < b ?  (the flags of r - b, the high word in scratch) *)
+      Emit.Instr2(proc.s, Pentium.MOV, Op.RegOp(scratch, 4), Half(r, TRUE, TRUE));
+      Emit.Instr2(proc.s, Pentium.CMP, Half(r, FALSE, TRUE), Half(mb, FALSE, TRUE));
+      Emit.Instr2(proc.s, Pentium.SBB, Op.RegOp(scratch, 4), Half(mb, TRUE, TRUE));
+      Emit.JumpCC(proc.s, done, Pentium.JL - Pentium.JCC);
+      Emit.Instr2(proc.s, Pentium.SUB, Half(r, FALSE, TRUE), Half(mb, FALSE, TRUE));
+      Emit.Instr2(proc.s, Pentium.SBB, Half(r, TRUE, TRUE), Half(mb, TRUE, TRUE));
+      Emit.Instr2(proc.s, Pentium.ADD, Half(mq, FALSE, TRUE), Op.ImmInt(1));
+      Emit.Instr2(proc.s, Pentium.ADC, Half(mq, TRUE, TRUE), Op.ImmInt(0));
+      FragmentedStreams.AttachLabel(proc.s, done);
+      Regs.DestroyOwnedValue(scratch, own);
+      IF div THEN
+	 DestroyHuge(r, own);
+	 r := mq;
+	 LoadHuge(proc, r, TRUE, own);
+      END;
+      StackAlloc.Free(proc.stack, tq);
+      StackAlloc.Free(proc.stack, tb);
+      StackAlloc.Free(proc.stack, ta);
+      RETURN r
+   END HugeDivMod;
+
+   PROCEDURE GenHugeBinary(proc: PC.Context; at: Sym.Attribute;
+                           possible: SET; caller: Regs.Owner) : Op.Operand;
+      (* +, -, *, DIV and MOD of HUGEINT *)
+      VAR
+	 own: Regs.Owner;
+	 lhs, rhs, res: Op.Operand;
+	 lsigned, rsigned: BOOLEAN;
+   BEGIN
+      own := Regs.GetOwner(proc.regs);
+      lsigned := at.leftop.type.form # Sym.cardinal;
+      rsigned := at.rightop.type.form # Sym.cardinal;
+      lhs := GenExpr(proc, at.leftop, TRUE, Gen.StdRegs, own);
+      IF Op.IsError(lhs) THEN
+	 Regs.DestroyOwnerOnError(proc.regs, own);
+	 RETURN lhs
+      END;
+      LoadHuge(proc, lhs, lsigned, own);
+      rhs := GenExpr(proc, at.rightop, TRUE, Gen.StdRegs, own);
+      IF Op.IsError(rhs) THEN
+	 Regs.DestroyOwnerOnError(proc.regs, own);
+	 RETURN rhs
+      END;
+      IF ~(Op.Loc(rhs) IN {Op.immediate, Op.immediateDyn}) OR
+	    (at.opsy = Lex.times) OR (at.opsy = Lex.div) OR
+	    (at.opsy = Lex.mod) THEN
+	 LoadHuge(proc, rhs, rsigned, own);
+      END;
+      CASE at.opsy OF
+      | Lex.plus:
+	 Emit.Instr2(proc.s, Pentium.ADD, Half(lhs, FALSE, TRUE),
+		     Half(rhs, FALSE, rsigned));
+	 Emit.Instr2(proc.s, Pentium.ADC, Half(lhs, TRUE, TRUE),
+		     Half(rhs, TRUE, rsigned));
+	 res := lhs; DestroyHuge(rhs, own);
+      | Lex.minus:
+	 Emit.Instr2(proc.s, Pentium.SUB, Half(lhs, FALSE, TRUE),
+		     Half(rhs, FALSE, rsigned));
+	 Emit.Instr2(proc.s, Pentium.SBB, Half(lhs, TRUE, TRUE),
+		     Half(rhs, TRUE, rsigned));
+	 res := lhs; DestroyHuge(rhs, own);
+      | Lex.times:
+	 res := HugeMul(proc, lhs, rhs, own);
+	 DestroyHuge(lhs, own); DestroyHuge(rhs, own);
+      | Lex.div:
+	 res := HugeDivMod(proc, lhs, rhs, TRUE, own);
+      | Lex.mod:
+	 res := HugeDivMod(proc, lhs, rhs, FALSE, own);
+      END;
+      Regs.Chown(res.reg1, caller);
+      Regs.Chown(res.reg2, caller);
+      RETURN res
+   END GenHugeBinary;
+
+   PROCEDURE GenHugeNeg(proc: PC.Context; at: Sym.Attribute;
+                        caller: Regs.Owner) : Op.Operand;
+      VAR
+	 op: Op.Operand;
+   BEGIN
+      op := GenExpr(proc, at.rightop, TRUE, Gen.StdRegs, caller);
+      IF Op.IsError(op) THEN RETURN op END;
+      LoadHuge(proc, op, at.rightop.type.form # Sym.cardinal, caller);
+      (* -(hi:lo) = -hi - borrow : -lo *)
+      Emit.Instr1(proc.s, Pentium.NEG, Half(op, FALSE, TRUE));
+      Emit.Instr2(proc.s, Pentium.ADC, Half(op, TRUE, TRUE), Op.ImmInt(0));
+      Emit.Instr1(proc.s, Pentium.NEG, Half(op, TRUE, TRUE));
+      RETURN op
+   END GenHugeNeg;
+
+   PROCEDURE GenHugeCompare(proc: PC.Context; at: Sym.Attribute;
+                            own: Regs.Owner) : Op.Operand;
+      (* returns the condition code for the comparison at *)
+      VAR
+	 lhs, rhs, tmp: Op.Operand;
+	 opsy: Lex.Symbol;
+	 cc: LONGINT;
+   BEGIN
+      lhs := GenExpr(proc, at.leftop, TRUE, Gen.StdRegs, own);
+      IF Op.IsError(lhs) THEN RETURN lhs END;
+      LoadHuge(proc, lhs, at.leftop.type.form # Sym.cardinal, own);
+      rhs := GenExpr(proc, at.rightop, TRUE, Gen.StdRegs, own);
+      IF Op.IsError(rhs) THEN RETURN rhs END;
+      LoadHuge(proc, rhs, at.rightop.type.form # Sym.cardinal, own);
+      opsy := at.opsy;
+      IF (opsy = Lex.grt) OR (opsy = Lex.leq) THEN
+	 (* a > b  =  b < a, a <= b  =  b >= a *)
+	 tmp := lhs; lhs := rhs; rhs := tmp;
+	 IF opsy = Lex.grt THEN opsy := Lex.lst ELSE opsy := Lex.geq END;
+      END;
+      CASE opsy OF
+      | Lex.eql, Lex.neq:
+	 Emit.Instr2(proc.s, Pentium.XOR, Half(lhs, FALSE, TRUE), Half(rhs, FALSE, TRUE));
+	 Emit.Instr2(proc.s, Pentium.XOR, Half(lhs, TRUE, TRUE), Half(rhs, TRUE, TRUE));
+	 Emit.Instr2(proc.s, Pentium.ORI, Half(lhs, FALSE, TRUE), Half(lhs, TRUE, TRUE));
+	 IF opsy = Lex.eql THEN cc := Pentium.JE ELSE cc := Pentium.JNE END;
+      | Lex.lst, Lex.geq:
+	 (* the flags of lhs - rhs, computed with borrow *)
+	 Emit.Instr2(proc.s, Pentium.CMP, Half(lhs, FALSE, TRUE), Half(rhs, FALSE, TRUE));
+	 Emit.Instr2(proc.s, Pentium.SBB, Half(lhs, TRUE, TRUE), Half(rhs, TRUE, TRUE));
+	 IF opsy = Lex.lst THEN cc := Pentium.JL ELSE cc := Pentium.JGE END;
+      END;
+      DestroyHuge(lhs, own);
+      DestroyHuge(rhs, own);
+      RETURN Op.CCOp(cc - Pentium.JCC)
+   END GenHugeCompare;
+
    PROCEDURE GenExpr(proc: PC.Context; at: Sym.Attribute;
 		      byvalue: BOOLEAN; possible: SET;
 		      caller: Regs.Owner) : Op.Operand;
@@ -1978,6 +2352,10 @@ MODULE I386ObCodeGen; (* Christian Ehrhardt *)
 	    IF at.proc.type.restype.form = Sym.real THEN
 	       RETURN Op.FPUOp(reg);
 	    END;
+	    IF IsHuge(proc, at.proc.type.restype) THEN
+	       Regs.Chown(reg, caller); Regs.Chown(hugeHigh, caller);
+	       RETURN Op.Reg2Op(reg, hugeHigh, 8)
+	    END;
 	    Regs.Chown(reg, caller);
 	    msize := Sym32.GetSize(proc.module, at.proc.type.restype, proc.errors);
 	    Regs.LoadReg(reg, Gen.LowByteRegs);
@@ -2008,6 +2386,9 @@ MODULE I386ObCodeGen; (* Christian Ehrhardt *)
 	    RETURN CheckOp(GenExpr(proc, at.rightop, byvalue, possible,
 	                    caller));
          | Lex.minus:
+	    IF HugeExpr(proc, at) THEN
+	       RETURN GenHugeNeg(proc, at, caller)
+	    END;
 	    op := GenExpr(proc, at.rightop, TRUE, possible, caller);
             IF Op.IsError(op) THEN
 	       Regs.DestroyOwnerOnError(proc.regs, own);
@@ -2046,6 +2427,17 @@ MODULE I386ObCodeGen; (* Christian Ehrhardt *)
       | Sym.binaryAt:
 	 IF (at.type.form = Sym.real) OR((at.opsy = Lex.slash) & (at.type.form # Sym.set)) THEN
 	    RETURN GenFPUBinaryExpr(proc, at, own);
+	 END;
+	 IF ((at.opsy = Lex.plus) OR (at.opsy = Lex.minus) OR
+	       (at.opsy = Lex.times) OR (at.opsy = Lex.div) OR
+	       (at.opsy = Lex.mod)) & HugeExpr(proc, at) THEN
+	    RETURN GenHugeBinary(proc, at, possible, caller)
+	 END;
+	 IF ((at.opsy = Lex.eql) OR (at.opsy = Lex.neq) OR
+	       (at.opsy = Lex.lst) OR (at.opsy = Lex.grt) OR
+	       (at.opsy = Lex.leq) OR (at.opsy = Lex.geq)) &
+	       (HugeExpr(proc, at.leftop) OR HugeExpr(proc, at.rightop)) THEN
+	    RETURN CheckOp(GenHugeCompare(proc, at, own))
 	 END;
 	 CASE at.opsy OF
 	 | Lex.div, Lex.mod:
@@ -3131,6 +3523,7 @@ MODULE I386ObCodeGen; (* Christian Ehrhardt *)
 	 reg1 : Gen.Register;
 	 reg, lhsaddr, rhsaddr, rhstag, lhstag: Regs.Value;
 	 needzero, needguard: BOOLEAN;
+	 stored: BOOLEAN; (* HUGEINT stored already *)
 	 es: Streams.Stream;
 	 type, attype, rhsstatictype, lhstype: Sym.Type;
 	 base, rhsdim, dim: INTEGER;
@@ -3139,6 +3532,7 @@ MODULE I386ObCodeGen; (* Christian Ehrhardt *)
 	 copy: FragmentedStreams.Label;
    BEGIN (* GenAssignment *)
       ops[0] := NIL;
+      stored := FALSE;
       own := Regs.GetOwner(proc.regs);
       CASE leftop.type.form OF
       | Sym.integer, Sym.cardinal, Sym.set, Sym.char, Sym.byte, Sym.address,
@@ -3193,6 +3587,15 @@ MODULE I386ObCodeGen; (* Christian Ehrhardt *)
 	       ops[1].memsz := 1;
 	    END;
          | Sym.integer, Sym.cardinal:
+	    IF ops[0].memsz = 8 THEN
+	       (* HUGEINT: two words *)
+	       IF ~(Op.Loc(ops[1]) IN {Op.immediate, Op.immediateDyn}) THEN
+		  LoadHuge(proc, ops[1], rightop.type.form # Sym.cardinal, own);
+	       END;
+	       StoreHuge(proc, ops[0], ops[1], rightop.type.form # Sym.cardinal);
+	       DestroyHuge(ops[1], own);
+	       stored := TRUE;
+	    ELSE
 	    CASE Op.Loc(ops[1]) OF
 	    | Op.register:
 	       ASSERT(ops[1].memsz = 4 (* LONGINT *));
@@ -3224,8 +3627,11 @@ MODULE I386ObCodeGen; (* Christian Ehrhardt *)
 		  RETURN
 	        END;
 	    END;
+	    END;
 	 END;
-	 IF leftop.needdptrs & (rightop.type.form = Sym.address) &
+	 IF stored THEN
+	    (* done *)
+	 ELSIF leftop.needdptrs & (rightop.type.form = Sym.address) &
 	        rightop.type.traced & (Op.Loc(ops[1]) = Op.register) THEN
 	    NEW(leftop.dptrs);
 	    leftop.dptrs.next := NIL;
@@ -3843,7 +4249,8 @@ MODULE I386ObCodeGen; (* Christian Ehrhardt *)
       own := Regs.GetOwner(proc.regs);
       return := NIL;
       IF stmt.proc.type.restype # NIL THEN
-	 IF stmt.proc.type.restype.form = Sym.real THEN
+	 IF (stmt.proc.type.restype.form = Sym.real) OR
+	       IsHuge(proc, stmt.proc.type.restype) THEN
 	    retoffset := StackAlloc.Allocate(proc.stack, 8, 4, FALSE);
 	 ELSE
 	    Regs.CreateValue(return, proc.regs, own, Regs.stdM);
@@ -3872,7 +4279,8 @@ MODULE I386ObCodeGen; (* Christian Ehrhardt *)
 (* PARAM DELETE END *)
       ASSERT(stackspace MOD 4 = 0);
       IF stmt.proc.type.restype # NIL THEN
-	 IF stmt.proc.type.restype.form # Sym.real THEN
+	 IF (stmt.proc.type.restype.form # Sym.real) &
+	       ~IsHuge(proc, stmt.proc.type.restype) THEN
 	    ok := Regs.StackOffset(return, retoffset); ASSERT(ok);
 	 END;
          Regs.UntracedValue(reg, Gen.gensp);
@@ -4249,6 +4657,15 @@ MODULE I386ObCodeGen; (* Christian Ehrhardt *)
 	 I386FPURegisters.PushReal(return, proc.s,
 	 			    Op.MemOp1 (reg, 8, retoffset, 0));
 	 StackAlloc.Free(proc.stack, retoffset);
+      ELSIF (stmt.proc.type.restype # NIL) &
+	    IsHuge(proc, stmt.proc.type.restype) THEN
+	 (* HUGEINT result: the low word is returned, the high word is left
+	  * in hugeHigh *)
+	 Regs.UntracedValue(reg, Gen.genbp);
+	 op := Op.MemOp1 (reg, 8, retoffset, 0);
+	 LoadHuge(proc, op, TRUE, caller);
+	 StackAlloc.Free(proc.stack, retoffset);
+	 return := op.reg1; hugeHigh := op.reg2;
       END;
       RETURN return;
    END GenCall;
@@ -4895,8 +5312,9 @@ MODULE I386ObCodeGen; (* Christian Ehrhardt *)
 	    ops1[1] := Op.MemOp1 (reg, 4, offset, 0);
 	    Emit.Instr(proc.s, Pentium.MOV, 2, ops1);
 	    msize := Sym32.GetSize(proc.module, proc.ident.type.restype, proc.errors);
-	    IF proc.ident.type.restype.form IN {Sym.integer, Sym.cardinal,
-	       Sym.address} THEN
+	    IF (proc.ident.type.restype.form IN {Sym.integer, Sym.cardinal,
+	       Sym.address}) & (msize < 8) THEN
+	       (* integer results are stored as LONGINT; HUGEINT as is *)
 	       msize := 4;
 	    END;
 	    IF proc.ident.type.restype.form = Sym.real THEN

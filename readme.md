@@ -27,6 +27,8 @@ The former README and installation instructions are kept in
   to date, and compiles from source only what has changed (see
   [Compiled files](#compiled-files)).
 - **amd64 backend** (new), next to the i386 one.
+- **HUGEINT**, a 64-bit integer type on both architectures (see
+  [Status and limitations](#status-and-limitations)).
 - **Build and installation** with `make`, `make check` and
   `make install`; the precompiled interfaces of the library are installed,
   so programs do not compile library modules again.
@@ -286,6 +288,15 @@ information (no DWARF). gdb works on the machine level:
 - On amd64 `INTEGER` and `LONGINT` are 32 bits wide, as on i386; addresses
   are 64 bits. Code and static data live in the lowest 2 GB (small code
   model).
+- `HUGEINT` is a 64-bit integer type on both architectures:
+  `LONGINT` values are included in it, `LONG` of a `LONGINT` is a
+  `HUGEINT`, and `SHORT` of a `HUGEINT` is a `LONGINT` (checked at run
+  time). On i386 its values are kept in register pairs, and `DIV` and
+  `MOD` use the x87 floating point unit, so a CPU with FPU is needed
+  (486DX or later; any CPU of the last decades). Integer literals are
+  still limited to the range of `LONGINT`; larger constants have to be
+  computed, and expressions with `MIN(HUGEINT)` or `MAX(HUGEINT)` are
+  evaluated at run time.
 - The amd64 backend is new. It compiles the compiler and the whole library,
   and the compiler reproduces itself, but it has seen far less use than the
   i386 backend.

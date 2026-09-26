@@ -94,6 +94,7 @@ MODULE OberonStdBuiltIns;
       AddType(Types.shortint);
       AddType(Types.integer);
       AddType(Types.longint);
+      AddType(Types.int64); (* HUGEINT: 64-bit integer *)
       AddType(Types.real);
       AddType(Types.longreal);
 

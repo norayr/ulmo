@@ -698,9 +698,15 @@ MODULE AMD64LinuxOberonBuiltIns; (* Christian Ehrhardt, AMD64 adaptation *)
 	       (* GNU SUPEROPT output *)
 	       Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
 	       Regs.LoadReg(reg, Gen.StdRegs);
-	       opreg := Op.RegOp(reg, 4(* INTEGER *));
-	       Emit.Instr2(proc.s, AMD64.MOV, opreg, op);
-	       Emit.Instr2(proc.s, AMD64.SAR, opreg, Op.ImmIntFixed(31, 1));
+	       IF op.memsz = 8 THEN (* HUGEINT *)
+		  opreg := Op.RegOp(reg, 8);
+		  Emit.Instr2(proc.s, AMD64.MOV, opreg, op);
+		  Emit.Instr2(proc.s, AMD64.SAR, opreg, Op.ImmIntFixed(63, 1));
+	       ELSE
+		  opreg := Op.RegOp(reg, 4(* INTEGER *));
+		  Emit.Instr2(proc.s, AMD64.MOV, opreg, op);
+		  Emit.Instr2(proc.s, AMD64.SAR, opreg, Op.ImmIntFixed(31, 1));
+	       END;
 	       Emit.Instr2(proc.s, AMD64.ADD, op, opreg);
 	       Emit.Instr2(proc.s, AMD64.XOR, op, opreg);
 	       Regs.DestroyOwnedValue(reg, own);
@@ -1429,6 +1435,10 @@ MODULE AMD64LinuxOberonBuiltIns; (* Christian Ehrhardt, AMD64 adaptation *)
             | Op.register:
                ASSERT(op.memsz = 4);
 	    END;
+	    IF CodeGen.HugeExpr(proc, at) THEN
+	       (* LONGINT -> HUGEINT *)
+	       CodeGen.Extend(proc, op, param.type.form = Sym.integer, caller);
+	    END;
 	    RETURN op;
 	 (* | OberonStdProcedures.lsh: See OberonStdProcedures.ash *)
 	 (* | OberonStdProcedures.max, OberonStdProcedures.min:
@@ -1660,6 +1670,27 @@ MODULE AMD64LinuxOberonBuiltIns; (* Christian Ehrhardt, AMD64 adaptation *)
 	    IF attype.form = Sym.real THEN
 	       RETURN op;
 	    END;
+	    IF CodeGen.HugeExpr(proc, param) THEN
+	       (* HUGEINT -> LONGINT: the value must survive the truncation *)
+	       IF Op.Loc(op) = Op.register THEN
+		  Regs.CreateValue(reg, proc.regs, own, Regs.stdM);
+		  Regs.LoadReg(reg, Gen.StdRegs);
+		  opreg := Op.RegOp(reg, 8);
+		  Emit.Instr2(proc.s, AMD64.MOVSXD, opreg, Op.RegOp(op.reg1, 4));
+		  FragmentedStreams.CreateLabel(noerr);
+		  Emit.Instr2(proc.s, AMD64.CMP, opreg, op);
+		  Emit.JumpCC(proc.s, noerr, AMD64.JE-AMD64.JCC);
+		  Regs.EnterLevel(proc.regs);
+		  EmitErrors.Conversion(proc, at.loc, Op.RegOp(op.reg1, 4));
+		  Regs.LeaveLevel(proc.regs);
+		  Regs.DoneLevel(proc.regs);
+		  FragmentedStreams.AttachLabel(proc.s, noerr);
+		  Regs.DestroyOwnedValue(reg, own);
+		  op := Op.RegOp(op.reg1, 4);
+	       END;
+	       IF op.reg1 # NIL THEN Regs.Chown(op.reg1, caller) END;
+	       RETURN op;
+	    END;
 	    (* AMD64: if type is generic (e.g. result of MOD with literal 7),
 	       skip the range check — generic integer size is indeterminate *)
 	    IF (attype = NIL) OR ((attype.form IN Sym.specforms) &
@@ -1762,7 +1793,12 @@ MODULE AMD64LinuxOberonBuiltIns; (* Christian Ehrhardt, AMD64 adaptation *)
                   (* Nothing *)
                ELSIF (typ.form IN Sym.numeric + {Sym.set})
 	             & ~(Op.Loc(op) = Op.fpuRegister) THEN
-		  op.memsz := 4;
+		  IF (size = 8) & (Op.Loc(op) = Op.register) &
+			(op.memsz = 8) THEN
+		     (* HUGEINT <-> ADDRESS: all 8 bytes *)
+		  ELSE
+		     op.memsz := 4;
+		  END;
 	       ELSIF (typ.form IN {Sym.pointer, Sym.proceduretype, Sym.coroutine})
 		     & (Op.Loc(op) = Op.register) THEN
 		  (* AMD64: pointer/procedure/coroutine types are 8 bytes;

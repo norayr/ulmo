@@ -107,5 +107,19 @@ DEFINITION AMD64ObCodeGen; (* Christian Ehrhardt, AMD64 port *)
    PROCEDURE LoadFPUReg (proc : PC.Context; op : Op.Operand; form: Sym.Form;
 			 size : LONGINT; caller : Regs.Owner) : Op.Operand;
 
+   (* 64-bit integers (HUGEINT) *)
+
+   PROCEDURE IsHuge (proc : PC.Context; type : Sym.Type) : BOOLEAN;
+      (* is type a 64-bit integer type? *)
+
+   PROCEDURE HugeExpr (proc : PC.Context; at : Sym.Attribute) : BOOLEAN;
+      (* is at computed as 64-bit integer (also if its type is generic)? *)
+
+   PROCEDURE Extend (proc : PC.Context; VAR op : Op.Operand; signed : BOOLEAN;
+                     own : Regs.Owner);
+      (* turn a register or memory operand into an 8-byte register,
+       * sign-extended (zero-extended if ~signed); immediates are left
+       * alone *)
+
 
 END AMD64ObCodeGen.

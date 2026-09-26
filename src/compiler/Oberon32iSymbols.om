@@ -984,6 +984,14 @@ MODULE Oberon32iSymbols;
 	 CompilerObjects.GetAttachment(op, atdisc);
 	 ASSERT((opsy = Lex.plus) OR (opsy = Lex.minus) OR (opsy = Lex.tilde));
 	 IF atdisc = NIL THEN RETURN END;
+	 IF (atdisc.kind = integerConst) & (atdisc.setval # {}) THEN
+	    (* 64-bit constants (MIN/MAX(HUGEINT)) are not folded yet:
+	       computed at run time *)
+	    InternalCreateAttribute(new);
+	    new.type := atdisc.type; new.kind := noConst;
+	    CompilerObjects.Attach(module, at, new);
+	    RETURN
+	 END;
 	 IF opsy = Lex.plus THEN
 	    CreateCopyAttribute(new, atdisc);
 	 ELSE
@@ -1200,8 +1208,10 @@ MODULE Oberon32iSymbols;
 	 END IsReal;
 
 	 PROCEDURE IsIntegerConst(at: Attribute) : BOOLEAN;
+	    (* 64-bit constants (MIN/MAX(HUGEINT), the high word in setval)
+	       are not folded yet but computed at run time *)
 	 BEGIN
-	    RETURN (at # NIL) & (at.kind = integerConst)
+	    RETURN (at # NIL) & (at.kind = integerConst) & (at.setval = {})
 	 END IsIntegerConst;
 
 	 PROCEDURE ConvertToReal(VAR at: Attribute);

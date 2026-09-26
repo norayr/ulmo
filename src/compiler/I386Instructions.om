@@ -629,6 +629,7 @@ MODULE I386Instructions;
       ok := Gen.RegisterFormat2(FISTP,   "?A?DF%0D3%", m16int, st0, 6); ASSERT(ok);
       ok := Gen.RegisterFormat2(FISTP,   "?A?DB%0D3%", m32int, st0, 6); ASSERT(ok);
       ok := Gen.RegisterFormat2(FISTP,   "?A?DF%0D7%", m64int, st0, 6); ASSERT(ok);
+      ok := Gen.RegisterFormat2(FISTP,   "?A?DF%0D7%", m64int, st0, 6); ASSERT(ok);
 
       (* XXX PUSH! *)
       ok := Gen.RegisterFormat2(FLD,     "?A?D9%1D0%", st0, m32real, 1); ASSERT(ok);
