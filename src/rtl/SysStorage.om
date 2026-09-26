@@ -2502,7 +2502,7 @@ MODULE SysStorage;
          addr: Address;
 	 segSize: Size; (* segment.size converted to SysStorage.Size for arithmetic *)
 	 toBeBlocked: SigOps.SignalSet;
-	 addr32limit: Address; (* 4GB boundary; computed at runtime to avoid 64-bit const-fold in cross-compiler *)
+	 reserve: BOOLEAN; (* reserve segment in Memory? *)
    BEGIN
       lock := TRUE;                (* lock garbage collector *)
       storage.collection := 0;
@@ -2605,12 +2605,6 @@ MODULE SysStorage;
       END;
 
       (* reserve preallocated segments *)
-      (* On 64-bit: compute 4GB boundary to skip high AMD64 addresses.
-         On 32-bit: all addresses are in range; addr32limit is unused. *)
-      addr32limit := SYS.VAL(Address, MAX(LONGINT));
-      IF bitsPerAddress > 32 THEN
-         addr32limit := addr32limit + addr32limit + 2; (* = 0x100000000 = 4GB *)
-      END;
       numberOfSegments := SysSegments.NumberOfSegments();
       index := 0;
       WHILE index < numberOfSegments DO
@@ -2626,15 +2620,27 @@ MODULE SysStorage;
          ELSE
             allocMode := Memory.growingForward;
          END;
-         (* skip: Memory models [0, 2^30) = 1GB; skip segments outside that range.
-            - High AMD64 addresses (> addr32limit) are already excluded below.
-            - High i386 addresses (stack ~0xBFxxxxx, vDSO ~0xF7xxxxx) are negative
-              as LONGINT and would alias to the same buddy-tree leaf, causing a
-              false "overlapping regions" assertion on the second segment.
-            - Positive addresses in [0x40000000, 0x7FFFFFFF] are also outside
-              Memory's 1GB range and must be excluded too. *)
-         IF ((bitsPerAddress <= 32) OR (segment.addr < addr32limit)) &
-            (segment.addr >= 0) & (segment.addr < 40000000H) THEN
+         (* segments inside [0, 2^31) must be reserved, otherwise Memory
+            hands out their addresses again: on amd64 the kernel places
+            the program break, and with it the start up region, anywhere
+            in the first GB behind the program, beyond 2^30 as well;
+            segments outside that range are skipped:
+            - high AMD64 addresses (stack, vDSO) are beyond Memory's
+              address space [0, 2^31);
+            - high i386 addresses (stack ~0xBFxxxxxx, vDSO ~0xF7xxxxxx) are
+              negative as LONGINT and would alias to the same buddy-tree
+              leaf, causing a false "overlapping regions" assertion *)
+         IF segment.mode < 0 THEN
+            (* stack: segment.addr is its top, where 0 stands for the end
+               of the address space (i386) *)
+            reserve := (segment.addr = 0) & (bitsPerAddress <= 32) OR
+                       (addr >= 0) &
+                       (segment.addr - 1 <= SYS.VAL(Address, MAX(LONGINT)));
+         ELSE
+            reserve := (addr >= 0) &
+                       (SYS.VAL(Address, MAX(LONGINT)) - addr >= segSize - 1);
+         END;
+         IF reserve THEN
             Memory.ReserveRegion(segment.addr, segSize, allocMode, mregion);
          END;
          IF (SYS.ADR(addr) >= addr) & (SYS.ADR(addr) < addr + segSize)
