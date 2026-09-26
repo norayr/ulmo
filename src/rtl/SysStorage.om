@@ -569,6 +569,12 @@ MODULE SysStorage;
             to call NEW for Region/MemoryBlock objects even while lock=TRUE and
             criticalRegionNestLevel>0, because the old heap is still intact
          *)
+      gcCopying: BOOLEAN;
+         (* TRUE while CopyingCollector copies the living objects, i.e.
+            from its point of no return until all pointers are updated;
+            the objects of Memory are moved then, too, so stacks must not
+            be extended (see FaultHandler)
+         *)
       inMemoryAllocate: BOOLEAN;
          (* TRUE while executing Memory.AllocateRegion (set in AllocInterval);
             suppresses the OutOfMemory check in AllocateWithTag so that
@@ -1850,7 +1856,7 @@ MODULE SysStorage;
 	 any use of foreign modules is forbidden
 	 as we are now cracking all pointer structures
       *)
-      ReturnCurrentRegion;
+      ReturnCurrentRegion; gcCopying := TRUE;
       (* Storage.end := Nil; Storage.left := 0; regionInUse := NIL *)
 
       (* select the first of the pre-allocated regions *)
@@ -1975,6 +1981,7 @@ MODULE SysStorage;
          possible that the last region used (regionInUse) is entirely
 	 filled
        *)
+      gcCopying := FALSE;
       regionInUse := workRegion;
       Storage.left := regionInUse.len;
       Storage.end := regionInUse.addr + Storage.left;
@@ -2116,6 +2123,8 @@ MODULE SysStorage;
          region: Region;
          newsize: Size;
          addr: Address;
+         msg: ARRAY 48 OF CHAR;
+         count: SysIO.Count; interrupted: BOOLEAN;
    BEGIN
       (* it is important that FaultHandler does not invoke
          the garbage collection (see PROC AssureWorkingSize)
@@ -2124,24 +2133,19 @@ MODULE SysStorage;
          (* main stack too small — no runtime state to work with yet *)
          PanicExit;
       END;
-      (* Note on the removed `lock & criticalRegionNestLevel # 0` guard:
-       * historically this bailed to PanicExit whenever a fault arrived
-       * mid-GC.  Audit of the fault-servicing path shows every call it
-       * makes is heap-allocation-free:
-       *   Memory.GetStatus       — pure tree lookup
-       *   Disciplines.Seek       — linked-list walk
-       *   Memory.ExtendRegion    — calls ExtendBlock (freelist bookkeeping
-       *                            only, no NEW) + AddBlockToRegion (pointer
-       *                            splice, no NEW)
-       *   SysMemory.Map          — mmap(2) syscall
-       *   AssureWorkingSize      — no-op when criticalRegionNestLevel > 0
-       * So it is safe to service a stack-extension fault even while GC
-       * holds the storage lock.  The old guard was fatal on AMD64 because
-       * 8-byte pointers roughly double GC frame size, making it very likely
-       * to page-fault beyond ProbeStackSize's 8 KB headroom mid-collection.
-       * On i386 the guard was rarely tripped in practice because the
-       * inline CMPXCHG8B lock-free NEW fast path allowed most small-object
-       * allocations to complete without ever holding `lock`. *)
+      (* a stack may be extended during a garbage collection as long as
+         the heap is consistent, i.e. while regions are allocated before
+         the objects are copied and while old regions are released
+         afterwards; the fault-servicing path does not allocate:
+            Memory.GetStatus, Disciplines.Seek: lookups
+            Memory.ExtendRegion: free list bookkeeping, no NEW
+            SysMemory.Map: mmap(2)
+            AssureWorkingSize: no-op within critical regions
+         while the objects are copied (gcCopying), the blocks of Memory
+         are moved as well and must not be changed; StartOfCriticalRegion
+         asserts stackExtensionSize bytes of stack for the collector,
+         which needs far less (below 2 KB on AMD64) for copying
+      *)
       WITH event: SysSignals.Event DO
          IF event.fixed THEN RETURN END; (* somebody else has done it *)
          IF event.sigcode # maperr THEN RETURN END;
@@ -2155,6 +2159,14 @@ MODULE SysStorage;
             *)
           & Disciplines.Seek(mregion, RegionID, attach) THEN
             (* and it is one of our growing stacks *)
+            IF gcCopying THEN
+               (* stack overflow while the objects are copied *)
+               msg := "stack overflow during garbage collection";
+               msg[40] := 0AX;
+               count := SysIO.Write(2, SYS.ADR(msg), 41, NIL, FALSE,
+                                    interrupted);
+               PanicExit;
+            END;
             region := SYS.VAL(Region, attach.addr);
             IF region.mode < 0 THEN
                newsize := SYS.VAL(Size, region.addr - addr);
@@ -2564,6 +2576,7 @@ MODULE SysStorage;
          INC(sizeIndex);
       END;
       consumedRegions := NIL; fixedTree := NIL;
+      gcCopying := FALSE;
       regionInUse := SYS.VAL(Region, New(SYS.SIZE(RegionRec)));
       specialRegions := SYS.VAL(Region, New(SYS.SIZE(RegionRec)));
       stackIt := NIL;
