@@ -29,6 +29,14 @@ MODULE FilesystemDB;
             next: DirList;
          END;
 
+      GivenSource = POINTER TO GivenSourceRec;
+      GivenSourceRec =
+         RECORD
+            modname: ARRAY 256 OF CHAR;
+            dir: ARRAY 1024 OF CHAR; (* directory of the given file *)
+            next: GivenSource;
+         END;
+
       LocalHeader = POINTER TO LocalHeaderRec;
       LocalHeaderRec =
          RECORD
@@ -43,6 +51,7 @@ MODULE FilesystemDB;
             (CompilerDatabases.DatabaseRec)
             outdir: ARRAY 1024 OF CHAR;
             srcdirs, srclast: DirList;
+            given: GivenSource; (* modules given as source files *)
             objdirs, objlast: DirList;
             local: LocalHeader; (* headers of files in outdir read so far *)
          END;
@@ -329,8 +338,28 @@ MODULE FilesystemDB;
          modbuf: ARRAY 256 OF CHAR;
          filename: ARRAY 1300 OF CHAR;
          suffix: ARRAY 8 OF CHAR;
-         dummy: RelatedEvents.Object;
-         source: Sources.Source;
+         given: GivenSource;
+
+      PROCEDURE TryDir(dir: ARRAY OF CHAR) : BOOLEAN;
+         VAR
+            dummy: RelatedEvents.Object;
+            source: Sources.Source;
+      BEGIN
+         COPY(dir, filename);
+         IF dir[0] # 0X THEN
+            Strings.Concatenate(filename, "/");
+         END;
+         Strings.Concatenate(filename, modbuf);
+         Strings.Concatenate(filename, ".");
+         Strings.Concatenate(filename, suffix);
+         NEW(dummy); RelatedEvents.QueueEvents(dummy);
+         IF UnixOberonSources.Create(source, filename, GetSrcArgs(), dummy) THEN
+            src := source;
+            RETURN TRUE
+         END;
+         RETURN FALSE
+      END TryDir;
+
    BEGIN
       WITH dbase: Database DO
          ConstStrings.Extract(modbuf, modname);
@@ -339,20 +368,18 @@ MODULE FilesystemDB;
          | Sources.module:     COPY("om",  suffix);
          | Sources.defmod:     COPY("mod", suffix);
          END;
+         (* a module given as source file is taken from the directory
+            of that file, even if the search path has another version *)
+         given := dbase.given;
+         WHILE given # NIL DO
+            IF given.modname = modbuf THEN
+               IF TryDir(given.dir) THEN RETURN TRUE END;
+            END;
+            given := given.next;
+         END;
          d := dbase.srcdirs;
          WHILE d # NIL DO
-            COPY(d.dir, filename);
-            IF d.dir[0] # 0X THEN
-               Strings.Concatenate(filename, "/");
-            END;
-            Strings.Concatenate(filename, modbuf);
-            Strings.Concatenate(filename, ".");
-            Strings.Concatenate(filename, suffix);
-            NEW(dummy); RelatedEvents.QueueEvents(dummy);
-            IF UnixOberonSources.Create(source, filename, GetSrcArgs(), dummy) THEN
-               src := source;
-               RETURN TRUE
-            END;
+            IF TryDir(d.dir) THEN RETURN TRUE END;
             d := d.next;
          END;
          RETURN FALSE
@@ -418,6 +445,7 @@ MODULE FilesystemDB;
       newdb.srcdirs := NIL; newdb.srclast := NIL;
       newdb.objdirs := NIL; newdb.objlast := NIL;
       newdb.local := NIL;
+      newdb.given := NIL;
       (* outdir is always the first object search path *)
       AppendDir(newdb.objdirs, newdb.objlast, outdir);
       db := newdb;
@@ -430,6 +458,18 @@ MODULE FilesystemDB;
          AppendDir(db.srcdirs, db.srclast, dir);
       END;
    END AddSrcDir;
+
+   PROCEDURE AddSrcFile(db: CompilerDatabases.Database;
+                        modname, dir: ARRAY OF CHAR);
+      VAR
+         given: GivenSource;
+   BEGIN
+      WITH db: Database DO
+         NEW(given);
+         COPY(modname, given.modname); COPY(dir, given.dir);
+         given.next := db.given; db.given := given;
+      END;
+   END AddSrcFile;
 
    PROCEDURE AddObjDir(db: CompilerDatabases.Database;
                        dir: ARRAY OF CHAR);

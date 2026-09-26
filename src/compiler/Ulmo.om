@@ -141,6 +141,7 @@ MODULE Ulmo;
       (* Determine module name and compilation mode from the file suffix *)
       ExtractBaseName(sourcefile, modname);
       GetSuffix(sourcefile, suffix);
+      FilesystemDB.AddSrcFile(db, modname, dirpart);
 
       IF suffix = "od" THEN
          (* Definition module: compile only the public (arch-independent) interface *)

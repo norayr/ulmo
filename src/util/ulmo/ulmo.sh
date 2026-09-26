@@ -181,6 +181,8 @@ for sourcefile in $sources; do
    *.om|*.mod) ;;
    *) continue ;;
    esac
+   # a source given twice is converted once
+   echo "$obj_files" | grep -qw "$modname.o" && continue
    objfile="$modname-mod-$objarch.obj"
    # a library module given as source is not compiled again while the
    # compiled one of the library is up to date

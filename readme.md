@@ -177,9 +177,9 @@ How compilation works:
   enough to name the main module's source.
 - Library modules are taken precompiled from the installation, as long as
   their sources are unchanged.
-- A modified copy of a library module in the current directory (or in a
-  directory given with `-I`) takes precedence and is linked instead of the
-  library's version.
+- A modified copy of a library module, given on the command line or found
+  in the current directory (or in a directory given with `-I`), takes
+  precedence and is linked instead of the library's version.
 - All modules compiled in the current directory are linked, so use one
   directory per program.
 

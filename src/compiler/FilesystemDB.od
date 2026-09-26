@@ -26,6 +26,12 @@ DEFINITION FilesystemDB;
          (.od, .om, .mod).  Directories are searched in the order added.
       *)
 
+   PROCEDURE AddSrcFile(db: CompilerDatabases.Database;
+                        modname, dir: ARRAY OF CHAR);
+      (* modname was given as a source file in dir: its sources are taken
+         from dir first, before the directories of AddSrcDir.
+      *)
+
    PROCEDURE AddObjDir(db: CompilerDatabases.Database;
                        dir: ARRAY OF CHAR);
       (* Add dir to the list of directories searched for compiled .obj files.
