@@ -1,0 +1,260 @@
+# ulmo — Ulm's Oberon compiler for Linux on x86 and x86-64
+
+ulmo is a revival of **Ulm's Oberon System**, the Oberon compiler and
+library developed by Andreas F. Borchert and others at the University of
+Ulm. The original compiler generated code for i386, SPARC and m68k and
+depended on a database server setup (`pons` and `cdbd`) to compile anything.
+This version:
+
+- compiles and links without any server, like a C compiler;
+- generates native code for **i386** (32-bit x86) and **amd64** (x86-64);
+- is self-hosting on both architectures: it compiles itself, and the
+  compiler it produces compiles itself again to an identical binary;
+- builds with `make` and installs into a prefix or the usual Unix places,
+  so it can be packaged for distributions.
+
+The original documentation is at <http://www.mathematik.uni-ulm.de/oberon/>.
+The former README and installation instructions are kept in
+`README_legacy` and `INSTALL_legacy`.
+
+## Requirements
+
+- Linux on x86-64 or 32-bit x86
+- GNU make, a C compiler and the development files of libelf (elfutils);
+  they are only needed to build `tof2elf`, which converts the compiler's
+  output into ELF object files
+- GNU binutils (`as`, `ld`), also at run time: ulmo uses them to link
+  programs. For i386 programs on an x86-64 system, binutils must support
+  `elf_i386`, as the standard x86-64 binutils do.
+- perl (generates the start-up code of programs)
+
+The build starts from prebuilt compilers in `bootstrap/i386` and
+`bootstrap/amd64` (statically linked executables). Building for i386 on an
+x86-64 system runs the 32-bit bootstrap compiler, which needs a kernel with
+32-bit support (`CONFIG_IA32_EMULATION`, enabled on common distributions).
+Building for amd64 does not need any 32-bit support.
+
+## Building
+
+```sh
+make                # for the architecture of the host
+make ARCH=i386      # or for a given one: i386 or amd64
+make check          # optional: self-hosting check and a test program
+```
+
+The build takes a few minutes (on a current PC about 7 minutes for amd64
+and 3 for i386; `make check` adds about half of that). It proceeds in
+stages, each compiling the whole compiler and library:
+
+- stage 1 is built by the bootstrap compiler,
+- stage 2 by the compiler of stage 1; this is the one installed,
+- stage 3 (only for `make check`) by the compiler of stage 2 and must be
+  identical to stage 2.
+
+Everything goes to `build/`; `make clean` removes it. The directory
+`build/root` has the same layout as an installation, so the freshly built
+compiler can be used in place:
+
+```sh
+build/root/bin/ulmo -m Hello Hello.om
+```
+
+## Installing
+
+```sh
+make install                                  # into /usr/local
+make install PREFIX=$HOME/ulmo                # into a directory of your own
+make install PREFIX=/usr LIBDIR=/usr/lib64    # the traditional places
+make ARCH=i386 install                        # add another architecture
+make uninstall                                # per architecture, too
+```
+
+`make install` accepts `PREFIX`, `BINDIR`, `LIBDIR`, `DATADIR` and
+`DESTDIR`, and installs
+
+| path | contents |
+|---|---|
+| `BINDIR/ulmo` | the only command you need |
+| `LIBDIR/ulmo/tof2elf` | TOF to ELF converter |
+| `LIBDIR/ulmo/ARCH/` | compiler, tools and libraries for one target architecture |
+| `LIBDIR/ulmo/ARCH/obj/` | compiled interfaces of the library modules |
+| `DATADIR/ulmo/src/` | the sources of the library and the compiler |
+
+The Oberon libraries are not system libraries: they belong to the compiler,
+and each target architecture has its own directory under `LIBDIR/ulmo`. So
+it does not matter whether a distribution uses `lib` or `lib64`; set
+`LIBDIR` to what the distribution uses. Several architectures can be
+installed side by side; they share `ulmo`, `tof2elf` and the sources.
+
+The installed `ulmo` knows where its files are. `ULMOLIBDIR` and
+`ULMOSRCDIR` override these locations, which helps to test an installation
+staged with `DESTDIR`.
+
+### Packaging
+
+- Build with `make` and install with
+  `make install PREFIX=/usr LIBDIR=/usr/lib64 DESTDIR=$pkgdir`, with the
+  `LIBDIR` of the distribution (in a Gentoo ebuild: `/usr/$(get_libdir)`).
+- `ARCH` defaults to the host architecture. It also accepts `x86_64`, `x86`
+  and `i686`, so an `ARCH` from the environment (as set by portage) does
+  not get in the way.
+- The build compiles everything from source, but it starts from the
+  bootstrap compilers in `bootstrap/`, as the compilers of Go or Free Pascal
+  do.
+
+## Using ulmo
+
+A module in Ulm's Oberon consists of a **definition** (`.od`), its public
+interface, and a **module** (`.om`), the implementation. A main module that
+exports nothing needs no definition; ulmo creates an empty one.
+
+`Hello.om`:
+
+```oberon
+MODULE Hello;
+
+   IMPORT Write;
+
+BEGIN
+   Write.Line("Hello, world!");
+END Hello.
+```
+
+```sh
+$ ulmo -m Hello Hello.om
+ulmo: Hello.om -> Hello.o
+ulmo: linked -> Hello
+$ ./Hello
+Hello, world!
+```
+
+A program with modules of its own, as in `src/test`:
+
+```sh
+ulmo -m Hello src/test/Greeter.om src/test/Hello.om
+```
+
+Options:
+
+| option | |
+|---|---|
+| `-m Main` | link a program with the main module `Main` |
+| `-o file` | name of the program (default: name of the main module) |
+| `-arch ARCH` | target architecture: `amd64` or `i386` (default: the host's, if installed) |
+| `-I dir` | search sources in `dir`, too |
+| `-S` | write the intermediate code (`.tof`, text) instead of `.o` files |
+| `-v 6` | tell why modules are compiled or taken as they are |
+| `-L dir` | take the libraries from `dir` |
+
+Without `-m`, ulmo only compiles the given modules to `.o` files.
+
+How compilation works:
+
+- ulmoc compiles the imported modules of your program as needed. It
+  writes the compiled interfaces (`*-def-*.obj`) and code (`*-mod-*.obj`)
+  into the current directory.
+- Library modules are taken precompiled from the installation, as long as
+  their sources are unchanged.
+- Every compiled file carries a fingerprint (MD5) of its source and of the
+  interfaces it depends on. A module is recompiled when its source or one
+  of its imports changes; otherwise nothing is compiled again.
+- A modified copy of a library module in the current directory (or in a
+  directory given with `-I`) takes precedence and is linked instead of the
+  library's version.
+- All modules compiled in the current directory are linked, so use one
+  directory per program.
+
+The library is organized in three parts:
+
+| sources | library | |
+|---|---|---|
+| `src/rtl` | `librtl.a` | run time system: memory management, coroutines, events, streams, I/O. It is linked into every program. `src/rtl/amd64` has the amd64 versions of some of its modules. |
+| `src/lib` | `libo.a` | general library: containers, text processing, networking, persistence, ... |
+| `src/compiler` | `libcompiler.a` | the compiler itself |
+
+Programs contain only the modules they use, directly or indirectly, plus
+the run time system.
+
+## Program size
+
+A program is statically linked and contains the run time system, about 80
+modules, among them a garbage collector, coroutines and a stream system.
+The hello world program of `src/test`:
+
+| | as linked | stripped |
+|---|---|---|
+| amd64 | 1.6 MB | 0.7 MB |
+| i386 | 1.3 MB | 0.54 MB |
+
+More than half of it is the symbol table. Remove it with `strip`, or link
+without it:
+
+```sh
+strip Hello
+LDFLAGS=-s ulmo -m Hello Hello.om
+```
+
+Keep the symbols while you debug: they are all there is (see below).
+
+## Errors at run time and debugging
+
+Run time errors such as failed assertions, index range errors and failed
+type guards raise an event. By default nothing prints it; the program just
+aborts (SIGABRT, exit status 134). Import `Conclusions` in your main module
+to get a message:
+
+```oberon
+MODULE Fail;
+   IMPORT Conclusions;
+   ...
+```
+
+```
+Fail: bug: Failure in Fail.Check at line 85:
+      assertion failed
+```
+
+Module and procedure are correct. Known issues:
+
+- The "line" is not a source line number: it is a character position on
+  i386 and 0 on amd64.
+- On amd64 an index range error aborts without a message, even with
+  `Conclusions`; on i386 it reports e.g. `index 7 out of [0..4]`.
+- A NIL pointer dereference aborts without a message on both.
+
+There is no source-level debugging: the compiler does not generate debug
+information (no DWARF). gdb works on the machine level:
+
+- Procedures appear as `Module_Procedure` (e.g. `Greeter_SayHello`), so
+  `break Greeter_SayHello`, `disassemble`, `info symbol ADDRESS` and
+  `nm program` work.
+- Backtraces are unreliable: without unwind information gdb shows internal
+  labels (e.g. `Greeter___BLOCK_START__1`) and soon reaches frames it
+  cannot interpret.
+- The run time system extends coroutine stacks on demand by catching
+  SIGSEGV. Tell gdb to pass it on: `handle SIGSEGV nostop noprint pass`.
+- gdb disables address space randomization. If a problem only shows up
+  outside gdb, try `set disable-randomization off`.
+
+## Status and limitations
+
+- Linux only; programs are static executables with a single segment that is
+  readable, writable and executable (the linker warning about it is
+  suppressed where binutils support that).
+- On amd64 `INTEGER` and `LONGINT` are 32 bits wide, as on i386; addresses
+  are 64 bits. Code and static data live in the lowest 2 GB (small code
+  model).
+- The amd64 backend is new. It compiles the compiler and the whole library,
+  and the compiler reproduces itself, but it has seen far less use than the
+  i386 backend.
+- Run time error messages are incomplete (see above).
+- The database-based tools of the original system (`pons`, `cdbd`, `obci`,
+  ...) can still be built with `make cdb-tools`; `Makefile.cdb` has the
+  targets for setting them up. They are not needed for ulmo.
+
+## License
+
+Ulm's Oberon System is copyright by Andreas F. Borchert and others. It may
+be used and distributed under the terms of the GNU General Public License
+(the library under the GNU Library General Public License); see `COPYING`
+and the headers of the source files.
