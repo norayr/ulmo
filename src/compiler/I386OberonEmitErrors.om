@@ -31,7 +31,7 @@
 
 MODULE I386OberonEmitErrors; (* Christian Ehrhardt *)
 
-   IMPORT CompilerObjects, ConstStrings, Emit := I386Emit,
+   IMPORT CompilerLines, CompilerObjects, ConstStrings, Emit := I386Emit,
       Gen := I386OpCodeGenerator, Op := I386Operands,
       PC := I386OberonContexts, Pentium := I386Instructions,
       Regs := CompilerRegisters, Reloc := CompilerRelocations,
@@ -66,9 +66,10 @@ MODULE I386OberonEmitErrors; (* Christian Ehrhardt *)
       Emit.Instr1 (proc.s, Pentium.PUSH, op);
    END PushString;
 
-   PROCEDURE PosToLine (proc : PC.Context; pos : Streams.Count) : Streams.Count;
+   PROCEDURE PosToLine (loc : CompilerObjects.Location;
+                        pos : Streams.Count) : Streams.Count;
    BEGIN
-      RETURN pos;
+      RETURN CompilerLines.Line (loc, pos)
    END PosToLine;
 
 
@@ -79,7 +80,7 @@ MODULE I386OberonEmitErrors; (* Christian Ehrhardt *)
 	 ref : Reloc.SymRef;
    BEGIN
       Emit.Instr1 (proc.s, Pentium.PUSH,
-                   Op.ImmIntFixed (PosToLine (proc, loc.end), 4));
+                   Op.ImmIntFixed (PosToLine (loc, loc.end), 4));
       PushString (proc, RealName (proc.ident));
       PushString (proc, RealName (proc.module));
       NEW (ref);
@@ -97,7 +98,7 @@ MODULE I386OberonEmitErrors; (* Christian Ehrhardt *)
 	 ref : Reloc.SymRef;
    BEGIN
       Emit.Instr1 (proc.s, Pentium.PUSH,
-                   Op.ImmIntFixed (PosToLine (proc, loc.end), 4));
+                   Op.ImmIntFixed (PosToLine (loc, loc.end), 4));
       PushString (proc, RealName (proc.ident));
       PushString (proc, RealName (proc.module));
       NEW (ref);
@@ -115,7 +116,7 @@ MODULE I386OberonEmitErrors; (* Christian Ehrhardt *)
 	 ref : Reloc.SymRef;
    BEGIN
       Emit.Instr1 (proc.s, Pentium.PUSH,
-                   Op.ImmIntFixed (PosToLine (proc, loc.begin), 4));
+                   Op.ImmIntFixed (PosToLine (loc, loc.begin), 4));
       PushString (proc, RealName (proc.ident));
       PushString (proc, RealName (proc.module));
       NEW (ref);
@@ -158,7 +159,7 @@ MODULE I386OberonEmitErrors; (* Christian Ehrhardt *)
 	 limit := Op.RegOp (tmp2, 4);
       END;
       Emit.Instr1 (proc.s, Pentium.PUSH,
-                   Op.ImmIntFixed (PosToLine (proc, loc.begin), 4));
+                   Op.ImmIntFixed (PosToLine (loc, loc.begin), 4));
       PushString (proc, RealName (proc.ident));
       PushString (proc, RealName (proc.module));
       Emit.Instr1 (proc.s, Pentium.PUSH, val);
@@ -173,6 +174,29 @@ MODULE I386OberonEmitErrors; (* Christian Ehrhardt *)
       Emit.Instr2 (proc.s, Pentium.ADD, Op.RegOp (reg, 4), Op.ImmInt (28));
    END RangeCheck;
 			 
+   PROCEDURE IndexCheck (proc : PC.Context; loc : CompilerObjects.Location;
+                         index, length : Op.Operand);
+      (* RangeError expects the largest valid value, i.e. length - 1 *)
+      VAR
+         own : Regs.Owner;
+         tmp : Regs.Value;
+   BEGIN
+      CASE Op.Loc (length) OF
+      | Op.register:
+         length.memsz := 4;
+      | Op.immediate, Op.immediateDyn:
+         length.immsz := 4;
+      ELSE
+      END;
+      own := Regs.GetOwner (proc.regs);
+      Regs.CreateValue (tmp, proc.regs, own, Regs.stdM);
+      Regs.LoadReg (tmp, Gen.StdRegs);
+      Emit.Instr2 (proc.s, Pentium.MOV, Op.RegOp (tmp, 4), length);
+      Emit.Instr2 (proc.s, Pentium.SUB, Op.RegOp (tmp, 4), Op.ImmInt (1));
+      RangeCheck (proc, loc, index, Op.RegOp (tmp, 4));
+      Regs.DestroyOwnedValue (tmp, own);
+   END IndexCheck;
+
    PROCEDURE Conversion (proc : PC.Context;
                          loc : CompilerObjects.Location; val : Op.Operand);
       VAR
@@ -193,7 +217,7 @@ MODULE I386OberonEmitErrors; (* Christian Ehrhardt *)
 	 val := Op.RegOp (tmp, 4);
       END;
       Emit.Instr1 (proc.s, Pentium.PUSH,
-                   Op.ImmIntFixed (PosToLine (proc, loc.begin), 4));
+                   Op.ImmIntFixed (PosToLine (loc, loc.begin), 4));
       PushString (proc, RealName (proc.ident));
       PushString (proc, RealName (proc.module));
       Emit.Instr1 (proc.s, Pentium.PUSH, val);
@@ -219,7 +243,7 @@ MODULE I386OberonEmitErrors; (* Christian Ehrhardt *)
          code.immsz := 4;
       END;
       Emit.Instr1 (proc.s, Pentium.PUSH,
-                   Op.ImmIntFixed (PosToLine (proc, loc.begin), 4));
+                   Op.ImmIntFixed (PosToLine (loc, loc.begin), 4));
       PushString (proc, RealName (proc.ident));
       PushString (proc, RealName (proc.module));
       Emit.Instr1 (proc.s, Pentium.PUSH, code);

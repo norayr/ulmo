@@ -198,10 +198,11 @@ Keep the symbols while you debug: they are all there is (see below).
 
 ## Errors at run time and debugging
 
-Run time errors such as failed assertions, index range errors and failed
-type guards raise an event. By default nothing prints it; the program just
-aborts (SIGABRT, exit status 134). Import `Conclusions` in your main module
-to get a message:
+Run time errors (failed assertions, index range errors, failed type guards,
+CASE without matching label, functions without RETURN, failed conversions,
+dereferences of NIL) raise an event. By default nothing prints it; the
+program just aborts (SIGABRT, exit status 134). Import `Conclusions` in
+your main module to get a message:
 
 ```oberon
 MODULE Fail;
@@ -210,17 +211,14 @@ MODULE Fail;
 ```
 
 ```
-Fail: bug: Failure in Fail.Check at line 85:
+Fail: bug: Failure in Fail.Check at line 5:
       assertion failed
 ```
 
-Module and procedure are correct. Known issues:
-
-- The "line" is not a source line number: it is a character position on
-  i386 and 0 on amd64.
-- On amd64 an index range error aborts without a message, even with
-  `Conclusions`; on i386 it reports e.g. `index 7 out of [0..4]`.
-- A NIL pointer dereference aborts without a message on both.
+The line is that of the failing statement; for a CASE without matching
+label it is the line of its END, for a missing RETURN that of the
+procedure heading. A dereference of NIL is reported as
+`segmentation violation`, without a location.
 
 There is no source-level debugging: the compiler does not generate debug
 information (no DWARF). gdb works on the machine level:
@@ -247,7 +245,6 @@ information (no DWARF). gdb works on the machine level:
 - The amd64 backend is new. It compiles the compiler and the whole library,
   and the compiler reproduces itself, but it has seen far less use than the
   i386 backend.
-- Run time error messages are incomplete (see above).
 - The database-based tools of the original system (`pons`, `cdbd`, `obci`,
   ...) can still be built with `make cdb-tools`; `Makefile.cdb` has the
   targets for setting them up. They are not needed for ulmo.

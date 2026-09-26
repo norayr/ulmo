@@ -1,0 +1,100 @@
+(* Ulm's Oberon Library
+   ----------------------------------------------------------------------------
+   Ulm's Oberon Library is free software; you can redistribute it
+   and/or modify it under the terms of the GNU Library General Public
+   License as published by the Free Software Foundation; either version
+   2 of the License, or (at your option) any later version.
+
+   Ulm's Oberon Library is distributed in the hope that it will be
+   useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+   of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+   Library General Public License for more details.
+
+   You should have received a copy of the GNU Library General Public
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+   ----------------------------------------------------------------------------
+*)
+
+MODULE CompilerLines;
+
+   (* The positions at which the lines of a source begin are collected
+      once per source; code generators ask for many positions (every
+      range check is one) of the same source.
+   *)
+
+   IMPORT CompilerObjects, Sources := CompilerSources, Streams, SYS := SYSTEM;
+
+   CONST
+      chunklen = 1024;
+   TYPE
+      Chunk = POINTER TO ChunkRec;
+      ChunkRec =
+	 RECORD
+	    first: Streams.Count; (* number of the line at start[0] *)
+	    start: ARRAY chunklen OF Streams.Count; (* ascending positions *)
+	    n: INTEGER; (* number of entries in start *)
+	    next: Chunk;
+	 END;
+
+   VAR
+      source: Sources.Source; (* source whose lines are known *)
+      lines: Chunk; (* beginnings of the lines of source *)
+
+   PROCEDURE Scan(src: Sources.Source) : BOOLEAN;
+      VAR
+	 s: Streams.Stream;
+	 byte: Streams.Byte;
+	 pos, line: Streams.Count;
+	 tail: Chunk;
+
+      PROCEDURE Add(pos: Streams.Count);
+	 VAR
+	    chunk: Chunk;
+      BEGIN
+	 IF (tail = NIL) OR (tail.n = chunklen) THEN
+	    NEW(chunk); chunk.first := line; chunk.n := 0; chunk.next := NIL;
+	    IF tail = NIL THEN lines := chunk ELSE tail.next := chunk END;
+	    tail := chunk;
+	 END;
+	 tail.start[tail.n] := pos; INC(tail.n); INC(line);
+      END Add;
+
+   BEGIN
+      source := NIL; lines := NIL;
+      IF ~Sources.Open(src, s) THEN RETURN FALSE END;
+      tail := NIL; line := 1; pos := 0;
+      Add(0);
+      WHILE Streams.ReadByte(s, byte) DO
+	 INC(pos);
+	 IF SYS.VAL(CHAR, byte) = 0AX THEN Add(pos) END;
+      END;
+      Streams.Release(s);
+      source := src;
+      RETURN TRUE
+   END Scan;
+
+   PROCEDURE Line(loc: CompilerObjects.Location;
+                  pos: Streams.Count) : Streams.Count;
+      VAR
+	 chunk: Chunk;
+	 low, high, mid: INTEGER;
+   BEGIN
+      IF (loc = NIL) OR (loc.src = NIL) OR (pos < 0) THEN RETURN 0 END;
+      IF (loc.src # source) & ~Scan(loc.src) THEN RETURN 0 END;
+      chunk := lines;
+      WHILE (chunk.next # NIL) & (chunk.next.start[0] <= pos) DO
+	 chunk := chunk.next;
+      END;
+      (* the last entry of chunk.start that is <= pos *)
+      low := 0; high := chunk.n - 1;
+      WHILE low < high DO
+	 mid := (low + high + 1) DIV 2;
+	 IF chunk.start[mid] <= pos THEN low := mid ELSE high := mid - 1 END;
+      END;
+      RETURN chunk.first + low
+   END Line;
+
+BEGIN
+   source := NIL; lines := NIL;
+END CompilerLines.

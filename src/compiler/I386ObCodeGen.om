@@ -1108,8 +1108,7 @@ MODULE I386ObCodeGen; (* Christian Ehrhardt *)
 	    Emit.Instr2 (proc.s, Pentium.CMP, index, dope);
 	    Emit.JumpCC(proc.s, beyond, Pentium.JB-Pentium.JCC);
 	    Regs.EnterLevel(proc.regs);
-	    (* XXX Subtract one from dope! *)
-	    EmitErrors.RangeCheck(proc, at.loc, index, dope);
+	    EmitErrors.IndexCheck(proc, at.loc, index, dope);
 	    Regs.LeaveLevel(proc.regs);
 	    Regs.DoneLevel(proc.regs);
 	    FragmentedStreams.AttachLabel(proc.s, beyond);
@@ -1210,8 +1209,7 @@ MODULE I386ObCodeGen; (* Christian Ehrhardt *)
 	 Emit.Instr2 (proc.s, Pentium.CMP, op, size);
 	 Emit.JumpCC(proc.s, beyond, Pentium.JB-Pentium.JCC);
 	 Regs.EnterLevel(proc.regs);
-	 (* XXX Subtract 1 from size! *)
-	 EmitErrors.RangeCheck(proc, at.loc, op, size);
+	 EmitErrors.IndexCheck(proc, at.loc, op, size);
 	 Regs.LeaveLevel(proc.regs);
 	 Regs.DoneLevel(proc.regs);
 	 FragmentedStreams.AttachLabel(proc.s, beyond);

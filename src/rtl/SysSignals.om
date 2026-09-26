@@ -160,6 +160,7 @@ MODULE SysSignals;
 	 sigevent: Event;
 	 error: INTEGER;
 	 old : PROCEDURE;
+	 abort: Events.EventHandler;
    BEGIN
       (* close the window *)
       IF (signo <= MAX(SET)) & ~(signo IN againSignals) &
@@ -205,6 +206,11 @@ MODULE SysSignals;
       Events.Raise(sigevent);
       IF (signo <= MAX(SET)) &
 	    (sigevent.signo IN hardSignals) & ~sigevent.fixed THEN
+	 (* nobody could fix it (e.g. SysStorage handles SIGSEGV to extend
+	    stacks, but not a dereference of NIL): report it as an event
+	    without handlers is reported, e.g. by Conclusions *)
+	 Events.GetAbortHandler(abort);
+	 abort(sigevent);
 	 Process.Abort;
       END;
    END SignalHandler;

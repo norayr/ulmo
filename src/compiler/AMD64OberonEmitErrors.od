@@ -43,6 +43,11 @@ DEFINITION AMD64OberonEmitErrors; (* Christian Ehrhardt *)
                         loc: CompilerObjects.Location;
 			val, limit : Op.Operand);
 
+   PROCEDURE IndexCheck(proc: PC.Context;
+                        loc: CompilerObjects.Location;
+			index, length : Op.Operand);
+      (* RangeCheck for an index into an array of the given length *)
+
    PROCEDURE Conversion(proc: PC.Context;
                         loc: CompilerObjects.Location; val: Op.Operand);
 
