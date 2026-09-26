@@ -125,6 +125,10 @@ DEFINITION CompilerObjects;
 		       header: Header; module: Object);
    PROCEDURE AddHeader(mtab: ModuleTable; header: Header);
       (* headers may later be replaced by AddModule *)
+   PROCEDURE Fits(mtab: ModuleTable; header: Header) : BOOLEAN;
+      (* may header be added to mtab, i.e. are its key and dependencies
+	 compatible to the keys of the modules in mtab?
+      *)
    PROCEDURE Lookup(mtab: ModuleTable;
                     modname: ConstStrings.String;
 		    type: ObjectType;
@@ -139,6 +143,9 @@ DEFINITION CompilerObjects;
    PROCEDURE CreateCopyOfModuleTable(VAR mtab: ModuleTable;
 				     orig: ModuleTable);
    PROCEDURE SynchronizeModuleTable(mtab, extendedtab: ModuleTable);
+   PROCEDURE Synchronizable(mtab, extendedtab: ModuleTable) : BOOLEAN;
+      (* can SynchronizeModuleTable(mtab, extendedtab) be done, i.e. do
+	 the modules of both tables fit together? *)
 
    PROCEDURE Init(object: Object);
       (* initialization of objects defined by language sources;

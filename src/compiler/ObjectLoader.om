@@ -316,7 +316,7 @@ MODULE ObjectLoader;
 	 *)
 	 VAR
 	    it: Iterators.Iterator;
-	    key: CompilerKeys.Key;
+	    key, combined: CompilerKeys.Key;
 	    header: CompilerObjects.Header;
 
       BEGIN (* AnythingUpdated *)
@@ -328,6 +328,12 @@ MODULE ObjectLoader;
 			     CompilerObjects.public, arch, header,
 			     RelatedEvents.null) THEN
 	       LogMsg("one of the architecture-independent ifs is missing");
+	       RETURN TRUE
+	    END;
+	    IF ~CompilerKeys.CombineKeys(key, header.key, combined) THEN
+	       (* the object was compiled against another version
+		  of this interface *)
+	       LogMsg("one of the ifs has been compiled again");
 	       RETURN TRUE
 	    END;
 	    IF ~UpToDate(newcontext, header) THEN
@@ -441,7 +447,8 @@ MODULE ObjectLoader;
       key := header.key;
       ASSERT(CompilerKeys.CompatibleWith(key, context.keys));
       IF CompilerObjects.LookupHeader(context.mtab, key.modname,
-                                      header.type, key.arch, hdr) THEN
+                                      header.type, key.arch, hdr) &
+	    CompilerObjects.Fits(context.mtab, hdr) THEN
 	 (*
 	 LogSuccess("we consider it up-to-date because it is in our cache");
 	 *)
@@ -451,6 +458,15 @@ MODULE ObjectLoader;
       LogParameters; EnterLevel;
 
       Compilers.CreateCopyOfContext(newcontext, context);
+      IF ~CompilerObjects.Fits(newcontext.mtab, header) THEN
+	 (* compiled against other versions of modules than those in use
+	    (e.g. an object left from an earlier compilation): it has to
+	    be compiled again
+	 *)
+	 LogMsg("incompatible with the modules in use");
+	 LogFailure;
+	 RETURN FALSE
+      END;
       CompilerObjects.AddHeader(newcontext.mtab, header);
 
       IF (header.type = CompilerObjects.public) &
@@ -491,6 +507,13 @@ MODULE ObjectLoader;
 	    LogMsg("updates found in the set of dependencies");
 	    uptodate := FALSE;
 	 END;
+      END;
+      IF uptodate &
+	    ~CompilerObjects.Synchronizable(context.mtab, newcontext.mtab) THEN
+	 (* up-to-date by itself but it needs versions of other modules
+	    that do not fit to those in use *)
+	 LogMsg("incompatible with the modules in use");
+	 uptodate := FALSE;
       END;
       IF uptodate THEN
 	 Compilers.SynchronizeContext(context, newcontext);

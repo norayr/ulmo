@@ -29,6 +29,14 @@ MODULE FilesystemDB;
             next: DirList;
          END;
 
+      LocalHeader = POINTER TO LocalHeaderRec;
+      LocalHeaderRec =
+         RECORD
+            filename: ARRAY 1300 OF CHAR;
+            header: CompilerObjects.Header; (* NIL: no such file *)
+            next: LocalHeader;
+         END;
+
       Database = POINTER TO DatabaseRec;
       DatabaseRec =
          RECORD
@@ -36,6 +44,7 @@ MODULE FilesystemDB;
             outdir: ARRAY 1024 OF CHAR;
             srcdirs, srclast: DirList;
             objdirs, objlast: DirList;
+            local: LocalHeader; (* headers of files in outdir read so far *)
          END;
 
    VAR
@@ -119,7 +128,63 @@ MODULE FilesystemDB;
       RETURN TRUE
    END TryReadFile;
 
-   PROCEDURE SearchDirs(modname: ConstStrings.String;
+   PROCEDURE GetLocalHeader(dbase: Database;
+                            modname: ConstStrings.String;
+                            type: CompilerObjects.ObjectType;
+                            arch: Architectures.Architecture;
+                            VAR header: CompilerObjects.Header) : BOOLEAN;
+      (* the header of the object in outdir, if there is one *)
+      VAR
+         filename: ARRAY 1300 OF CHAR;
+         local: LocalHeader;
+         text: PersistentTexts.Text;
+   BEGIN
+      MakeFilename(filename, dbase.outdir, modname, type, arch);
+      local := dbase.local;
+      WHILE (local # NIL) & (local.filename # filename) DO
+         local := local.next;
+      END;
+      IF local = NIL THEN
+         NEW(local); COPY(filename, local.filename);
+         IF ~TryReadFile(filename, local.header, text, FALSE) THEN
+            local.header := NIL;
+         END;
+         local.next := dbase.local; dbase.local := local;
+      END;
+      header := local.header;
+      RETURN header # NIL
+   END GetLocalHeader;
+
+   PROCEDURE ConflictsWithLocal(dbase: Database;
+                                header: CompilerObjects.Header) : BOOLEAN;
+      (* was header, an object of another directory than outdir (e.g. of
+         the library), compiled against another version of a module than
+         that in outdir?  Once a module is compiled into outdir (e.g. from
+         a modified source), the objects depending on its other versions
+         are out of date.
+      *)
+      VAR
+         it: Iterators.Iterator;
+         key, combined: CompilerKeys.Key;
+         local: CompilerObjects.Header;
+   BEGIN
+      IF header.dependencies # NIL THEN
+         CompilerKeys.GetKeys(header.dependencies, it);
+         WHILE Iterators.Get(it, key) DO
+            IF GetLocalHeader(dbase, key.modname, CompilerObjects.public,
+                              key.arch, local) &
+                  ~CompilerKeys.CombineKeys(key, local.key, combined) THEN
+               RETURN TRUE
+            END;
+         END;
+      END;
+      RETURN GetLocalHeader(dbase, header.modname, CompilerObjects.public,
+                            header.arch, local) &
+             ~CompilerKeys.CombineKeys(header.key, local.key, combined)
+   END ConflictsWithLocal;
+
+   PROCEDURE SearchDirs(dbase: Database;
+                        modname: ConstStrings.String;
                         type: CompilerObjects.ObjectType;
                         arch: Architectures.Architecture;
                         dirs: DirList;
@@ -142,7 +207,8 @@ MODULE FilesystemDB;
          IF TryReadFile(filename, header, text, readText) &
                ((keys = NIL) OR
                 CompilerKeys.Compatible(keys, header.dependencies) &
-                CompilerKeys.CompatibleWith(header.key, keys)) THEN
+                CompilerKeys.CompatibleWith(header.key, keys)) &
+               ((d = dirs) OR ~ConflictsWithLocal(dbase, header)) THEN
             RETURN TRUE
          END;
          d := d.next;
@@ -164,7 +230,7 @@ MODULE FilesystemDB;
                     errors: RelatedEvents.Object) : BOOLEAN;
    BEGIN
       WITH dbase: Database DO
-         RETURN SearchDirs(modname, type, arch, dbase.objdirs,
+         RETURN SearchDirs(dbase, modname, type, arch, dbase.objdirs,
                            keys, header, text, TRUE)
       END;
    END Lookup;
@@ -179,7 +245,7 @@ MODULE FilesystemDB;
       VAR text: PersistentTexts.Text;
    BEGIN
       WITH dbase: Database DO
-         RETURN SearchDirs(modname, type, arch, dbase.objdirs,
+         RETURN SearchDirs(dbase, modname, type, arch, dbase.objdirs,
                            keys, header, text, FALSE)
       END;
    END LookupHeader;
@@ -207,6 +273,10 @@ MODULE FilesystemDB;
             RETURN FALSE
          END;
          Streams.Release(s);
+         (* forget what we know about the old file *)
+         IF dbase.local # NIL THEN
+            dbase.local := NIL;
+         END;
          RETURN TRUE
       END;
    END Store;
@@ -347,6 +417,7 @@ MODULE FilesystemDB;
       COPY(outdir, newdb.outdir);
       newdb.srcdirs := NIL; newdb.srclast := NIL;
       newdb.objdirs := NIL; newdb.objlast := NIL;
+      newdb.local := NIL;
       (* outdir is always the first object search path *)
       AppendDir(newdb.objdirs, newdb.objlast, outdir);
       db := newdb;

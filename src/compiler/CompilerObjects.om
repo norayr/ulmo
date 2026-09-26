@@ -606,6 +606,12 @@ MODULE CompilerObjects;
       InternalAddModule(mtab, header, NIL, (* include = *) FALSE);
    END AddHeader;
 
+   PROCEDURE Fits(mtab: ModuleTable; header: Header) : BOOLEAN;
+   BEGIN
+      RETURN CompilerKeys.CompatibleWith(header.key, mtab.keys) &
+	     CompilerKeys.Compatible(header.dependencies, mtab.keys)
+   END Fits;
+
    PROCEDURE Lookup(mtab: ModuleTable;
                     modname: ConstStrings.String;
 		    type: ObjectType;
@@ -652,22 +658,74 @@ MODULE CompilerObjects;
       mtab := newtab;
    END CreateCopyOfModuleTable;
 
-   PROCEDURE SynchronizeModuleTable(mtab, extendedtab: ModuleTable);
+   PROCEDURE Synchronize(mtab, extendedtab: ModuleTable) : BOOLEAN;
+      (* add all entries of extendedtab to mtab; each entry must fit to
+	 the keys of mtab when it is added, and newer versions of modules
+	 may be needed first, hence entries are added in as many passes
+	 as necessary; entries without object (headers which were found to
+	 be up-to-date) that do not fit anymore are just dropped; FALSE if
+	 some entries with object do not fit at all
+      *)
+      TYPE
+	 Pending = POINTER TO PendingRec;
+	 PendingRec =
+	    RECORD
+	       entry: Entry;
+	       next: Pending;
+	    END;
       VAR
 	 index: INTEGER;
 	 entry: Entry;
+	 pending, p, prev: Pending;
+	 progress: BOOLEAN;
    BEGIN
+      pending := NIL;
       index := 0;
       WHILE index < hashtablen DO
 	 entry := extendedtab.bucket[index];
 	 WHILE entry # NIL DO
-	    InternalAddModule(mtab, entry.header, entry.object,
-	       (* include = *) TRUE);
+	    NEW(p); p.entry := entry; p.next := pending; pending := p;
 	    entry := entry.next;
 	 END;
 	 INC(index);
       END;
+      REPEAT
+	 progress := FALSE;
+	 p := pending; prev := NIL;
+	 WHILE p # NIL DO
+	    IF Fits(mtab, p.entry.header) THEN
+	       InternalAddModule(mtab, p.entry.header, p.entry.object,
+		  (* include = *) TRUE);
+	       IF prev = NIL THEN pending := p.next ELSE prev.next := p.next END;
+	       progress := TRUE;
+	    ELSE
+	       prev := p;
+	    END;
+	    p := p.next;
+	 END;
+      UNTIL ~progress;
+      p := pending;
+      WHILE p # NIL DO
+	 IF p.entry.object # NIL THEN RETURN FALSE END;
+	 p := p.next;
+      END;
+      RETURN TRUE
+   END Synchronize;
+
+   PROCEDURE SynchronizeModuleTable(mtab, extendedtab: ModuleTable);
+      VAR
+	 ok: BOOLEAN;
+   BEGIN
+      ok := Synchronize(mtab, extendedtab); ASSERT(ok);
    END SynchronizeModuleTable;
+
+   PROCEDURE Synchronizable(mtab, extendedtab: ModuleTable) : BOOLEAN;
+      VAR
+	 copy: ModuleTable;
+   BEGIN
+      CreateCopyOfModuleTable(copy, mtab);
+      RETURN Synchronize(copy, extendedtab)
+   END Synchronizable;
 
    PROCEDURE Init(object: Object);
       (* initialization of objects defined by language sources;
