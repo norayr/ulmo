@@ -1034,6 +1034,38 @@ MODULE Oberon64iSymbols;
 	 END;
       END FoldProcedureCalls;
 
+      PROCEDURE CheckSetMemberRange(member: Integer;
+	                               loc: CompilerObjects.Location) : BOOLEAN;
+	    (* set members must be in [0 .. setLen-1] *)
+	    VAR
+	       es: Streams.Stream;
+	 BEGIN
+	    IF member < 0 THEN
+	       CompilerErrors.Open(es);
+	       CompilerErrors.At1(es, loc);
+	       Write.StringS(es, "set member values must not be negative");
+	       CompilerErrors.Close(es, errors);
+	    ELSIF member >= Ob32.maxSetLenOnTarget THEN
+	       CompilerErrors.Open(es);
+	       CompilerErrors.At1(es, loc);
+	       Write.StringS(es, "set member value exceeds maximal value (");
+	       Write.IntS(es, Ob32.maxSetLenOnTarget - 1, 1);
+	       Write.CharS(es, ")");
+	       CompilerErrors.Close(es, errors);
+	    ELSIF member >= Ob32.setLen THEN
+	       CompilerErrors.Open(es);
+	       CompilerErrors.At1(es, loc);
+	       Write.StringS(es, "implementation restriction: compiler is ");
+	       Write.StringS(es, "unable to represent set member values ");
+	       Write.StringS(es, "exceeding ");
+	       Write.IntS(es, Ob32.setLen - 1, 1);
+	       CompilerErrors.Close(es, errors);
+	    ELSE
+	       RETURN TRUE
+	    END;
+	    RETURN FALSE
+	 END CheckSetMemberRange;
+
       PROCEDURE UnaryOp(at: Sym.Attribute);
 	 VAR
 	    atdisc, new: Attribute;
@@ -1211,7 +1243,10 @@ MODULE Oberon64iSymbols;
 		  InternalCreateAttribute(new);
 		  new.type := BaseTypes.set;
 		  new.kind := setConst;
-		  new.setval := {atdisc2.intval};
+		  new.setval := {};
+		  IF CheckSetMemberRange(atdisc2.intval, op2.loc) THEN
+		     new.setval := {atdisc2.intval};
+		  END;
 		  CompilerObjects.Attach(module, at, new);
 	       ELSIF atdisc2.kind = setConst THEN
 		  (* op2 is already a multi-element set that has been folded *)
@@ -1353,19 +1388,29 @@ MODULE Oberon64iSymbols;
 	       new.type := BaseTypes.set;
 	       IF (atdisc1.kind = integerConst) & (atdisc2.kind = integerConst) THEN
 		  new.kind := setConst;
-		  IF opsy = Lex.range THEN
-		     new.setval := {atdisc1.intval .. atdisc2.intval};
-		  ELSE
-		     new.setval := {atdisc1.intval, atdisc2.intval};
+		  new.setval := {};
+		  IF CheckSetMemberRange(atdisc1.intval, op1.loc) &
+			CheckSetMemberRange(atdisc2.intval, op2.loc) THEN
+		     IF opsy = Lex.range THEN
+			new.setval := {atdisc1.intval .. atdisc2.intval};
+		     ELSE
+			new.setval := {atdisc1.intval, atdisc2.intval};
+		     END;
 		  END;
 	       ELSIF (atdisc1.kind = integerConst) & (atdisc2.kind = setConst) THEN
 		  ASSERT(opsy = Lex.comma);
 		  new.kind := setConst;
-		  new.setval := {atdisc1.intval} + atdisc2.setval;
+		  new.setval := atdisc2.setval;
+		  IF CheckSetMemberRange(atdisc1.intval, op1.loc) THEN
+		     INCL(new.setval, atdisc1.intval);
+		  END;
 	       ELSIF (atdisc1.kind = setConst) & (atdisc2.kind = integerConst) THEN
 		  ASSERT(opsy = Lex.comma);
 		  new.kind := setConst;
-		  new.setval := atdisc1.setval + {atdisc2.intval};
+		  new.setval := atdisc1.setval;
+		  IF CheckSetMemberRange(atdisc2.intval, op2.loc) THEN
+		     INCL(new.setval, atdisc2.intval);
+		  END;
 	       ELSIF (atdisc1.kind = setConst) & (atdisc2.kind = setConst) THEN
 		  ASSERT(opsy = Lex.comma);
 		  new.kind := setConst;
@@ -1377,7 +1422,8 @@ MODULE Oberon64iSymbols;
 	       new.type := BaseTypes.boolean;
 	       IF (atdisc1.kind = integerConst) & (atdisc2.kind = setConst) THEN
 		  new.kind := booleanConst;
-		  new.boolval := atdisc1.intval IN atdisc2.setval;
+		  new.boolval := CheckSetMemberRange(atdisc1.intval, op1.loc) &
+				 (atdisc1.intval IN atdisc2.setval);
 	       ELSE
 		  RETURN
 	       END;
