@@ -2,8 +2,10 @@
 
 ulmo is a revival of **Ulm's Oberon System**, the Oberon compiler and
 library developed by Andreas F. Borchert and others at the University of
-Ulm. The original compiler generated code for i386, SPARC and m68k and
-depended on a database server setup (`pons` and `cdbd`) to compile anything.
+Ulm. The original compiler had versions for i386, SPARC and m68k, and the
+i386 version depended on a database server setup (`pons` and `cdbd`) to
+compile anything.
+
 This version:
 
 - compiles and links without any server, like a C compiler;
@@ -16,6 +18,22 @@ This version:
 The original documentation is at <http://www.mathematik.uni-ulm.de/oberon/>.
 The former README and installation instructions are kept in
 `README_legacy` and `INSTALL_legacy`.
+
+### Changes compared to the original system
+
+- **No database.** The compiled interfaces and modules are kept in files
+  instead of the compiler database (`cdbd`). Like the database before, the
+  compiler reuses them as long as their fingerprints show that they are up
+  to date, and compiles from source only what has changed (see
+  [Compiled files](#compiled-files)).
+- **amd64 backend** (new), next to the i386 one.
+- **Build and installation** with `make`, `make check` and
+  `make install`; the precompiled interfaces of the library are installed,
+  so programs do not compile library modules again.
+- **Library split** into the run time system, the general library and the
+  compiler (`src/rtl`, `src/lib`, `src/compiler`).
+- **Run time error messages** name the correct source line, report index
+  errors with the valid range, and report dereferences of NIL.
 
 ## Requirements
 
@@ -150,19 +168,45 @@ Without `-m`, ulmo only compiles the given modules to `.o` files.
 
 How compilation works:
 
-- ulmoc compiles the imported modules of your program as needed. It
-  writes the compiled interfaces (`*-def-*.obj`) and code (`*-mod-*.obj`)
-  into the current directory.
+- ulmoc compiles your modules and those they import, as far as there are
+  no up-to-date compiled files for them (see below). It writes its
+  compiled files into the current directory.
 - Library modules are taken precompiled from the installation, as long as
   their sources are unchanged.
-- Every compiled file carries a fingerprint (MD5) of its source and of the
-  interfaces it depends on. A module is recompiled when its source or one
-  of its imports changes; otherwise nothing is compiled again.
 - A modified copy of a library module in the current directory (or in a
   directory given with `-I`) takes precedence and is linked instead of the
   library's version.
 - All modules compiled in the current directory are linked, so use one
   directory per program.
+
+### Compiled files
+
+For a module `M`, ulmoc writes three files. They are not ELF files but
+objects of the library's persistence format (`PersistentObjects`):
+
+| file | contents |
+|---|---|
+| `M-def-gen.obj` | the public interface, independent of the architecture: the declarations of `M.od` (constants, types, variables, procedure signatures) as compiled symbol table |
+| `M-def-I386.obj`, `M-def-AMD64.obj` | the public interface for one architecture: sizes and alignments of the types, offsets of record fields and the values of constants in the target representation; it takes the private record fields of `M.om` into account, so importers know the true size of a record |
+| `M-mod-I386.obj`, `M-mod-AMD64.obj` | the compiled module: code, data, type descriptors and relocations for one architecture |
+
+ulmo converts `M-mod-ARCH.obj` into the ELF object `M.o` (with `obtofgen`
+and `tof2elf`, `-S` shows the intermediate text) and links the `.o` files
+with the libraries.
+
+Each file has a header with fingerprints: the MD5 sums of `M.od` and
+`M.om`, a key of the compiled interface and the keys of all interfaces it
+was compiled against. Before the compiler uses a compiled file, it checks
+these against the current sources and against the other interfaces in use:
+
+- an unchanged module is taken as it is, whether it was compiled in the
+  current directory or comes with the installation;
+- a module whose source changed is compiled again, and so are the modules
+  that depend on a changed interface;
+- `ulmo -v 6` shows these decisions.
+
+In the original system these objects were stored in the compiler database
+instead of files; the checks are the same.
 
 The library is organized in three parts:
 
