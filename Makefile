@@ -24,6 +24,8 @@
 #   LIBDIR/ulmo/tof2elf                converts TOF text to ELF objects
 #   LIBDIR/ulmo/ARCH/                  compiler, tools, linker script and
 #                                      libraries for one target architecture
+#   LIBDIR/ulmo/ARCH/obj/              compiled interfaces and objects of the
+#                                      library modules
 #   DATADIR/ulmo/src/                  sources of the libraries
 #
 # build/root has the same layout as an installation; build/root/bin/ulmo
@@ -128,6 +130,9 @@ root: stage2
 	@mkdir -p $(ROOT)/bin $(ROOTARCH) $(ROOT)/share/ulmo
 	@cp -p $(B)/stage2/ulmoc $(B)/stage2/obtofgen $(B)/stage2/lib/*.a \
 		$(LDSCRIPT) $(ROOTARCH)/
+	@rm -rf $(ROOTARCH)/obj
+	@mkdir -p $(ROOTARCH)/obj
+	@cp -p $(B)/stage2/obj/*.obj $(ROOTARCH)/obj/
 	@cp -p $(GENOBRTS) $(ROOTARCH)/genobrts
 	@cp -p src/util/ulmo/ulmo.sh $(ROOT)/bin/ulmo
 	@chmod 755 $(ROOT)/bin/ulmo $(ROOTARCH)/genobrts
@@ -213,6 +218,8 @@ install: all
 	$(INSTALL) -m 644 $(ROOTARCH)/oberon-$(ARCH).ld $(ROOTARCH)/librtl.a \
 		$(ROOTARCH)/libo.a $(ROOTARCH)/libcompiler.a \
 		$(DESTDIR)$(ULMOLIBDIR)/$(ARCH)/
+	$(INSTALL) -d $(DESTDIR)$(ULMOLIBDIR)/$(ARCH)/obj
+	$(INSTALL) -m 644 $(ROOTARCH)/obj/*.obj $(DESTDIR)$(ULMOLIBDIR)/$(ARCH)/obj/
 	cp -R src/rtl src/lib src/compiler $(DESTDIR)$(ULMOSRCDIR)/
 
 # the command, the converter and the sources are shared by all installed

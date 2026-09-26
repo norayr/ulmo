@@ -17,6 +17,8 @@
 #   ULMOLIBDIR/tof2elf              TOF to ELF converter
 #   ULMOLIBDIR/ARCH/                ulmoc, obtofgen, genobrts, linker script,
 #                                   librtl.a, libo.a, libcompiler.a
+#   ULMOLIBDIR/ARCH/obj/            compiled interfaces and objects of the
+#                                   library modules (used while up to date)
 #   ULMOSRCDIR/{rtl,lib,compiler}   sources of the libraries; rtl/ARCH holds
 #                                   architecture-specific run time modules
 
@@ -39,6 +41,8 @@ Options:
   -o outfile      name of the program (default: name of the main module)
   -L dir          take the libraries from dir instead of ULMOLIBDIR/ARCH
   -S              emit .tof files instead of .o files; do not link
+  -v level        let ulmoc log why modules are (re)compiled or reused
+                  (6: up-to-date checks)
 EOF
    exit 1
 }
@@ -59,6 +63,7 @@ main_module=""
 out_file=""
 libdir=""
 asm_only=0
+vflags=""
 
 while [ $# -gt 0 ]; do
    case "$1" in
@@ -70,6 +75,7 @@ while [ $# -gt 0 ]; do
    -L)    [ $# -lt 2 ] && usage; libdir="$2"; shift 2 ;;
    -L*)   libdir="${1#-L}"; shift ;;
    -S)    asm_only=1; shift ;;
+   -v)    [ $# -lt 2 ] && usage; vflags="-v $2"; shift 2 ;;
    --)    shift; break ;;
    -*)    echo "$cmdname: unknown option: $1" >&2; usage ;;
    *)     break ;;
@@ -121,8 +127,11 @@ if [ -n "$main_module" ] && [ -z "$out_file" ]; then
    out_file="$main_module"
 fi
 
-# step 1: compile the sources and the modules they import
-"$tooldir/ulmoc" -a $arch -I . $iflags $sources || exit 1
+# step 1: compile the sources and the modules they import; the compiled
+# library modules are taken from the library unless they are out of date
+lflags=""
+[ -d "$libdir/obj" ] && lflags="-L $libdir/obj"
+"$tooldir/ulmoc" -a $arch $vflags -I . $iflags $lflags $sources || exit 1
 
 # step 2: convert each given module to a .o (or a .tof with -S)
 tof() { # module objfile toffile
@@ -159,8 +168,10 @@ done
 [ $asm_only -eq 1 ] && exit 0
 [ -z "$main_module" ] && exit 0
 
-# step 3: link; imported modules which are not part of the libraries
-# are converted to .o files and linked, too
+# step 3: link; all other modules compiled here (imported modules which
+# are not part of the library, or library modules which had to be
+# recompiled, e.g. from a modified copy) are converted to .o files and
+# linked before the libraries
 libs="$libdir/libcompiler.a $libdir/libo.a $libdir/librtl.a" # link order
 for lib in $libs; do
    if [ ! -f "$lib" ]; then
@@ -168,11 +179,9 @@ for lib in $libs; do
       exit 1
    fi
 done
-libmodules=`for lib in $libs; do ar t "$lib"; done | sed 's/\.o$//'`
 for objfile in ./*-mod-$objarch.obj; do
    [ -f "$objfile" ] || continue
    mod=`basename "$objfile" -mod-$objarch.obj`
-   echo "$libmodules" | grep -qx "$mod" && continue
    echo "$obj_files" | grep -qw "$mod.o" && continue
    elf "$mod" "$objfile" "$mod.o"
    echo "$cmdname: dependency $mod -> $mod.o"
