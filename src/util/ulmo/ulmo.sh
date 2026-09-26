@@ -152,6 +152,11 @@ for sourcefile in $sources; do
    *) continue ;;
    esac
    objfile="$modname-mod-$objarch.obj"
+   # a library module given as source is not compiled again while the
+   # compiled one of the library is up to date
+   if [ ! -f "$objfile" ] && [ -f "$libdir/obj/$objfile" ]; then
+      objfile="$libdir/obj/$objfile"
+   fi
    if [ ! -f "$objfile" ]; then
       echo "$cmdname: expected $objfile not found" >&2
       exit 1
