@@ -7,3 +7,22 @@ CMPXCHG8B. Replace that fast path with Storage.AllocateWithTag, check
 allocation during startup and signal handling, and rebuild the runtime
 and bootstrap compilers. Keep x87 floating point and HUGEINT DIV/MOD;
 a processor without a floating point coprocessor is a separate target.
+
+AMD64 runtime follow-up, before expanding the managed address space:
+- Port SysIPC to the individual Linux shared-memory, message-queue and
+  semaphore calls, with native kernel structures and 64-bit message types.
+- Preserve full-width UNIXCALL results for address-valued results and
+  recognize the complete Linux syscall error range.
+- Extend regression coverage for signals, timers, coroutine stack growth
+  and garbage collection under sustained allocation.
+- Finally remove the low-2-GB allocator restriction, auditing address
+  arithmetic, size types, type descriptors and the copying collector.
+
+Smaller executables:
+- Reduce the compulsory startup dependency graph, especially timezone,
+  formatted I/O, persistence and networking support in minimal programs.
+- Emit independently removable procedure sections and matching metadata;
+  linker garbage collection currently cannot remove unused procedures
+  from a retained module.
+- Move zero-initialized globals to BSS while preserving their preceding
+  garbage-collector tag, for example by initializing the tag at startup.

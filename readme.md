@@ -39,7 +39,7 @@ The former README and installation instructions are kept in
 
 ## Requirements
 
-- Linux on x86-64 or 32-bit x86
+- Linux on x86-64 or 32-bit x86 (Pentium/i586 or later for the i386 target)
 - GNU make, a C compiler and the development files of libelf (elfutils);
   they are only needed to build `tof2elf`, which converts the compiler's
   output into ELF object files
@@ -60,6 +60,7 @@ Building for amd64 does not need any 32-bit support.
 make                # for the architecture of the host
 make ARCH=i386      # or for a given one: i386 or amd64
 make check          # optional: self-hosting check and a test program
+make check-runtime  # optional: runtime interface regression programs
 ```
 
 The build takes a few minutes (on a current PC about 7 minutes for amd64
@@ -70,6 +71,11 @@ stages, each compiling the whole compiler and library:
 - stage 2 by the compiler of stage 1; this is the one installed,
 - stage 3 (only for `make check`) by the compiler of stage 2 and must be
   identical to stage 2.
+
+`make check-runtime` tests TCP and UDP sockets, file-backed memory mapping,
+resource limits, basic I/O, process creation and descriptor duplication,
+native C structure conversions, IPv6 addresses and directory enumeration.
+It can also be run with `ARCH=i386`.
 
 Everything goes to `build/`; `make clean` removes it. The directory
 `build/root` has the same layout as an installation, so the freshly built
@@ -244,6 +250,14 @@ LDFLAGS=-s ulmo -m Hello Hello.om
 
 Keep the symbols while you debug: they are all there is (see below).
 
+Most of this size is the runtime dependency graph, rather than the program
+itself. An empty module produces a stripped executable of about 741 KB on
+amd64 or 545 KB on i386 and pulls in 81 runtime modules. Adding
+`LDFLAGS='-s --gc-sections'` does not reduce that baseline: the compiler
+emits code at module granularity, and retained modules keep their unused
+procedures. Substantial reductions need a smaller startup dependency graph
+or procedure-level elimination together with its runtime metadata.
+
 ## Errors at run time and debugging
 
 Run time errors (failed assertions, index range errors, failed type guards,
@@ -295,7 +309,9 @@ information (no DWARF). gdb works on the machine level:
   `HUGEINT`, and `SHORT` of a `HUGEINT` is a `LONGINT` (checked at run
   time). On i386 its values are kept in register pairs, and `DIV` and
   `MOD` use the x87 floating point unit, so a CPU with FPU is needed
-  (486DX or later; any CPU of the last decades). Integer literals are
+   (a 387-compatible x87 FPU). Independently, the i386 allocation fast path
+   uses `CMPXCHG8B`, making Pentium/i586 the minimum CPU for normal programs.
+   It does not require MMX or SSE. Integer literals are
   still limited to the range of `LONGINT`; larger constants are built from
   `MIN(HUGEINT)` and `MAX(HUGEINT)`: sums, differences and comparisons of
   such constants are computed by the compiler (`CONST big = MAX(HUGEINT) -
@@ -303,6 +319,10 @@ information (no DWARF). gdb works on the machine level:
 - The amd64 backend is new. It compiles the compiler and the whole library,
   and the compiler reproduces itself, but it has seen far less use than the
   i386 backend.
+- The amd64 runtime now has native socket calls and tested mappings,
+  resource limits and C structure conversions. The `SysIPC` interface
+  still needs a native System V IPC port. The allocator remains restricted
+  to low addresses; the remaining porting work is listed in `WANTED`.
 - The database-based tools of the original system (`pons`, `cdbd`, `obci`,
   ...) can still be built with `make cdb-tools`; `Makefile.cdb` has the
   targets for setting them up. They are not needed for ulmo.
