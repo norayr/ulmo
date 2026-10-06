@@ -1,0 +1,30 @@
+MODULE RuntimeResources;
+   IMPORT Conclusions, RelatedEvents, SysResources, Write;
+
+   PROCEDURE Check;
+      VAR
+         guarded: RECORD limit: SysResources.Limit; guard: INTEGER END;
+         saved, changed: SysResources.Limit;
+   BEGIN
+      guarded.guard := 1234567;
+      SysResources.GetLimit(SysResources.nofile, guarded.limit);
+      ASSERT(guarded.guard = 1234567);
+      ASSERT((guarded.limit.current > 0) & (guarded.limit.max >= guarded.limit.current));
+      saved := guarded.limit;
+      changed := saved;
+      IF changed.current > 64 THEN changed.current := 64 END;
+      ASSERT(SysResources.SetLimit(SysResources.nofile, changed, NIL));
+      SysResources.GetLimit(SysResources.nofile, guarded.limit);
+      ASSERT((guarded.limit.current = changed.current) & (guarded.limit.max = saved.max));
+      ASSERT(guarded.guard = 1234567);
+      ASSERT(SysResources.SetLimit(SysResources.nofile, saved, NIL));
+      SysResources.GetLimit(SysResources.vmem, guarded.limit);
+      ASSERT(guarded.guard = 1234567);
+      ASSERT(guarded.limit.max >= guarded.limit.current);
+      ASSERT(~SysResources.SetLimit(99, saved, RelatedEvents.null));
+   END Check;
+
+BEGIN
+   Check;
+   Write.Line("runtime resources: ok");
+END RuntimeResources.

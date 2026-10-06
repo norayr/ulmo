@@ -60,11 +60,33 @@ MODULE SysResources;
    CONST
       infinity = MAX(INTEGER);
 
+   TYPE
+      KernelLimit = RECORD current, max: HUGEINT END;
+
+   PROCEDURE PublicLimit(value: HUGEINT) : INTEGER;
+   BEGIN
+      (* The public interface uses MAX(INTEGER) for infinity. Saturate
+         finite kernel limits that cannot be represented by that interface. *)
+      IF (value < 0) OR (value >= infinity) THEN RETURN infinity END;
+      RETURN SHORT(SHORT(value))
+   END PublicLimit;
+
    PROCEDURE GetLimit(resource: Resource; VAR limit: Limit);
       VAR
 	 d0, d1: INTEGER;
+         buf: KernelLimit;
+         ok: BOOLEAN;
    BEGIN
-      IF ~SYS.UNIXCALL(Sys.getrlimit, d0, d1, resource, SYS.ADR(limit)) THEN
+      IF SYS.SIZE(SYS.ADDRESS) = 8 THEN
+         ok := SYS.UNIXCALL(Sys.getrlimit, d0, d1, resource, SYS.ADR(buf));
+         IF ok THEN
+            limit.current := PublicLimit(buf.current);
+            limit.max := PublicLimit(buf.max);
+         END;
+      ELSE
+         ok := SYS.UNIXCALL(Sys.getrlimit, d0, d1, resource, SYS.ADR(limit));
+      END;
+      IF ~ok THEN
 	 SysErrors.Raise(NIL, d0, Sys.getrlimit, "");
 	 limit.current := 0; limit.max := 0;
       END;
@@ -74,8 +96,18 @@ MODULE SysResources;
 		      errors: RelatedEvents.Object) : BOOLEAN;
       VAR
 	 d0, d1: INTEGER;
+         buf: KernelLimit;
+         ok: BOOLEAN;
    BEGIN
-      IF SYS.UNIXCALL(Sys.setrlimit, d0, d1, resource, SYS.ADR(limit)) THEN
+      IF SYS.SIZE(SYS.ADDRESS) = 8 THEN
+         buf.current := limit.current; buf.max := limit.max;
+         IF limit.current = infinity THEN buf.current := -1 END;
+         IF limit.max = infinity THEN buf.max := -1 END;
+         ok := SYS.UNIXCALL(Sys.setrlimit, d0, d1, resource, SYS.ADR(buf));
+      ELSE
+         ok := SYS.UNIXCALL(Sys.setrlimit, d0, d1, resource, SYS.ADR(limit));
+      END;
+      IF ok THEN
 	 RETURN TRUE
       ELSE
 	 SysErrors.Raise(errors, d0, Sys.setrlimit, "");
