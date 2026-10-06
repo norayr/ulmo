@@ -1,0 +1,40 @@
+MODULE RuntimeMemory;
+   IMPORT Conclusions, RelatedEvents, SYS := SYSTEM, SysFile, SysIO,
+      SysMemory, Write;
+
+   PROCEDURE Check;
+      VAR
+         fd: SysIO.File;
+         page: ARRAY 4096 OF BYTE;
+         addr: SysMemory.Address;
+         errors: RelatedEvents.Object;
+         interrupted: BOOLEAN;
+         value: BYTE;
+   BEGIN
+      errors := RelatedEvents.null;
+      ASSERT(SysIO.OpenCreat(fd, "mapping.bin", SysIO.rdwr + SysIO.creat + SysIO.trunc,
+                             384, NIL, TRUE, interrupted));
+      SYS.WCLEAR(SYS.ADR(page), 1024);
+      page[0] := 65;
+      ASSERT(SysIO.Write(fd, SYS.ADR(page), 4096, NIL, TRUE, interrupted) = 4096);
+      page[0] := 66;
+      ASSERT(SysIO.Write(fd, SYS.ADR(page), 4096, NIL, TRUE, interrupted) = 4096);
+      ASSERT(SysMemory.Map(30000000H, 4096, SysMemory.read + SysMemory.write,
+                           SysMemory.private, fd, 4096, addr, errors));
+      ASSERT(addr = 30000000H);
+      SYS.GET(addr, value); ASSERT(SYS.VAL(SHORTINT, value) = 66);
+      ASSERT(SysMemory.Protect(addr, 4096, SysMemory.read, errors));
+      SYS.GET(addr, value); ASSERT(SYS.VAL(SHORTINT, value) = 66);
+      ASSERT(SysMemory.Protect(addr, 4096, SysMemory.read + SysMemory.write, errors));
+      ASSERT(SysMemory.Sync(addr, 4096, {2}, errors));
+      ASSERT(SysMemory.Unmap(addr, 4096, errors));
+      ASSERT(~SysMemory.Map(30000000H, 0, SysMemory.read,
+                            SysMemory.private, fd, 0, addr, errors));
+      ASSERT(SysIO.Close(fd, NIL, TRUE, interrupted));
+      ASSERT(SysFile.Unlink("mapping.bin", NIL));
+   END Check;
+
+BEGIN
+   Check;
+   Write.Line("runtime memory: ok");
+END RuntimeMemory.

@@ -4,7 +4,7 @@ set -eu
 arch=${1:-amd64}
 shift || true
 root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
-tests=${*:-RuntimeSockets}
+tests=${*:-RuntimeSockets RuntimeMemory}
 work="$root/build/$arch/runtime-tests"
 mkdir -p "$work"
 for test in $tests; do
@@ -12,6 +12,7 @@ for test in $tests; do
    cd "$work/$test"
    case "$test" in
       RuntimeSockets) module=SysSockets ;;
+      RuntimeMemory) module=SysMemory ;;
       *) module= ;;
    esac
    if [ -n "$module" ]; then

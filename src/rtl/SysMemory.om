@@ -98,11 +98,13 @@ MODULE SysMemory;
       *)
       VAR
 	 d0, d1: INTEGER;
+         offset: SysTypes.Offset;
    BEGIN
-      (* We use the new mmap2 system call. This system call expects
-       * offset in units of pagesize. This allows larger file offsets. *)
+      (* i386 mmap2 counts pages; AMD64 mmap counts bytes. *)
+      offset := off;
+      IF SYS.SIZE(Address) = 4 THEN offset := off DIV pagesize END;
       IF SYS.UNIXCALL(Sys.mmap2, d0, d1, address, len,
-		      prot, flags, fd, off DIV pagesize) THEN
+		      prot, flags, fd, offset) THEN
 	 mapaddress := d0;
 	 RETURN TRUE
       ELSE
