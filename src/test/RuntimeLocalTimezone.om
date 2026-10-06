@@ -1,0 +1,8 @@
+MODULE RuntimeLocalTimezone;
+   IMPORT Conclusions, Out, Times, Timezones;
+   VAR at: Times.Time;
+BEGIN
+   Times.CreateAndSet(at, Times.absolute, 0, 1500000, 0);
+   ASSERT(Timezones.GetOffset(Timezones.local, at) = 18000);
+   Out.Line("automatic timezone provider: ok");
+END RuntimeLocalTimezone.

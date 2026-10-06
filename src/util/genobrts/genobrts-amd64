@@ -39,17 +39,17 @@ my @unixmodules = qw(
    UnixClock
    UnixFiles
    UnixProcess
-   UnixTimezones
 );
 
 my $sysmain = "SysMain";
 my $sysstorage = "SysStorage";
-my @allmodules = sort(@rtmodules, @unixmodules, $sysmain, $sysstorage);
 
 my $cmdname = $0; $cmdname =~ s{.*/}{};
-my $usage = "Usage: $cmdname (-r | [-o start.s] {module})\n";
+my $usage = "Usage: $cmdname (-r | [-t] [-o start.s] {module})\n";
 
 my $outfile;
+my $timezones = 0;
+my $list_modules = 0;
 while (@ARGV > 0 && $ARGV[0] =~ m{^-}) {
    my $arg = shift @ARGV;
    last if $arg eq "--";
@@ -57,13 +57,17 @@ while (@ARGV > 0 && $ARGV[0] =~ m{^-}) {
       die $usage if @ARGV == 0;
       $outfile = shift @ARGV;
    } elsif ($arg eq "-r") {
-      foreach my $module (@allmodules) {
-	 print $module, "\n";
-      }
-      exit 0;
+      $list_modules = 1;
+   } elsif ($arg eq "-t") {
+      $timezones = 1;
    } else {
       die $usage;
    }
+}
+push @unixmodules, "UnixTimezones" if $timezones;
+if ($list_modules) {
+   print "$_\n" for sort(@rtmodules, @unixmodules, $sysmain, $sysstorage);
+   exit 0;
 }
 die $usage if @ARGV == 0;
 my @core = @ARGV;

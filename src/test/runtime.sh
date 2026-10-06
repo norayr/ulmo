@@ -4,7 +4,7 @@ set -eu
 arch=${1:-amd64}
 shift || true
 root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
-tests=${*:-RuntimeSockets RuntimeMemory RuntimeResources RuntimeIO RuntimeProcess RuntimeConversions RuntimeDirectory RuntimeArguments RuntimeOutput RuntimeShort RuntimeTimezone HelloOut}
+tests=${*:-RuntimeSockets RuntimeMemory RuntimeResources RuntimeIO RuntimeProcess RuntimeConversions RuntimeDirectory RuntimeArguments RuntimeOutput RuntimeShort RuntimeTimezone RuntimeLocalTimezone HelloOut}
 work="$root/build/$arch/runtime-tests"
 mkdir -p "$work"
 for test in $tests; do
@@ -32,9 +32,9 @@ for test in $tests; do
          -I "$root/src/rtl/$arch" -I "$root/src/rtl" -I "$root/src/lib" \
          -L "$root/build/root/lib/ulmo/$arch/obj" "$source"
    done
-   "$root/build/root/bin/ulmo" -arch "$arch" -m "$test" "$root/src/test/$test.om"
+   sh "${ULMO:-$root/build/root/bin/ulmo}" -arch "$arch" -m "$test" "$root/src/test/$test.om"
    case "$test" in
-      RuntimeTimezone)
+      RuntimeTimezone|RuntimeLocalTimezone)
          perl "$root/src/test/timezones.pl"
          TZ="$work/$test/long-zone-name" timeout -k 2 30 "./$test"
          ;;
@@ -46,6 +46,10 @@ for test in $tests; do
             exit 1
          fi
          echo "lightweight output: ok"
+         if nm -P --defined-only "$test" | grep -E '^UnixTimezones___startup '; then
+            echo "lightweight output imports the timezone provider" >&2
+            exit 1
+         fi
          ;;
       RuntimeIO)
          printf a | timeout -k 2 30 "./$test" >io.log 4>out4.log

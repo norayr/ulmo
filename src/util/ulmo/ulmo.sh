@@ -85,8 +85,8 @@ done
 sources="$*"
 
 case "$arch" in
-i386)  objarch=I386;  asflags=--32; ldemul=elf_i386 ;;
-amd64) objarch=AMD64; asflags=--64; ldemul=elf_x86_64 ;;
+i386)  objarch=I386 ;;
+amd64) objarch=AMD64 ;;
 *)     echo "$cmdname: unsupported architecture: $arch" >&2; exit 1 ;;
 esac
 tooldir="$ULMOLIBDIR/$arch"
@@ -225,12 +225,6 @@ for objfile in ./*-mod-$objarch.obj; do
    obj_files="$obj_files $mod.o"
 done
 
-start="$out_file.start"
-trap 'rm -f "$start.s" "$start.o"' 0 1 2 15
-# Oberon programs consist of one writable and executable segment by design
-norwxwarn=`"$LD" --help 2>/dev/null | grep -o -- --no-warn-rwx-segments | head -1`
-"$tooldir/genobrts" "$main_module" > "$start.s" || exit 1
-"$AS" $asflags -o "$start.o" "$start.s" || exit 1
-"$LD" -T "$tooldir/oberon-$arch.ld" -m $ldemul $norwxwarn $LDFLAGS \
-   -o "$out_file" "$start.o" $obj_files $libs || exit 1
+AS="$AS" LD="$LD" sh "${ULMOLINK:-$tooldir/oblink}" "$arch" "$tooldir" \
+   "$out_file" "$main_module" $obj_files $libs || exit 1
 echo "$cmdname: linked -> $out_file"

@@ -49,20 +49,13 @@ ULMOSRCDIR := $(DATADIR)/ulmo/src
 
 ifeq ($(ARCH),i386)
 OBJARCH := I386
-ARCH_ASFLAGS := --32
-LDEMUL := elf_i386
 TOFGEN_MAIN := OberonI386TransportableObjectFormatGenerator
 else ifeq ($(ARCH),amd64)
 OBJARCH := AMD64
-ARCH_ASFLAGS := --64
-LDEMUL := elf_x86_64
 TOFGEN_MAIN := OberonAMD64TransportableObjectFormatGenerator
 else
 $(error unsupported ARCH=$(ARCH), use ARCH=amd64 or ARCH=i386)
 endif
-
-# Oberon programs consist of one writable and executable segment by design
-NORWXWARN := $(shell $(LD) --help 2>/dev/null | grep -o -- --no-warn-rwx-segments | head -1)
 
 # === sources ==============================================================
 
@@ -94,11 +87,10 @@ LDSCRIPT := src/util/oblink/oberon-$(ARCH).ld
 # shell command linking the main module $$main into the program $$prog
 # with the libraries in the directory $$libs
 LINK = echo "  LINK    $$prog" && \
-	perl $(GENOBRTS) $$main >$$prog.start.s && \
-	$(AS) $(ARCH_ASFLAGS) -o $$prog.start.o $$prog.start.s && \
-	$(LD) -T $(LDSCRIPT) -m $(LDEMUL) $(NORWXWARN) -o $$prog $$prog.start.o \
-		$$libs/libcompiler.a $$libs/libo.a $$libs/librtl.a && \
-	rm -f $$prog.start.s $$prog.start.o
+	AS='$(AS)' LD='$(LD)' LDFLAGS='$(LDFLAGS)' \
+	GENOBRTS='$(GENOBRTS)' LDSCRIPT='$(LDSCRIPT)' \
+	sh src/util/oblink/oblink.sh $(ARCH) $$libs $$prog $$main \
+		$$libs/libcompiler.a $$libs/libo.a $$libs/librtl.a
 
 .PHONY: all stage1 stage2 stage3 root check check-runtime install uninstall clean cdb-tools
 
@@ -137,8 +129,9 @@ root: stage2
 	@mkdir -p $(ROOTARCH)/obj
 	@cp -p $(B)/stage2/obj/*.obj $(ROOTARCH)/obj/
 	@cp -p $(GENOBRTS) $(ROOTARCH)/genobrts
+	@cp -p src/util/oblink/oblink.sh $(ROOTARCH)/oblink
 	@cp -p src/util/ulmo/ulmo.sh $(ROOT)/bin/ulmo
-	@chmod 755 $(ROOT)/bin/ulmo $(ROOTARCH)/genobrts
+	@chmod 755 $(ROOT)/bin/ulmo $(ROOTARCH)/genobrts $(ROOTARCH)/oblink
 	@ln -sfn ../../../../src $(ROOT)/share/ulmo/src
 
 # === one stage: compile all modules with $(OC), archive them, link tools ===
@@ -186,10 +179,12 @@ $(S)/lib/%.a:
 	@rm -f $@
 	@$(AR) rcD $@ $^
 
-$(S)/ulmoc: $(S)/lib/libcompiler.a $(S)/lib/libo.a $(S)/lib/librtl.a
+$(S)/ulmoc: $(S)/lib/libcompiler.a $(S)/lib/libo.a $(S)/lib/librtl.a \
+	$(GENOBRTS) $(LDSCRIPT) src/util/oblink/oblink.sh
 	@main=Ulmo prog=$@ libs=$(S)/lib; $(LINK)
 
-$(S)/obtofgen: $(S)/lib/libcompiler.a $(S)/lib/libo.a $(S)/lib/librtl.a
+$(S)/obtofgen: $(S)/lib/libcompiler.a $(S)/lib/libo.a $(S)/lib/librtl.a \
+	$(GENOBRTS) $(LDSCRIPT) src/util/oblink/oblink.sh
 	@main=$(TOFGEN_MAIN) prog=$@ libs=$(S)/lib; $(LINK)
 endif
 
@@ -220,7 +215,7 @@ install: all
 	chmod 755 $(DESTDIR)$(BINDIR)/ulmo
 	$(INSTALL) -m 755 $(TOF2ELF) $(DESTDIR)$(ULMOLIBDIR)/tof2elf
 	$(INSTALL) -m 755 $(ROOTARCH)/ulmoc $(ROOTARCH)/obtofgen \
-		$(ROOTARCH)/genobrts $(DESTDIR)$(ULMOLIBDIR)/$(ARCH)/
+		$(ROOTARCH)/genobrts $(ROOTARCH)/oblink $(DESTDIR)$(ULMOLIBDIR)/$(ARCH)/
 	$(INSTALL) -m 644 $(ROOTARCH)/oberon-$(ARCH).ld $(ROOTARCH)/librtl.a \
 		$(ROOTARCH)/libo.a $(ROOTARCH)/libcompiler.a \
 		$(DESTDIR)$(ULMOLIBDIR)/$(ARCH)/
