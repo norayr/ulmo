@@ -1,6 +1,6 @@
 MODULE Out4;
 
-   IMPORT SYS := SYSTEM;
+   IMPORT Sys, SYS := SYSTEM;
 
    CONST nl = 0AX;
 
@@ -114,10 +114,9 @@ MODULE Out4;
    (* ========================= terminal ============================ *)
 
    PROCEDURE WriteChar(ch: CHAR) : BOOLEAN;
-      CONST write = 4;
       VAR r0, r1: INTEGER;
    BEGIN
-      RETURN SYS.UNIXCALL(write, r0, r1, outfd, SYS.ADR(ch), 1)
+      RETURN SYS.UNIXCALL(Sys.write, r0, r1, outfd, SYS.ADR(ch), 1)
    END WriteChar;
 
    PROCEDURE Write(ch: CHAR);

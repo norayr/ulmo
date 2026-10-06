@@ -1,6 +1,6 @@
 MODULE IO;
 
-   IMPORT SYS := SYSTEM;
+   IMPORT Sys, SYS := SYSTEM;
 
    CONST nl = 0AX;
 
@@ -113,17 +113,15 @@ MODULE IO;
    (* ========================= terminal ============================ *)
 
    PROCEDURE ReadChar(VAR ch: CHAR) : BOOLEAN;
-      CONST read = 3;
       VAR r0, r1: INTEGER;
    BEGIN
-      RETURN SYS.UNIXCALL(read, r0, r1, 0, SYS.ADR(ch), 1) & (r0 > 0)
+      RETURN SYS.UNIXCALL(Sys.read, r0, r1, 0, SYS.ADR(ch), 1) & (r0 > 0)
    END ReadChar;
 
    PROCEDURE WriteChar(ch: CHAR) : BOOLEAN;
-      CONST write = 4;
       VAR r0, r1: INTEGER;
    BEGIN
-      RETURN SYS.UNIXCALL(write, r0, r1, 1, SYS.ADR(ch), 1)
+      RETURN SYS.UNIXCALL(Sys.write, r0, r1, 1, SYS.ADR(ch), 1)
    END WriteChar;
 
    PROCEDURE Read(VAR ch: CHAR);

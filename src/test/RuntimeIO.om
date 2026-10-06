@@ -1,0 +1,9 @@
+MODULE RuntimeIO;
+   IMPORT Conclusions, IO, Out4;
+   VAR ch: CHAR;
+BEGIN
+   IO.Read(ch);
+   ASSERT(IO.Done & (ch = "a"));
+   IO.Write(ch); ASSERT(IO.Done);
+   Out4.Write("b"); ASSERT(Out4.Done);
+END RuntimeIO.
