@@ -89,7 +89,7 @@ LDSCRIPT := src/util/oblink/oberon-$(ARCH).ld
 LINK = echo "  LINK    $$prog" && \
 	AS='$(AS)' LD='$(LD)' LDFLAGS='$(LDFLAGS)' \
 	GENOBRTS='$(GENOBRTS)' LDSCRIPT='$(LDSCRIPT)' \
-	sh src/util/oblink/oblink.sh $(ARCH) $$libs $$prog $$main \
+	sh src/util/oblink/link-static.sh $(ARCH) $$libs $$prog $$main \
 		$$libs/libcompiler.a $$libs/libo.a $$libs/librtl.a
 
 .PHONY: all stage1 stage2 stage3 root check check-runtime install uninstall clean cdb-tools
@@ -129,7 +129,7 @@ root: stage2
 	@mkdir -p $(ROOTARCH)/obj
 	@cp -p $(B)/stage2/obj/*.obj $(ROOTARCH)/obj/
 	@cp -p $(GENOBRTS) $(ROOTARCH)/genobrts
-	@cp -p src/util/oblink/oblink.sh $(ROOTARCH)/oblink
+	@cp -p src/util/oblink/link-static.sh $(ROOTARCH)/oblink
 	@cp -p src/util/ulmo/ulmo.sh $(ROOT)/bin/ulmo
 	@chmod 755 $(ROOT)/bin/ulmo $(ROOTARCH)/genobrts $(ROOTARCH)/oblink
 	@ln -sfn ../../../../src $(ROOT)/share/ulmo/src
@@ -180,11 +180,11 @@ $(S)/lib/%.a:
 	@$(AR) rcD $@ $^
 
 $(S)/ulmoc: $(S)/lib/libcompiler.a $(S)/lib/libo.a $(S)/lib/librtl.a \
-	$(GENOBRTS) $(LDSCRIPT) src/util/oblink/oblink.sh
+	$(GENOBRTS) $(LDSCRIPT) src/util/oblink/link-static.sh
 	@main=Ulmo prog=$@ libs=$(S)/lib; $(LINK)
 
 $(S)/obtofgen: $(S)/lib/libcompiler.a $(S)/lib/libo.a $(S)/lib/librtl.a \
-	$(GENOBRTS) $(LDSCRIPT) src/util/oblink/oblink.sh
+	$(GENOBRTS) $(LDSCRIPT) src/util/oblink/link-static.sh
 	@main=$(TOFGEN_MAIN) prog=$@ libs=$(S)/lib; $(LINK)
 endif
 
