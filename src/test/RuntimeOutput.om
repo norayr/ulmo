@@ -1,0 +1,58 @@
+MODULE RuntimeOutput;
+   IMPORT BasicWrite, Conclusions, Errors, Out, Print, RTErrors,
+      StreamDisciplines, Streams, Strings, Write;
+
+   PROCEDURE Check;
+      VAR
+         values, widths: ARRAY 7 OF LONGINT;
+         i, j: INTEGER;
+         actual, expected: ARRAY 256 OF CHAR;
+         s, reference: Streams.Stream;
+         event: RTErrors.Event;
+         term: StreamDisciplines.LineTerminator;
+   BEGIN
+      values[0] := MIN(LONGINT); values[1] := MAX(LONGINT);
+      values[2] := 0; values[3] := 1; values[4] := -1;
+      values[5] := 12345; values[6] := -12345;
+      widths[0] := MIN(LONGINT); widths[1] := -8; widths[2] := -1;
+      widths[3] := 0; widths[4] := 1; widths[5] := 5; widths[6] := 40;
+      i := 0;
+      WHILE i < 7 DO
+         j := 0;
+         WHILE j < 7 DO
+            actual := ""; expected := "";
+            Strings.Open(s, actual); Strings.Open(reference, expected);
+            BasicWrite.IntS(s, values[i], widths[j]);
+            ASSERT(s.count = Strings.Len(actual));
+            Print.S2(reference, "%*d", widths[j], values[i]);
+            ASSERT(actual = expected);
+            Streams.Release(s); Streams.Release(reference);
+            INC(j);
+         END;
+         INC(i);
+      END;
+      actual := ""; Strings.Open(s, actual);
+      term[0] := 0DX; term[1] := 0AX; term[2] := 0X;
+      StreamDisciplines.SetLineTerm(s, term);
+      BasicWrite.LineS(s, "abc"); ASSERT(s.count = 5);
+      expected := "abc"; expected[3] := 0DX; expected[4] := 0AX; expected[5] := 0X;
+      ASSERT(actual = expected);
+      Streams.Release(s);
+      actual := ""; Strings.Open(s, actual);
+      NEW(event); event.type := RTErrors.errors; event.errorcode := RTErrors.range;
+      event.moduleName := "RuntimeOutput"; event.procedureName := "Check";
+      event.lineNumber := 12; event.val := -3; event.limit := 7;
+      Errors.Write(s, event);
+      expected := "Failure in RuntimeOutput.Check at line 12:";
+      i := SHORT(Strings.Len(expected)); expected[i] := 0AX; expected[i+1] := 0X;
+      Strings.Concatenate(expected, "index -3 out of [0..7]");
+      ASSERT(actual = expected); Streams.Release(s);
+      actual := ""; expected := "";
+      Strings.Open(s, actual); Strings.Open(reference, expected);
+      Write.RealS(s, 1.25, 20); Print.S2(reference, "%*e", 20, 1.25);
+      ASSERT(actual = expected); Streams.Release(s); Streams.Release(reference);
+   END Check;
+BEGIN
+   Check;
+   Out.String("runtime output: "); Out.Char("o"); Out.String("k"); Out.Ln;
+END RuntimeOutput.

@@ -40,7 +40,7 @@ MODULE RTErrors;
       these procedures must not return
    *)
 
-   IMPORT Errors, Events, Priorities, Streams, SYS := SYSTEM, Write;
+   IMPORT Errors, Events, Priorities, Streams, SYS := SYSTEM, Write := BasicWrite;
 
    CONST
       case = 1;		(* attempt to find case failed *)

@@ -1,0 +1,10 @@
+DEFINITION Out;
+
+   (* buffered text and integer output on the standard output stream *)
+   PROCEDURE Char(ch: CHAR);
+   PROCEDURE String(str: ARRAY OF CHAR);
+   PROCEDURE Int(int, width: LONGINT);
+   PROCEDURE Line(str: ARRAY OF CHAR);
+   PROCEDURE Ln;
+
+END Out.

@@ -38,7 +38,7 @@ MODULE UnixArguments;
       ever, will be delivered as argument then, whereas "--" will not.
    *)
 
-   IMPORT Process, Read, Services, Streams, Strings, SysArgs, Texts, Write;
+   IMPORT Process, Read, Services, Streams, Strings, SysArgs, Texts, Write := BasicWrite;
 
    CONST
       firstlen = 4;

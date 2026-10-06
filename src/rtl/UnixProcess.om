@@ -35,7 +35,7 @@ MODULE UnixProcess;
 
    (* initializes Process *)
 
-   IMPORT Process, Streams, Strings, SysArgs, SysProcess, Write;
+   IMPORT Process, Streams, Strings, SysArgs, SysProcess, Write := BasicWrite;
 
    PROCEDURE Exit(code: Process.ExitCode);
    BEGIN

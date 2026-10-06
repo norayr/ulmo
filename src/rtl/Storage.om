@@ -52,7 +52,7 @@ MODULE Storage;
    (* storage allocating interface for the compiler *)
 
    IMPORT Coroutines, Errors, Events, Objects, Priorities, RelatedEvents,
-      Streams, SYS := SYSTEM, SysMemParams, Types, Write;
+      Streams, SYS := SYSTEM, SysMemParams, Types, Write := BasicWrite;
 
    TYPE
       Address = Types.UntracedAddress;

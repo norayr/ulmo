@@ -4,7 +4,7 @@ set -eu
 arch=${1:-amd64}
 shift || true
 root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
-tests=${*:-RuntimeSockets RuntimeMemory RuntimeResources RuntimeIO RuntimeProcess RuntimeConversions RuntimeDirectory RuntimeArguments}
+tests=${*:-RuntimeSockets RuntimeMemory RuntimeResources RuntimeIO RuntimeProcess RuntimeConversions RuntimeDirectory RuntimeArguments RuntimeOutput RuntimeShort HelloOut}
 work="$root/build/$arch/runtime-tests"
 mkdir -p "$work"
 for test in $tests; do
@@ -19,6 +19,8 @@ for test in $tests; do
       RuntimeConversions) module="SysConversions IPv6Addresses" ;;
       RuntimeDirectory) module="SysConversions UnixDirectories UnixFiles" ;;
       RuntimeArguments) module="SysArgs UnixProcess UnixArguments" ;;
+      RuntimeOutput) module="BasicWrite RTErrors Storage UnixProcess UnixArguments Write Out UnixFiles" ;;
+      HelloOut) module="BasicWrite RTErrors Storage UnixProcess Out UnixFiles" ;;
       *) module= ;;
    esac
    for module in $module; do
@@ -31,6 +33,15 @@ for test in $tests; do
    done
    "$root/build/root/bin/ulmo" -arch "$arch" -m "$test" "$root/src/test/$test.om"
    case "$test" in
+      HelloOut)
+         timeout -k 2 30 "./$test" >output.log
+         cmp output.log "$root/src/test/HelloOut.expected"
+         if nm -P --defined-only "$test" | grep -E '^(Write|Print)___startup '; then
+            echo "lightweight output imports the general formatter" >&2
+            exit 1
+         fi
+         echo "lightweight output: ok"
+         ;;
       RuntimeIO)
          printf a | timeout -k 2 30 "./$test" >io.log 4>out4.log
          printf a | cmp -s - io.log

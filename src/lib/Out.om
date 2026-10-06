@@ -1,0 +1,20 @@
+MODULE Out;
+
+   IMPORT BasicWrite, Streams;
+
+   PROCEDURE Char(ch: CHAR);
+   BEGIN BasicWrite.CharS(Streams.stdout, ch) END Char;
+
+   PROCEDURE String(str: ARRAY OF CHAR);
+   BEGIN BasicWrite.StringS(Streams.stdout, str) END String;
+
+   PROCEDURE Int(int, width: LONGINT);
+   BEGIN BasicWrite.IntS(Streams.stdout, int, width) END Int;
+
+   PROCEDURE Line(str: ARRAY OF CHAR);
+   BEGIN BasicWrite.LineS(Streams.stdout, str) END Line;
+
+   PROCEDURE Ln;
+   BEGIN BasicWrite.LnS(Streams.stdout) END Ln;
+
+END Out.

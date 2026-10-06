@@ -1,0 +1,15 @@
+DEFINITION BasicWrite;
+
+   (* text and integer output without the general format parser *)
+   IMPORT Streams;
+
+   PROCEDURE IntS(s: Streams.Stream; int, width: LONGINT);
+      (* right-aligned decimal output; nonpositive widths add no padding *)
+   PROCEDURE CharS(s: Streams.Stream; ch: CHAR);
+   PROCEDURE ByteS(s: Streams.Stream; byte: BYTE);
+   PROCEDURE StringS(s: Streams.Stream; str: ARRAY OF CHAR);
+   PROCEDURE LineS(s: Streams.Stream; str: ARRAY OF CHAR);
+   PROCEDURE LnS(s: Streams.Stream);
+   PROCEDURE IndentS(s: Streams.Stream);
+
+END BasicWrite.

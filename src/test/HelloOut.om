@@ -1,0 +1,6 @@
+MODULE HelloOut;
+   IMPORT Out;
+BEGIN
+   Out.String("Hello, "); Out.Line("world!");
+   Out.Int(-123, 5); Out.Ln;
+END HelloOut.

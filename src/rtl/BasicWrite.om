@@ -1,0 +1,116 @@
+(* Ulm's Oberon Library
+   Copyright (C) 1989-1994 by University of Ulm, SAI, D-89069 Ulm, Germany
+   Distributed under the GNU Library General Public License, version 2 or
+   later; see COPYING and the original Write module for the license notice.
+
+   Basic output shared by the runtime, Out and Write.
+   Stream and line-terminator behavior follows Ulm's Write module. *)
+MODULE BasicWrite;
+
+   IMPORT StreamDisciplines, Streams;
+
+   PROCEDURE IntS(s: Streams.Stream; int, width: LONGINT);
+      VAR
+         digits: ARRAY 12 OF CHAR;
+         spaces: ARRAY 32 OF CHAR;
+         value, pos, len, index, padding, part, count: LONGINT;
+   BEGIN
+      IF int = MIN(LONGINT) THEN
+         digits := "-2147483648"; pos := 0; len := 11;
+      ELSE
+         value := ABS(int); pos := 11;
+         REPEAT
+            DEC(pos); digits[pos] := CHR(ORD("0") + value MOD 10);
+            value := value DIV 10;
+         UNTIL value = 0;
+         IF int < 0 THEN DEC(pos); digits[pos] := "-" END;
+         len := 11 - pos;
+      END;
+      count := 0; s.count := 0; s.error := FALSE;
+      IF width > len THEN
+         index := 0;
+         WHILE index < LEN(spaces) DO spaces[index] := " "; INC(index) END;
+         padding := width - len;
+         WHILE padding > 0 DO
+            part := padding;
+            IF part > LEN(spaces) THEN part := LEN(spaces) END;
+            IF ~Streams.WritePart(s, spaces, 0, part) THEN
+               INC(count, s.count); s.count := count; RETURN
+            END;
+            INC(count, s.count); DEC(padding, part);
+         END;
+      END;
+      IF ~Streams.WritePart(s, digits, pos, len) THEN END;
+      INC(count, s.count); s.count := count;
+   END IntS;
+
+   PROCEDURE CharS(s: Streams.Stream; ch: CHAR);
+   BEGIN
+      IF ~Streams.WriteByte(s, ch) THEN END;
+   END CharS;
+
+   PROCEDURE ByteS(s: Streams.Stream; byte: BYTE);
+   BEGIN
+      IF ~Streams.WriteByte(s, byte) THEN END;
+   END ByteS;
+
+   PROCEDURE StringS(s: Streams.Stream; str: ARRAY OF CHAR);
+      VAR cnt: LONGINT;
+   BEGIN
+      cnt := 0;
+      WHILE (cnt < LEN(str)) & (str[cnt] # 0X) DO INC(cnt) END;
+      IF (cnt > 0) & ~Streams.WritePart(s, str, 0, cnt) THEN END;
+   END StringS;
+
+   PROCEDURE LineS(s: Streams.Stream; str: ARRAY OF CHAR);
+      VAR
+         count, cnt: LONGINT;
+         nlOK: BOOLEAN;
+         lineterm: StreamDisciplines.LineTerminator;
+         len, i: INTEGER;
+   BEGIN
+      cnt := 0;
+      WHILE (cnt < LEN(str)) & (str[cnt] # 0X) DO INC(cnt) END;
+      StreamDisciplines.GetLineTerm(s, lineterm);
+      len := 1;
+      WHILE (len < LEN(lineterm)) & (lineterm[len] # 0X) DO INC(len) END;
+      IF cnt + len < LEN(str) THEN
+         i := 0;
+         WHILE i < len DO str[cnt] := lineterm[i]; INC(cnt); INC(i) END;
+         nlOK := TRUE;
+      ELSE
+         nlOK := FALSE;
+      END;
+      count := 0;
+      IF cnt > 0 THEN
+         IF ~Streams.WritePart(s, str, 0, cnt) THEN RETURN END;
+         count := s.count;
+      END;
+      IF ~nlOK THEN
+         IF ~Streams.WritePart(s, lineterm, 0, len) THEN END;
+         INC(count, s.count);
+      END;
+      s.count := count;
+   END LineS;
+
+   PROCEDURE LnS(s: Streams.Stream);
+      VAR lineterm: StreamDisciplines.LineTerminator; len: INTEGER;
+   BEGIN
+      StreamDisciplines.GetLineTerm(s, lineterm);
+      IF lineterm[1] = 0X THEN
+         IF ~Streams.WriteByte(s, lineterm[0]) THEN END;
+      ELSE
+         len := 1;
+         WHILE (len < LEN(lineterm)) & (lineterm[len] # 0X) DO INC(len) END;
+         IF ~Streams.WritePart(s, lineterm, 0, len) THEN END;
+      END;
+   END LnS;
+
+   PROCEDURE IndentS(s: Streams.Stream);
+      VAR indentwidth: INTEGER;
+   BEGIN
+      StreamDisciplines.GetIndentationWidth(s, indentwidth);
+      WHILE (indentwidth > 0) & Streams.WriteByte(s, " ") DO DEC(indentwidth) END;
+   END IndentS;
+
+END BasicWrite.
