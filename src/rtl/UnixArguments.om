@@ -375,51 +375,14 @@ MODULE UnixArguments;
 
    PROCEDURE GetCommandName(VAR name: ARRAY OF CHAR);
       (* return basename of the first argument *)
-      VAR
-	 index: INTEGER;
-	 slash: INTEGER;
-	 destindex: INTEGER;
    BEGIN
-      IF (SysArgs.argc > 0) & (SysArgs.argv # NIL) THEN
-	 slash := -1;
-	 index := 0;
-	 WHILE SysArgs.argv[0][index] # 0X DO
-	    IF SysArgs.argv[0][index] = "/" THEN
-	       slash := index;
-	    END;
-	    INC(index);
-	 END;
-	 IF slash >= 0 THEN
-	    index := slash + 1;
-	 ELSE
-	    index := 0;
-	 END;
-	 destindex := 0;
-	 WHILE (destindex+1 < LEN(name)) & (SysArgs.argv[0][index] # 0X) DO
-	    name[destindex] := SysArgs.argv[0][index];
-	    INC(index); INC(destindex);
-	 END;
-	 name[destindex] := 0X;
-      ELSE
-	 name[0] := 0X;
-      END;
+      SysArgs.GetCommandName(name);
    END GetCommandName;
 
    PROCEDURE GetPathName(VAR path: ARRAY OF CHAR);
       (* return the first argument *)
-      VAR
-	 index: INTEGER;
    BEGIN
-      IF (SysArgs.argc > 0) & (SysArgs.argv # NIL) THEN
-	 index := 0;
-	 WHILE (index+1 < LEN(path)) & (SysArgs.argv[0][index] # 0X) DO
-	    path[index] := SysArgs.argv[0][index];
-	    INC(index);
-	 END;
-	 path[index] := 0X;
-      ELSE
-	 path[0] := 0X;
-      END;
+      SysArgs.GetPathName(path);
    END GetPathName;
 
 BEGIN

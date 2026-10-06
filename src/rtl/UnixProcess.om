@@ -35,7 +35,7 @@ MODULE UnixProcess;
 
    (* initializes Process *)
 
-   IMPORT Process, Streams, Strings, SysProcess, UnixArguments, Write;
+   IMPORT Process, Streams, Strings, SysArgs, SysProcess, Write;
 
    PROCEDURE Exit(code: Process.ExitCode);
    BEGIN
@@ -63,7 +63,7 @@ MODULE UnixProcess;
       NEW(if); if.exit := Exit; if.abort := Abort; if.pause := Pause;
       Process.SetHandlers(if);
 
-      UnixArguments.GetCommandName(Process.name);
+      SysArgs.GetCommandName(Process.name);
       Process.id := "";
       Strings.Open(pids, Process.id);
       Write.IntS(pids, SysProcess.Getpid(), 1);

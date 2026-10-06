@@ -1,0 +1,39 @@
+MODULE RuntimeArguments;
+   IMPORT Conclusions, Process, SYS := SYSTEM, SysArgs, UnixArguments, Write;
+
+   PROCEDURE Check;
+      VAR
+         name, legacy, path: ARRAY 128 OF CHAR;
+         short: ARRAY 4 OF CHAR;
+         one: ARRAY 1 OF CHAR;
+         saved: INTEGER;
+         args: SysArgs.Arguments;
+         names: ARRAY 2 OF SysArgs.Argument;
+         argument: ARRAY 128 OF CHAR;
+   BEGIN
+      SysArgs.GetCommandName(name);
+      ASSERT(name = Process.name);
+      UnixArguments.GetCommandName(legacy); ASSERT(legacy = name);
+      args := SysArgs.argv; saved := SysArgs.argc;
+      argument := "/some/directory/program";
+      names[0] := SYS.VAL(SysArgs.Argument, SYS.ADR(argument)); names[1] := NIL;
+      SysArgs.argv := SYS.VAL(SysArgs.Arguments, SYS.ADR(names)); SysArgs.argc := 1;
+      SysArgs.GetCommandName(name); ASSERT(name = "program");
+      SysArgs.GetPathName(path); ASSERT(path = argument);
+      SysArgs.GetCommandName(short); ASSERT(short = "pro");
+      SysArgs.GetCommandName(one); ASSERT(one[0] = 0X);
+      argument := "plain";
+      SysArgs.GetCommandName(name); ASSERT(name = "plain");
+      argument := "/trailing/";
+      SysArgs.GetCommandName(name); ASSERT(name = "");
+      SysArgs.argc := 0;
+      SysArgs.GetCommandName(name); ASSERT(name = "");
+      SysArgs.GetPathName(path); ASSERT(path = "");
+      SysArgs.argc := 1; SysArgs.argv := NIL;
+      SysArgs.GetCommandName(name); ASSERT(name = "");
+      SysArgs.argv := args; SysArgs.argc := saved;
+   END Check;
+BEGIN
+   Check;
+   Write.Line("runtime arguments: ok");
+END RuntimeArguments.

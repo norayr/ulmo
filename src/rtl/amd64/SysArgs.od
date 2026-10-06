@@ -48,4 +48,9 @@ DEFINITION SysArgs;
       auxc: INTEGER;            (* number of auxiliary parameters *)
       auxv: AuxiliaryParameters; (* auxv^[0] .. auxv^[auxc-1] are valid *)
 
+   PROCEDURE GetCommandName(VAR name: ARRAY OF CHAR);
+      (* copy the basename of argv[0], truncating to fit *)
+   PROCEDURE GetPathName(VAR path: ARRAY OF CHAR);
+      (* copy argv[0], truncating to fit *)
+
 END SysArgs.

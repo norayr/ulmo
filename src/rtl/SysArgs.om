@@ -76,6 +76,38 @@ MODULE SysArgs;
       auxc: INTEGER;            (* number of auxiliary parameters *)
       auxv: AuxiliaryParameters; (* auxv^[0] .. auxv^[auxc-1] are valid *)
 
+   PROCEDURE GetCommandName(VAR name: ARRAY OF CHAR);
+      VAR index, slash, dest: LONGINT;
+   BEGIN
+      IF LEN(name) = 0 THEN RETURN END;
+      name[0] := 0X;
+      IF (argc > 0) & (argv # NIL) THEN
+         slash := -1; index := 0;
+         WHILE argv[0][index] # 0X DO
+            IF argv[0][index] = "/" THEN slash := index END;
+            INC(index);
+         END;
+         index := slash + 1; dest := 0;
+         WHILE (dest + 1 < LEN(name)) & (argv[0][index] # 0X) DO
+            name[dest] := argv[0][index]; INC(index); INC(dest);
+         END;
+         name[dest] := 0X;
+      END;
+   END GetCommandName;
+
+   PROCEDURE GetPathName(VAR path: ARRAY OF CHAR);
+      VAR index: LONGINT;
+   BEGIN
+      IF LEN(path) = 0 THEN RETURN END;
+      index := 0;
+      IF (argc > 0) & (argv # NIL) THEN
+         WHILE (index + 1 < LEN(path)) & (argv[0][index] # 0X) DO
+            path[index] := argv[0][index]; INC(index);
+         END;
+      END;
+      path[index] := 0X;
+   END GetPathName;
+
 BEGIN
    (* argc, argv, and environ are initialized by the run time system *)
    envc := 0;
