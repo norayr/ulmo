@@ -1,0 +1,259 @@
+(* Linux AMD64 uses individual socket system calls, not socketcall(2).
+   Pass addresses directly so that stack and buffer pointers retain all
+   64 bits. Socket lengths and option lengths are still 32-bit integers. *)
+MODULE SysSockets;
+
+   IMPORT RelatedEvents, SYS := SYSTEM, SysErrors, SysTypes;
+
+   TYPE
+      Socket = SysTypes.File;
+      LingerVal = RECORD onoff: INTEGER; linger: SysTypes.Time END;
+      BoolVal = RECORD bool: INTEGER END;
+
+   CONST
+      pfUNSPEC = 0; afUNSPEC = pfUNSPEC;
+      pfUNIX = 1; afUNIX = pfUNIX;
+      pfLOCAL = 1; afLOCAL = pfLOCAL;
+      pfINET = 2; afINET = pfINET;
+      pfAX25 = 3; afAX25 = pfAX25;
+      pfIPX = 4; afIPX = pfIPX;
+      pfAPPLETALK = 5; afAPPLETALK = pfAPPLETALK;
+      pfNETROM = 6; afNETROM = pfNETROM;
+      pfBRIDGE = 7; afBRIDGE = pfBRIDGE;
+      pfATMPVC = 8; afATMPVC = pfATMPVC;
+      pfX25 = 9; afX25 = pfX25;
+      pfINET6 = 10; afINET6 = pfINET6;
+      pfROSE = 11; afROSE = pfROSE;
+      pfDECnet = 12; afDECnet = pfDECnet;
+      pfNETBEUI = 13; afNETBEUI = pfNETBEUI;
+      pfSECURITY = 14; afSECURITY = pfSECURITY;
+      pfKEY = 15; afKEY = pfKEY;
+      pfNETLINK = 16; afNETLINK = pfNETLINK;
+      pfROUTE = pfNETLINK; afROUTE = pfROUTE;
+      pfPACKET = 17; afPACKET = pfPACKET;
+      pfASH = 18; afASH = pfASH;
+      pfECONET = 19; afECONET = pfECONET;
+      pfATMSVC = 20; afATMSVC = pfATMSVC;
+      pfSNA = 22; afSNA = pfSNA;
+      pfIRDA = 23; afIRDA = pfIRDA;
+      pfMAX = 32; afMAX = pfMAX;
+      stream = 1; dgram = 2; raw = 3; rdm = 4; seqpacket = 5;
+      msgOutOfBand = 1; msgPeek = 2; msgDontRoute = 4;
+      shutReceive = 0; shutSend = 1; shutBoth = 2;
+      socketLevel = 1;
+      optDebug = 1; optReuseAddr = 2; optType = 3; optError = 4;
+      optDontRoute = 5; optBroadcast = 6; optSndBuf = 7; optRcvBuf = 8;
+      optKeepAlive = 9; optOOBinline = 10; optNoCheck = 11; optPriority = 12;
+      optLinger = 13; optBSDCompat = 14; optPasscred = 16; optPeercred = 17;
+      optRcvLoWat = 18; optSndLoWat = 19; optRcvTimeO = 20; optSndTimeO = 21;
+
+   CONST
+      syssocket = 41;
+      sysconnect = 42;
+      sysaccept = 43;
+      syssendto = 44;
+      sysrecvfrom = 45;
+      sysshutdown = 48;
+      sysbind = 49;
+      syslisten = 50;
+      sysgetsockname = 51;
+      sysgetpeername = 52;
+      syssetsockopt = 54;
+      sysgetsockopt = 55;
+
+   PROCEDURE Create(VAR socket: Socket; domain, type, protocol: INTEGER;
+                    errors: RelatedEvents.Object) : BOOLEAN;
+      VAR d0, d1: INTEGER;
+   BEGIN
+      IF SYS.UNIXCALL(syssocket, d0, d1, domain, type, protocol) THEN
+         socket := d0; RETURN TRUE
+      END;
+      SysErrors.Raise(errors, d0, syssocket, "Create");
+      RETURN FALSE
+   END Create;
+
+   PROCEDURE Bind3(s: Socket; name: ARRAY OF BYTE; namelen: LONGINT;
+                   errors: RelatedEvents.Object) : BOOLEAN;
+      VAR d0, d1: INTEGER;
+   BEGIN
+      IF SYS.UNIXCALL(sysbind, d0, d1, s, SYS.ADR(name), namelen) THEN
+         RETURN TRUE
+      END;
+      SysErrors.Raise(errors, d0, sysbind, "Bind");
+      RETURN FALSE
+   END Bind3;
+
+   PROCEDURE Bind(s: Socket; name: ARRAY OF BYTE;
+                  errors: RelatedEvents.Object) : BOOLEAN;
+   BEGIN
+      RETURN Bind3(s, name, LEN(name), errors)
+   END Bind;
+
+   PROCEDURE Listen(s: Socket; backlog: INTEGER;
+                    errors: RelatedEvents.Object) : BOOLEAN;
+      VAR d0, d1: INTEGER;
+   BEGIN
+      IF SYS.UNIXCALL(syslisten, d0, d1, s, backlog) THEN RETURN TRUE END;
+      SysErrors.Raise(errors, d0, syslisten, "Listen");
+      RETURN FALSE
+   END Listen;
+
+   PROCEDURE Accept(VAR fd: SysTypes.File; s: Socket; VAR addr: ARRAY OF BYTE;
+                    errors: RelatedEvents.Object) : BOOLEAN;
+      VAR d0, d1: INTEGER; len: LONGINT;
+   BEGIN
+      len := LEN(addr);
+      IF SYS.UNIXCALL(sysaccept, d0, d1, s, SYS.ADR(addr), SYS.ADR(len)) THEN
+         fd := d0; RETURN TRUE
+      END;
+      SysErrors.Raise(errors, d0, sysaccept, "Accept");
+      RETURN FALSE
+   END Accept;
+
+   PROCEDURE Connect3(s: Socket; name: ARRAY OF BYTE; namelen: LONGINT;
+                      errors: RelatedEvents.Object) : BOOLEAN;
+      VAR d0, d1: INTEGER;
+   BEGIN
+      IF SYS.UNIXCALL(sysconnect, d0, d1, s, SYS.ADR(name), namelen) THEN
+         RETURN TRUE
+      END;
+      SysErrors.Raise(errors, d0, sysconnect, "Connect");
+      RETURN FALSE
+   END Connect3;
+
+   PROCEDURE Connect(s: Socket; name: ARRAY OF BYTE;
+                     errors: RelatedEvents.Object) : BOOLEAN;
+   BEGIN
+      RETURN Connect3(s, name, LEN(name), errors)
+   END Connect;
+
+   PROCEDURE GetName(s: Socket; VAR name: ARRAY OF BYTE;
+                     errors: RelatedEvents.Object) : BOOLEAN;
+      VAR d0, d1: INTEGER; len: LONGINT;
+   BEGIN
+      len := LEN(name);
+      IF SYS.UNIXCALL(sysgetsockname, d0, d1, s, SYS.ADR(name), SYS.ADR(len)) THEN
+         RETURN TRUE
+      END;
+      SysErrors.Raise(errors, d0, sysgetsockname, "GetName");
+      RETURN FALSE
+   END GetName;
+
+   PROCEDURE GetPeerName(s: Socket; VAR name: ARRAY OF BYTE;
+                         errors: RelatedEvents.Object) : BOOLEAN;
+      VAR d0, d1: INTEGER; len: LONGINT;
+   BEGIN
+      len := LEN(name);
+      IF SYS.UNIXCALL(sysgetpeername, d0, d1, s, SYS.ADR(name), SYS.ADR(len)) THEN
+         RETURN TRUE
+      END;
+      SysErrors.Raise(errors, d0, sysgetpeername, "GetPeerName");
+      RETURN FALSE
+   END GetPeerName;
+
+   PROCEDURE GetSockOpt(s: Socket; level, optname: INTEGER;
+                        VAR optval: ARRAY OF BYTE;
+                        errors: RelatedEvents.Object) : BOOLEAN;
+      VAR d0, d1: INTEGER; len: LONGINT;
+   BEGIN
+      len := LEN(optval);
+      IF SYS.UNIXCALL(sysgetsockopt, d0, d1, s, level, optname,
+                     SYS.ADR(optval), SYS.ADR(len)) THEN RETURN TRUE END;
+      SysErrors.Raise(errors, d0, sysgetsockopt, "GetSockOpt");
+      RETURN FALSE
+   END GetSockOpt;
+
+   PROCEDURE SetSockOpt(s: Socket; level, optname: INTEGER;
+                        optval: ARRAY OF BYTE;
+                        errors: RelatedEvents.Object) : BOOLEAN;
+      VAR d0, d1: INTEGER;
+   BEGIN
+      IF SYS.UNIXCALL(syssetsockopt, d0, d1, s, level, optname,
+                     SYS.ADR(optval), LEN(optval)) THEN RETURN TRUE END;
+      SysErrors.Raise(errors, d0, syssetsockopt, "SetSockOpt");
+      RETURN FALSE
+   END SetSockOpt;
+
+   PROCEDURE Shutdown(s: Socket; how: INTEGER;
+                      errors: RelatedEvents.Object) : BOOLEAN;
+      VAR d0, d1: INTEGER;
+   BEGIN
+      IF SYS.UNIXCALL(sysshutdown, d0, d1, s, how) THEN RETURN TRUE END;
+      SysErrors.Raise(errors, d0, sysshutdown, "Shutdown");
+      RETURN FALSE
+   END Shutdown;
+
+   PROCEDURE Receive(s: Socket; buf: SysTypes.Address; buflen: SysTypes.Count;
+                     flags: INTEGER; errors: RelatedEvents.Object;
+                     retry: BOOLEAN; VAR interrupted: BOOLEAN) : SysTypes.Count;
+      VAR d0, d1: INTEGER;
+   BEGIN
+      interrupted := FALSE;
+      LOOP
+         IF SYS.UNIXCALL(sysrecvfrom, d0, d1, s, buf, buflen, flags, NIL, NIL) THEN
+            RETURN d0
+         END;
+         IF d0 = SysErrors.intr THEN interrupted := TRUE END;
+         IF (d0 # SysErrors.intr) OR ~retry THEN
+            SysErrors.Raise(errors, d0, sysrecvfrom, "Receive");
+            RETURN -1
+         END;
+      END;
+   END Receive;
+
+   PROCEDURE ReceiveFrom(s: Socket; buf: SysTypes.Address; buflen: SysTypes.Count;
+                         flags: INTEGER; VAR from: ARRAY OF BYTE;
+                         VAR fromlen: LONGINT; errors: RelatedEvents.Object;
+                         retry: BOOLEAN; VAR interrupted: BOOLEAN) : LONGINT;
+      VAR d0, d1: INTEGER;
+   BEGIN
+      interrupted := FALSE;
+      LOOP
+         fromlen := LEN(from);
+         IF SYS.UNIXCALL(sysrecvfrom, d0, d1, s, buf, buflen, flags,
+                        SYS.ADR(from), SYS.ADR(fromlen)) THEN RETURN d0 END;
+         IF d0 = SysErrors.intr THEN interrupted := TRUE END;
+         IF (d0 # SysErrors.intr) OR ~retry THEN
+            SysErrors.Raise(errors, d0, sysrecvfrom, "ReceiveFrom");
+            RETURN -1
+         END;
+      END;
+   END ReceiveFrom;
+
+   PROCEDURE Send(s: Socket; buf: SysTypes.Address; buflen: SysTypes.Count;
+                  flags: INTEGER; errors: RelatedEvents.Object;
+                  retry: BOOLEAN; VAR interrupted: BOOLEAN) : BOOLEAN;
+      VAR d0, d1: INTEGER;
+   BEGIN
+      interrupted := FALSE;
+      LOOP
+         IF SYS.UNIXCALL(syssendto, d0, d1, s, buf, buflen, flags, NIL, 0) THEN
+            RETURN TRUE
+         END;
+         IF d0 = SysErrors.intr THEN interrupted := TRUE END;
+         IF (d0 # SysErrors.intr) OR ~retry THEN
+            SysErrors.Raise(errors, d0, syssendto, "Send");
+            RETURN FALSE
+         END;
+      END;
+   END Send;
+
+   PROCEDURE SendTo(s: Socket; buf: SysTypes.Address; buflen: SysTypes.Count;
+                    flags: INTEGER; name: ARRAY OF BYTE; namelen: LONGINT;
+                    errors: RelatedEvents.Object;
+                    retry: BOOLEAN; VAR interrupted: BOOLEAN) : BOOLEAN;
+      VAR d0, d1: INTEGER;
+   BEGIN
+      interrupted := FALSE;
+      LOOP
+         IF SYS.UNIXCALL(syssendto, d0, d1, s, buf, buflen, flags,
+                        SYS.ADR(name), namelen) THEN RETURN TRUE END;
+         IF d0 = SysErrors.intr THEN interrupted := TRUE END;
+         IF (d0 # SysErrors.intr) OR ~retry THEN
+            SysErrors.Raise(errors, d0, syssendto, "SendTo");
+            RETURN FALSE
+         END;
+      END;
+   END SendTo;
+
+END SysSockets.

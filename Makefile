@@ -100,7 +100,7 @@ LINK = echo "  LINK    $$prog" && \
 		$$libs/libcompiler.a $$libs/libo.a $$libs/librtl.a && \
 	rm -f $$prog.start.s $$prog.start.o
 
-.PHONY: all stage1 stage2 stage3 root check install uninstall clean cdb-tools
+.PHONY: all stage1 stage2 stage3 root check check-runtime install uninstall clean cdb-tools
 
 all: root
 	@if cmp -s $(B)/stage1/ulmoc $(B)/stage2/ulmoc; then \
@@ -205,6 +205,9 @@ check: all stage3
 		$(CURDIR)/src/test/Greeter.om $(CURDIR)/src/test/Hello.om >build.log
 	@$(B)/test/Hello | cmp -s - src/test/Hello.expected
 	@echo "test program: ok"
+
+check-runtime: all
+	sh src/test/runtime.sh $(ARCH)
 
 # === installation =========================================================
 

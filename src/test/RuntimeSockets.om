@@ -1,0 +1,70 @@
+MODULE RuntimeSockets;
+   IMPORT Conclusions, RelatedEvents, SYS := SYSTEM, SysIO, SysSockets, Write;
+
+   PROCEDURE Check;
+      VAR
+         server, client, peer: SysSockets.Socket;
+         addr, other: ARRAY 16 OF BYTE;
+         option: ARRAY 4 OF BYTE;
+         outgoing, incoming: ARRAY 4 OF CHAR;
+         interrupted: BOOLEAN;
+         len, value: LONGINT;
+   BEGIN
+      SYS.WCLEAR(SYS.ADR(addr), 4);
+      addr[0] := 2; addr[4] := 127; addr[7] := 1;
+      outgoing := "abc";
+
+      ASSERT(SysSockets.Create(server, SysSockets.pfINET, SysSockets.stream, 0, NIL));
+      value := 1; SYS.PUT(SYS.ADR(option), value);
+      ASSERT(SysSockets.SetSockOpt(server, SysSockets.socketLevel,
+                                  SysSockets.optReuseAddr, option, NIL));
+      ASSERT(SysSockets.GetSockOpt(server, SysSockets.socketLevel,
+                                  SysSockets.optReuseAddr, option, NIL));
+      SYS.GET(SYS.ADR(option), value); ASSERT(value = 1);
+      ASSERT(SysSockets.Bind(server, addr, NIL));
+      ASSERT(SysSockets.GetName(server, addr, NIL));
+      ASSERT((SYS.VAL(SHORTINT, addr[2]) # 0) OR (SYS.VAL(SHORTINT, addr[3]) # 0));
+      ASSERT(SysSockets.Listen(server, 1, NIL));
+      ASSERT(SysSockets.Create(client, SysSockets.pfINET, SysSockets.stream, 0, NIL));
+      ASSERT(SysSockets.Connect(client, addr, NIL));
+      ASSERT(SysSockets.Accept(peer, server, other, NIL));
+      ASSERT(SysSockets.GetPeerName(client, other, NIL));
+      ASSERT((SYS.VAL(SHORTINT, other[2]) = SYS.VAL(SHORTINT, addr[2])) &
+             (SYS.VAL(SHORTINT, other[3]) = SYS.VAL(SHORTINT, addr[3])));
+      ASSERT(SysSockets.Send(client, SYS.ADR(outgoing), 4, 0, NIL, TRUE, interrupted));
+      ASSERT(SysSockets.Receive(peer, SYS.ADR(incoming), 4, 256,
+                                NIL, TRUE, interrupted) = 4); (* MSG_WAITALL *)
+      ASSERT(incoming = outgoing);
+      ASSERT(SysSockets.Shutdown(client, SysSockets.shutSend, NIL));
+      ASSERT(SysSockets.Receive(peer, SYS.ADR(incoming), 4, 0,
+                                NIL, TRUE, interrupted) = 0);
+      ASSERT(SysIO.Close(peer, NIL, TRUE, interrupted));
+      ASSERT(SysIO.Close(client, NIL, TRUE, interrupted));
+      ASSERT(SysIO.Close(server, NIL, TRUE, interrupted));
+
+      addr[2] := 0; addr[3] := 0;
+      ASSERT(SysSockets.Create(server, SysSockets.pfINET, SysSockets.dgram, 0, NIL));
+      ASSERT(SysSockets.Bind3(server, addr, 16, NIL));
+      ASSERT(SysSockets.GetName(server, addr, NIL));
+      ASSERT(SysSockets.Create(client, SysSockets.pfINET, SysSockets.dgram, 0, NIL));
+      ASSERT(SysSockets.SendTo(client, SYS.ADR(outgoing), 4, 0,
+                               addr, 16, NIL, TRUE, interrupted));
+      ASSERT(SysSockets.ReceiveFrom(server, SYS.ADR(incoming), 4, 0,
+                                    other, len, NIL, TRUE, interrupted) = 4);
+      ASSERT((len = 16) & (incoming = outgoing));
+      ASSERT(SysSockets.Connect3(client, addr, 16, NIL));
+      ASSERT(SysSockets.Send(client, SYS.ADR(outgoing), 4, 0, NIL, TRUE, interrupted));
+      ASSERT(SysSockets.Receive(server, SYS.ADR(incoming), 4, 0,
+                                NIL, TRUE, interrupted) = 4);
+      ASSERT(SysSockets.Receive(server, SYS.ADR(incoming), 4, 64,
+                                RelatedEvents.null, FALSE, interrupted) = -1);
+      ASSERT(~interrupted);
+      ASSERT(SysIO.Close(client, NIL, TRUE, interrupted));
+      ASSERT(SysIO.Close(server, NIL, TRUE, interrupted));
+      ASSERT(~SysSockets.Shutdown(-1, SysSockets.shutBoth, RelatedEvents.null));
+   END Check;
+
+BEGIN
+   Check;
+   Write.Line("runtime sockets: ok");
+END RuntimeSockets.
