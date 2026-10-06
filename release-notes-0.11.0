@@ -1,0 +1,128 @@
+# ulmo 0.11.0
+
+This release builds on 0.10.0's database-free compiler with native AMD64
+support, reproducible self-hosting on both targets, a smaller compulsory
+runtime, and a conventional Linux installation layout.
+
+## Native AMD64 and i386
+
+- Added the AMD64 backend and ELF64 output. The compiler and its libraries
+  now build and run natively on either architecture.
+- Included separate static bootstrap compilers for AMD64 and i386. An
+  AMD64 build does not require kernel support for 32-bit executables.
+- Added three-stage builds: `make check` verifies that the stage-2 and
+  stage-3 compiler and object-generator binaries are identical.
+- Added `HUGEINT`, a 64-bit integer type on both targets. It uses register
+  pairs on i386 and native 64-bit registers on AMD64. Constant sums,
+  differences and comparisons are folded by the compiler.
+- Fixed AMD64 instruction encoding, including REX prefixes, immediate
+  widths and the 16-bit operations used for floating-point rounding.
+
+## Smaller statically linked programs
+
+The compiler continues to link and initialize whole modules. The size
+reduction comes from removing compulsory dependencies, rather than
+procedure-level smart linking or a shared runtime library.
+
+The following sizes are in bytes, after stripping:
+
+| empty program | AMD64 | i386 |
+|---|---:|---:|
+| before dependency reductions | 741,272 | 545,408 |
+| 0.11.0 | 576,504 | 425,916 |
+| reduction | 164,768 (22.2%) | 119,492 (21.9%) |
+
+The earlier figures are the development baseline before the dependency
+reductions, not an AMD64 build of 0.10.0. The minimal dependency closure
+has fallen from 81 runtime modules to 69.
+
+### Choosing Out or Write
+
+`Out` is a new, lightweight module for buffered strings, characters,
+integers and line breaks. Its interface is `Char`, `String`,
+`Int(value, width)`, `Line` and `Ln`.
+
+| program | AMD64 | i386 | added over empty, AMD64 / i386 |
+|---|---:|---:|---:|
+| empty | 576,504 | 425,916 | 0 / 0 |
+| hello world using `Out` | 578,064 | 426,932 | 1,560 / 1,016 |
+| hello world using `Write` | 640,080 | 471,888 | 63,576 / 45,972 |
+
+Importing `Write` increases the resulting executable size because its
+floating-point output brings in the general formatter. Importing `Out`
+adds only about 1-1.6 KB to the minimal program. The existing `Write`
+interface remains available; use `Write` or `Print` when richer output is
+needed.
+
+```oberon
+MODULE Hello;
+   IMPORT Out;
+BEGIN
+   Out.Line("Hello, world!");
+END Hello.
+```
+
+Core diagnostics now share `BasicWrite`; process naming no longer imports
+the argument parser; unused socket and timeout imports have been removed.
+The native timezone provider is selected automatically when `Timezones`
+appears in the linked dependency closure.
+
+## Runtime and library fixes
+
+- Added native AMD64 socket calls and correct memory-mapping byte offsets.
+- Converted AMD64 kernel resource-limit and C structure layouts without
+  overwriting caller buffers or truncating pointer fields.
+- Fixed basic I/O syscall numbers, parent-PID lookup, descriptor
+  duplication and fixed-width IPv6 address fields.
+- Fixed timezone-file byte order, zoneinfo paths, long `TZ` names and
+  unsigned transition/abbreviation indexes.
+- Hardened coroutine stack growth, signal delivery and garbage collection,
+  including allocation during critical regions and stack overflow while
+  objects are being copied.
+- Corrected runtime-error source locations and messages, including index
+  bounds and NIL dereferences.
+- Added 13 runtime regression programs, run with `make check-runtime`.
+
+## Build, installation and compiled-file reuse
+
+```sh
+make ARCH=amd64
+make ARCH=amd64 check check-runtime
+make install PREFIX=/usr LIBDIR=/usr/lib64 DESTDIR="$pkgdir"
+```
+
+The public command is installed in `/usr/bin/ulmo`; private compilers,
+tools and libraries live under `/usr/lib64/ulmo/amd64` (or the configured
+library directory); source interfaces and implementations live under
+`/usr/share/ulmo/src`. Use `ARCH=i386` for the 32-bit target.
+
+Compiled library interfaces are installed alongside the libraries. The
+compiler checks source and import fingerprints before reusing cached
+objects, and compiles the implementations of imported user modules when
+linking. Library modules supplied explicitly as source take precedence
+over installed copies.
+
+The sources are organized as `src/rtl`, `src/lib` and `src/compiler`.
+The old database-based tools remain optional through `make cdb-tools`.
+
+## Current limits
+
+- Linux on AMD64 or 32-bit x86. Normal i386 programs require a
+  Pentium/i586-class CPU because allocation uses `CMPXCHG8B`; floating
+  point uses x87, with no MMX or SSE requirement.
+- AMD64 addresses are 64-bit, but `INTEGER`, `LONGINT` and sizes remain
+  32-bit. Code/static data use the small code model, and the managed
+  allocator remains restricted to low addresses.
+- The AMD64 System V IPC interface and full-width syscall results still
+  need further porting. Supporting more than 2 GB of managed address
+  space and a future 386+387 target are recorded in `WANTED`.
+- Programs are static executables with a writable/executable segment;
+  source-level DWARF debugging is not available.
+
+## Verification
+
+`make check check-runtime` passed on AMD64 and i386, including identical
+stage-2/stage-3 binaries. Staged Linux installation and compilation of an
+installed `Out` program were also verified.
+
+Full changes: https://github.com/norayr/ulmo/compare/v0.10.0...v0.11.0

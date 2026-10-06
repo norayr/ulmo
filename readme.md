@@ -263,11 +263,15 @@ Keep the symbols while you debug: they are all there is (see below).
 Most of this size is the runtime dependency graph, rather than the program
 itself. The following are stripped executables, with sizes in bytes:
 
-| program | amd64 | i386 |
-|---|---:|---:|
-| empty module | 576,504 | 425,916 |
-| hello world using `Out` | 578,064 | 426,932 |
-| hello world using `Write` | 640,080 | 471,888 |
+| program | amd64 | i386 | added over empty, amd64 / i386 |
+|---|---:|---:|---:|
+| empty module | 576,504 | 425,916 | 0 / 0 |
+| hello world using `Out` | 578,064 | 426,932 | 1,560 / 1,016 |
+| hello world using `Write` | 640,080 | 471,888 | 63,576 / 45,972 |
+
+Using `Out` adds only about 1-1.6 KB to the minimal executable. Using
+`Write` adds about 46-64 KB because its floating-point output imports the
+general formatter, even if the program calls only `Write.Line`.
 
 The empty program links 69 runtime modules, down from 81. Its size has
 fallen by about 22% from the former 741 KB / 545 KB baseline. The native
