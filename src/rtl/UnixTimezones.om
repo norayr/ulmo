@@ -29,11 +29,11 @@
 MODULE UnixTimezones;
 
    IMPORT Clocks, NetIO, Op := Operations, PersistentObjects, Read,
-      RelatedEvents, Services, Streams, Strings, SysConversions, Texts,
+      RelatedEvents, Services, Streams, Strings, Texts,
       Times, Timezones, UnixEnvironment, UnixFiles;
 
    CONST
-      zoneinfodirDefault = "/usr/share/lib/zoneinfo";
+      zoneinfodirDefault = "/usr/share/zoneinfo";
       defaultZoneFile = "/etc/localtime"; (* Linux *)
       localeSettings = "/etc/default/init"; (* Solaris *)
    VAR
@@ -46,7 +46,7 @@ MODULE UnixTimezones;
 	    (Timezones.GlimpseRec)
 	    next: Glimpse;
 	    standard: BOOLEAN; (* ``standard'' or ``wall clock'' time *)
-	    type: SHORTINT;
+            type: INTEGER;
 	 END;
 
    TYPE
@@ -74,28 +74,48 @@ MODULE UnixTimezones;
 	    typecnt: INTEGER;
 	    charcnt: INTEGER;
 	 END;
-   CONST
-      headerconv = "20:-c/6*ii";
-      headerlen = 20 + 6 * 4;
-   VAR
-      headerfmt: SysConversions.Format;
-
-   CONST
-      typeconv = "ii/BC/sC";
-      typelen = 6;
-   VAR
-      typefmt: SysConversions.Format;
-
    VAR
       timeType: Services.Type;
 
+   PROCEDURE ReadLong(s: Streams.Stream; VAR value: LONGINT) : BOOLEAN;
+      (* TZif integers are signed, big-endian 32-bit values, not native C longs. *)
+      VAR ch: CHAR; index: INTEGER;
+   BEGIN
+      IF ~Streams.ReadByte(s, ch) THEN RETURN FALSE END;
+      value := ORD(ch);
+      IF value >= 128 THEN DEC(value, 256) END;
+      index := 1;
+      WHILE index < 4 DO
+         IF ~Streams.ReadByte(s, ch) THEN RETURN FALSE END;
+         value := value * 256 + ORD(ch); INC(index);
+      END;
+      RETURN TRUE
+   END ReadLong;
+
    PROCEDURE ReadHeader(s: Streams.Stream; VAR header: Header) : BOOLEAN;
       VAR
-	 buf: ARRAY headerlen OF BYTE;
+         prefix: ARRAY 20 OF CHAR;
+         counts: ARRAY 6 OF LONGINT;
+         index: INTEGER;
    BEGIN
-      IF ~Streams.Read(s, buf) THEN RETURN FALSE END;
-      SysConversions.ByFmtFromC(buf, header, headerfmt);
-      RETURN TRUE
+      IF ~Streams.Read(s, prefix) THEN RETURN FALSE END;
+      IF (prefix[0] # "T") OR (prefix[1] # "Z") OR
+         (prefix[2] # "i") OR (prefix[3] # "f") THEN RETURN FALSE END;
+      IF (prefix[4] # 0X) & (prefix[4] # "2") &
+         (prefix[4] # "3") & (prefix[4] # "4") THEN RETURN FALSE END;
+      (* Versions 2-4 begin with the same 32-bit compatibility block. *)
+      index := 0;
+      WHILE index < 6 DO
+         IF ~ReadLong(s, counts[index]) OR (counts[index] < 0) THEN RETURN FALSE END;
+         INC(index);
+      END;
+      header.ttisgmtcnt := SHORT(counts[0]); header.ttisstdcnt := SHORT(counts[1]);
+      header.leapcnt := SHORT(counts[2]); header.timecnt := SHORT(counts[3]);
+      header.typecnt := SHORT(counts[4]); header.charcnt := SHORT(counts[5]);
+      RETURN (header.typecnt > 0) & (header.typecnt <= 256) &
+             (header.charcnt > 0) &
+             ((header.ttisstdcnt = 0) OR (header.ttisstdcnt = header.typecnt)) &
+             ((header.ttisgmtcnt = 0) OR (header.ttisgmtcnt = header.typecnt))
    END ReadHeader;
 
    PROCEDURE ReadTimezoneFile(s: Streams.Stream; VAR list: Glimpse) : BOOLEAN;
@@ -105,7 +125,7 @@ MODULE UnixTimezones;
 	    RECORD
 	       offset: Timezones.Offset;
 	       isDst: BOOLEAN;
-	       nameOffset: SHORTINT;
+               nameOffset: INTEGER;
 	       name: Timezones.Name;
 	       standard: BOOLEAN; (* ``standard'' or ``wall clock'' time *)
 	       next: Type;
@@ -129,7 +149,7 @@ MODULE UnixTimezones;
       BEGIN
 	 head := NIL; tail := NIL;
 	 cnt := header.timecnt;
-	 WHILE (cnt > 0) & Streams.Read(s, timeval) DO
+         WHILE (cnt > 0) & ReadLong(s, timeval) DO
 	    NEW(glimpse);
 	    Times.CreateAndSet(glimpse.lastChange, Times.absolute,
 	       0, timeval, 0);
@@ -151,8 +171,11 @@ MODULE UnixTimezones;
       END ReadTransitionTimes;
 
       PROCEDURE ReadTransitionTypes(list: Glimpse) : BOOLEAN;
+         VAR ch: CHAR;
       BEGIN
-	 WHILE (list # NIL) & Streams.ReadByte(s, list.type) DO
+         WHILE (list # NIL) & Streams.ReadByte(s, ch) DO
+            list.type := ORD(ch);
+            IF list.type >= header.typecnt THEN RETURN FALSE END;
 	    list := list.next;
 	 END;
 	 RETURN list = NIL
@@ -162,13 +185,17 @@ MODULE UnixTimezones;
 	 VAR
 	    cnt: INTEGER;
 	    head, tail, type: Type;
-	    buf: ARRAY typelen OF BYTE;
+            offset: LONGINT;
+            isDst, nameOffset: CHAR;
       BEGIN
 	 head := NIL; tail := NIL;
 	 cnt := header.typecnt;
-	 WHILE (cnt > 0) & Streams.Read(s, buf) DO
-	    NEW(type);
-	    SysConversions.ByFmtFromC(buf, type^, typefmt);
+         WHILE (cnt > 0) & ReadLong(s, offset) &
+               Streams.ReadByte(s, isDst) & Streams.ReadByte(s, nameOffset) DO
+            IF (ORD(isDst) > 1) OR (ORD(nameOffset) >= header.charcnt) THEN RETURN FALSE END;
+            NEW(type);
+            type.offset := offset; type.isDst := isDst # 0X;
+            type.nameOffset := ORD(nameOffset);
 	    type.next := NIL;
 	    IF head = NIL THEN
 	       head := type;
@@ -216,7 +243,8 @@ MODULE UnixTimezones;
 	 ELSE
 	    WHILE cnt > 0 DO
 	       IF ~Streams.ReadByte(s, ch) THEN RETURN FALSE END;
-	       types.standard := (ch # 0X);
+               types.standard := (ch # 0X);
+               types := types.next;
 	       DEC(cnt);
 	    END;
 	 END;
@@ -532,7 +560,7 @@ MODULE UnixTimezones;
    PROCEDURE InitLocalTimezone(tz: Timezones.Timezone) : Timezones.Interface;
       VAR
 	 local: Timezone;
-	 tzname: ARRAY 12 OF CHAR;
+         tzname: ARRAY 512 OF CHAR;
 	 glimpse: Glimpse;
 	 glimpserec: GlimpseRec;
    BEGIN
@@ -581,11 +609,6 @@ MODULE UnixTimezones;
       zoneinfodir := zoneinfodirDefault;
 
       Services.SeekType("Times.Time", timeType);
-
-      SysConversions.Compile(headerfmt, headerconv);
-      ASSERT(headerlen = SysConversions.CSize(headerconv));
-      SysConversions.Compile(typefmt, typeconv);
-      ASSERT(typelen = SysConversions.CSize(typeconv));
 
       NEW(persif);
       persif.create := CreateTimezone;

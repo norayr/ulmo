@@ -4,7 +4,7 @@ set -eu
 arch=${1:-amd64}
 shift || true
 root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
-tests=${*:-RuntimeSockets RuntimeMemory RuntimeResources RuntimeIO RuntimeProcess RuntimeConversions RuntimeDirectory RuntimeArguments RuntimeOutput RuntimeShort HelloOut}
+tests=${*:-RuntimeSockets RuntimeMemory RuntimeResources RuntimeIO RuntimeProcess RuntimeConversions RuntimeDirectory RuntimeArguments RuntimeOutput RuntimeShort RuntimeTimezone HelloOut}
 work="$root/build/$arch/runtime-tests"
 mkdir -p "$work"
 for test in $tests; do
@@ -21,6 +21,7 @@ for test in $tests; do
       RuntimeArguments) module="SysArgs UnixProcess UnixArguments" ;;
       RuntimeOutput) module="BasicWrite RTErrors Storage UnixProcess UnixArguments Write Out UnixFiles" ;;
       HelloOut) module="BasicWrite RTErrors Storage UnixProcess Out UnixFiles" ;;
+      RuntimeTimezone) module="BasicWrite Out UnixTimezones UnixFiles" ;;
       *) module= ;;
    esac
    for module in $module; do
@@ -33,6 +34,10 @@ for test in $tests; do
    done
    "$root/build/root/bin/ulmo" -arch "$arch" -m "$test" "$root/src/test/$test.om"
    case "$test" in
+      RuntimeTimezone)
+         perl "$root/src/test/timezones.pl"
+         TZ="$work/$test/long-zone-name" timeout -k 2 30 "./$test"
+         ;;
       HelloOut)
          timeout -k 2 30 "./$test" >output.log
          cmp output.log "$root/src/test/HelloOut.expected"

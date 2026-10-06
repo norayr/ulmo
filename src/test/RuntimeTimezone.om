@@ -1,0 +1,36 @@
+MODULE RuntimeTimezone;
+   IMPORT Conclusions, Out, RelatedEvents, Streams, Times, Timezones,
+      UnixFiles, UnixTimezones;
+
+   PROCEDURE Check;
+      VAR
+         tz: Timezones.Timezone;
+         glimpse: Timezones.GlimpseRec;
+         at: Times.Time;
+         s: Streams.Stream;
+   BEGIN
+      UnixTimezones.SetZoneinfoDir(".");
+      ASSERT(Timezones.Find("long-zone-name", tz, glimpse));
+      ASSERT(glimpse.offset = 14400);
+      Times.CreateAndSet(at, Times.absolute, 0, 999999, 0);
+      ASSERT(Timezones.GetOffset(tz, at) = 14400);
+      Times.CreateAndSet(at, Times.absolute, 0, 1000000, 0);
+      ASSERT(Timezones.GetOffset(tz, at) = 18000);
+      ASSERT(Timezones.GetOffset(Timezones.local, at) = 18000);
+      Times.CreateAndSet(at, Times.absolute, 0, 2000000, 0);
+      ASSERT(Timezones.GetOffset(tz, at) = 14400);
+      ASSERT(Timezones.Find("negative-zone", tz, glimpse));
+      ASSERT(glimpse.offset = -3600);
+      ASSERT(Timezones.Find("unsigned-name", tz, glimpse));
+      ASSERT((glimpse.offset = 7200) & (glimpse.name = "HI"));
+      ASSERT(Timezones.Find("unsigned-type", tz, glimpse));
+      ASSERT(glimpse.offset = 14400);
+      ASSERT(UnixFiles.Open(s, "bad-type", UnixFiles.read, Streams.onebuf, NIL));
+      ASSERT(~UnixTimezones.Create(tz, s, RelatedEvents.null)); Streams.Release(s);
+      ASSERT(UnixFiles.Open(s, "bad-header", UnixFiles.read, Streams.onebuf, NIL));
+      ASSERT(~UnixTimezones.Create(tz, s, RelatedEvents.null)); Streams.Release(s);
+   END Check;
+BEGIN
+   Check;
+   Out.Line("runtime timezone: ok");
+END RuntimeTimezone.
