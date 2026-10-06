@@ -56,7 +56,7 @@ MODULE IPv6Addresses;
    TYPE
       SysAddress = ARRAY addrlen OF BYTE;
    CONST
-      addressFmt = "iS/iS/ii/16:cC/iL/iL";
+      addressFmt = "iS/iS/ii/16:cC/iI/iI"; (* scope and source ids are uint32_t *)
    TYPE
       FullAddress =
 	 RECORD

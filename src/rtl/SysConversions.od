@@ -82,7 +82,7 @@ DEFINITION SysConversions;
       l: LONGINT
       S: SET
 
-      C data types:
+    C data types (native ILP32 or LP64 widths; use i/I for fixed 32-bit fields):
 
       a: char *
       c: /* signed */ char

@@ -4,7 +4,7 @@ set -eu
 arch=${1:-amd64}
 shift || true
 root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
-tests=${*:-RuntimeSockets RuntimeMemory RuntimeResources RuntimeIO RuntimeProcess}
+tests=${*:-RuntimeSockets RuntimeMemory RuntimeResources RuntimeIO RuntimeProcess RuntimeConversions RuntimeDirectory}
 work="$root/build/$arch/runtime-tests"
 mkdir -p "$work"
 for test in $tests; do
@@ -16,6 +16,8 @@ for test in $tests; do
       RuntimeResources) module=SysResources ;;
       RuntimeIO) module="IO Out4" ;;
       RuntimeProcess) module="SysProcess SysIO" ;;
+      RuntimeConversions) module="SysConversions IPv6Addresses" ;;
+      RuntimeDirectory) module="SysConversions UnixDirectories" ;;
       *) module= ;;
    esac
    for module in $module; do

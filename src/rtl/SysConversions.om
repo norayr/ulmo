@@ -137,6 +137,7 @@ MODULE SysConversions;
 	    type1, type2: CHAR; length: INTEGER; left: INTEGER;
 	    offset1, offset2: Address;
 	    size1, size2: Address; elementsleft: INTEGER; flags: Flags;
+            align1: Address;
 	 END;
 
       Format = POINTER TO FormatRec;
@@ -208,6 +209,7 @@ MODULE SysConversions;
       Strings.Write(cv.fmt, format);
       cv.left := 0; cv.elementsleft := 0;
       cv.offset1 := 0; cv.offset2 := 0;
+      cv.align1 := SYS.SIZE(INTEGER);
       cv.eof := FALSE;
       NextCh(cv);
    END Open;
@@ -325,18 +327,19 @@ MODULE SysConversions;
 	 | "-":   size1 := 0;
 	 ELSE     Error(cv, "bad Oberon type specifier"); RETURN FALSE
 	 END;
+	 IF size1 > cv.align1 THEN cv.align1 := size1 END;
 	 IF size1 > 0 THEN
-	    IF length > 0 THEN
-	       Align(cv.offset1, SYS.SIZE(INTEGER));
-	    ELSIF size1 > SYS.SIZE(BYTE) THEN
-	       Align(cv.offset1, SYS.SIZE(INTEGER));
+	    IF (length > 0) OR (size1 > SYS.SIZE(BYTE)) THEN
+               boundary := SHORT(SYS.SIZE(INTEGER));
+               IF size1 > boundary THEN boundary := SYS.VAL(INTEGER, size1) END;
+               Align(cv.offset1, boundary);
 	    END;
 	 END;
 	 offset1 := cv.offset1; cv.offset1 := SYS.VAL (INTEGER, cv.offset1) + size1;
 
-	 (* C type *)
+	 (* C type: native ILP32/LP64 widths; i/I are fixed 32-bit fields. *)
 	 CASE type2 OF
-	 | "a":   size2 := 4; INCL(flags, unsigned); (* char*              *)
+	 | "a":   size2 := SYS.SIZE(SYS.ADDRESS); INCL(flags, unsigned);
 	 | "c":   size2 := 1;                        (* /* signed */ char  *)
 	 | "C":   size2 := 1; INCL(flags, unsigned); (* unsigned char      *)
 	 | "s":   size2 := 2;                        (* short int          *)
@@ -344,8 +347,8 @@ MODULE SysConversions;
 	 | "i":   size2 := 4;                        (* int                *)
 	 | "I":   size2 := 4; INCL(flags, unsigned); (* unsigned int       *)
 	 | "u":   size2 := 4; INCL(flags, unsigned); (* unsigned int       *)
-	 | "l":   size2 := 4;                        (* long int           *)
-	 | "L":   size2 := 4; INCL(flags, unsigned); (* long int           *)
+	 | "l":   size2 := SYS.SIZE(SYS.ADDRESS);    (* C long: ILP32/LP64 *)
+	 | "L":   size2 := SYS.SIZE(SYS.ADDRESS); INCL(flags, unsigned);
 	 | "-":   size2 := 0;
 	 ELSE     Error(cv, "bad C type specifier"); RETURN FALSE
 	 END;
@@ -475,7 +478,7 @@ MODULE SysConversions;
       WHILE ReadConv(cv, offset1, offset2, size1, size2, flags) DO END;
       Close(cv);
       size := offset1 + size1;
-      Align(size, SYS.SIZE(INTEGER));
+      Align(size, cv.align1);
       RETURN size
    END OberonSize;
 

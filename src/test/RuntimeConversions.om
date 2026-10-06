@@ -1,0 +1,67 @@
+MODULE RuntimeConversions;
+   IMPORT Conclusions, IPv6Addresses, SYS := SYSTEM, SysConversions, Write;
+   TYPE
+      Rec = RECORD
+         prefix: INTEGER;
+         ptr: SYS.UNTRACEDADDRESS;
+         signed: LONGINT;
+         tail: INTEGER;
+      END;
+      ArrayRec = RECORD
+         prefix: INTEGER;
+         pointers: ARRAY 2 OF SYS.UNTRACEDADDRESS;
+         tail: INTEGER;
+      END;
+
+   PROCEDURE Check;
+      VAR
+         source, dest: Rec;
+         guarded: RECORD buffer: ARRAY 32 OF BYTE; guard: LONGINT END;
+         fmt: SysConversions.Format;
+         address, restored: IPv6Addresses.SocketAddress;
+         socketbuf: RECORD address: IPv6Addresses.SysAddress; guard: LONGINT END;
+         arraySource, arrayDest: ArrayRec;
+   BEGIN
+      ASSERT(SysConversions.OberonSize("ii/aa/ll/ii") = SYS.SIZE(Rec));
+      IF SYS.SIZE(SYS.ADDRESS) = 8 THEN
+         (* CSize counts converted fields, without trailing ABI padding. *)
+         ASSERT(SysConversions.CSize("ii/aa/ll/ii") = 28);
+      ELSE
+         ASSERT(SysConversions.CSize("ii/aa/ll/ii") = 16);
+      END;
+      SysConversions.Compile(fmt, "ii/aa/ll/ii");
+      source.prefix := 123; source.ptr := SYS.ADR(source);
+      IF SYS.SIZE(SYS.ADDRESS) = 8 THEN
+         source.ptr := SYS.VAL(SYS.UNTRACEDADDRESS, MAX(HUGEINT) - 123);
+      END;
+      source.signed := -456; source.tail := 789;
+      guarded.guard := 7654321;
+      SysConversions.ByFmtToC(source, guarded.buffer, fmt);
+      ASSERT(guarded.guard = 7654321);
+      SysConversions.ByFmtFromC(guarded.buffer, dest, fmt);
+      ASSERT((dest.prefix = source.prefix) & (dest.ptr = source.ptr) &
+             (dest.signed = source.signed) & (dest.tail = source.tail));
+      ASSERT(SysConversions.OberonSize("ii/2:aa/ii") = SYS.SIZE(ArrayRec));
+      arraySource.prefix := 12; arraySource.tail := 34;
+      arraySource.pointers[0] := source.ptr;
+      arraySource.pointers[1] := SYS.ADR(source);
+      SysConversions.Compile(fmt, "ii/2:aa/ii");
+      SysConversions.ByFmtToC(arraySource, guarded.buffer, fmt);
+      SysConversions.ByFmtFromC(guarded.buffer, arrayDest, fmt);
+      ASSERT((arrayDest.prefix = 12) & (arrayDest.tail = 34) &
+             (arrayDest.pointers[0] = arraySource.pointers[0]) &
+             (arrayDest.pointers[1] = arraySource.pointers[1]));
+      IPv6Addresses.SetAnyAddr(address.host);
+      IPv6Addresses.SetPort(address, 12345);
+      socketbuf.guard := 1234567;
+      IPv6Addresses.ConvertToSys(address, socketbuf.address);
+      ASSERT(socketbuf.guard = 1234567);
+      IPv6Addresses.ConvertFromSys(socketbuf.address, restored);
+      ASSERT(IPv6Addresses.IsAnyAddr(restored.host));
+      ASSERT(IPv6Addresses.GetPort(restored) = 12345);
+   END Check;
+
+BEGIN
+   Check;
+   Write.Line("runtime conversions: ok");
+END RuntimeConversions.

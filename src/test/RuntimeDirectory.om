@@ -1,0 +1,29 @@
+MODULE RuntimeDirectory;
+   IMPORT Conclusions, Streams, SysFile, SysIO, UnixDirectories, Write;
+
+   PROCEDURE Check;
+      CONST filename = "directory-entry-with-a-long-name-to-check-native-dirent-offsets";
+      VAR
+         fd: SysIO.File;
+         dir: Streams.Stream;
+         entry: UnixDirectories.Entry;
+         interrupted, found, dot: BOOLEAN;
+   BEGIN
+      ASSERT(SysIO.OpenCreat(fd, filename, SysIO.wronly + SysIO.creat,
+                             384, NIL, TRUE, interrupted));
+      ASSERT(SysIO.Close(fd, NIL, TRUE, interrupted));
+      ASSERT(UnixDirectories.Open(dir, ".", NIL));
+      found := FALSE; dot := FALSE;
+      WHILE Streams.Read(dir, entry) DO
+         IF entry.name = filename THEN found := TRUE END;
+         IF entry.name = "." THEN dot := TRUE END;
+      END;
+      ASSERT(found & dot);
+      ASSERT(Streams.Close(dir));
+      ASSERT(SysFile.Unlink(filename, NIL));
+   END Check;
+
+BEGIN
+   Check;
+   Write.Line("runtime directory: ok");
+END RuntimeDirectory.
