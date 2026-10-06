@@ -88,7 +88,7 @@ MODULE SysProcess;
       VAR
 	 d0, d1: INTEGER;
    BEGIN
-      IF SYS.UNIXCALL(Sys.getpid, d0, d1) THEN END;
+      IF SYS.UNIXCALL(Sys.getppid, d0, d1) THEN END;
       RETURN d0
    END Getppid;
 

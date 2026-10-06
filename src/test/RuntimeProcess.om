@@ -1,0 +1,40 @@
+MODULE RuntimeProcess;
+   IMPORT Conclusions, RelatedEvents, SYS := SYSTEM, SysIO, SysProcess, Write;
+
+   PROCEDURE Check;
+      VAR
+         parent, child, expected: SysProcess.ProcessId;
+         status: SysProcess.Status;
+         reader, writer, copy: SysIO.File;
+         interrupted: BOOLEAN;
+         ch: CHAR;
+   BEGIN
+      parent := SysProcess.Getpid();
+      ASSERT(SysProcess.Getppid() # parent);
+      ASSERT(SysIO.Pipe(reader, writer, NIL));
+      ASSERT(SysIO.Dup2(reader, reader, NIL));
+      ASSERT(SysIO.Dup(writer, copy, NIL));
+      ASSERT(~SysIO.Dup2(-1, writer, RelatedEvents.null));
+      ch := "x";
+      ASSERT(SysIO.Write(writer, SYS.ADR(ch), 1, NIL, TRUE, interrupted) = 1);
+      ASSERT(SysIO.Read(reader, SYS.ADR(ch), 1, NIL, TRUE, interrupted) = 1);
+      ASSERT(ch = "x");
+      ASSERT(SysIO.Dup2(copy, writer, NIL));
+      ASSERT(SysIO.Close(copy, NIL, TRUE, interrupted));
+      ASSERT(SysIO.Close(reader, NIL, TRUE, interrupted));
+      ASSERT(SysIO.Close(writer, NIL, TRUE, interrupted));
+
+      ASSERT(SysProcess.Fork(child, NIL));
+      IF child = 0 THEN
+         IF SysProcess.Getppid() # parent THEN SysProcess.Exit(99) END;
+         SysProcess.Exit(17);
+      END;
+      expected := child;
+      ASSERT(SysProcess.WaitFor(child, status, NIL));
+      ASSERT((child = expected) & (status.signal = 0) & (status.exitcode = 17));
+   END Check;
+
+BEGIN
+   Check;
+   Write.Line("runtime process: ok");
+END RuntimeProcess.

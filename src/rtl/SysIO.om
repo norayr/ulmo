@@ -303,21 +303,10 @@ MODULE SysIO;
    PROCEDURE Dup2(fd, newfd: File; errors: RelatedEvents.Object) : BOOLEAN;
       VAR
 	 d0, d1: INTEGER;
-	 fd2: File;
-	 interrupted: BOOLEAN;
    BEGIN
-      fd2 := newfd;
-      (* handmade close to avoid unnecessary events *)
-      IF ~SYS.UNIXCALL(Sys.close, d0, d1, newfd) THEN END;
-      IF Fcntl(fd, dupfd, fd2, errors, TRUE, interrupted) THEN
-	 IF fd2 = newfd THEN
-	    RETURN TRUE
-	 ELSE
-	    RETURN Close(fd2, errors, TRUE, interrupted) & FALSE
-	 END;
-      ELSE
-	 RETURN FALSE
-      END;
+      IF SYS.UNIXCALL(Sys.dup2, d0, d1, fd, newfd) THEN RETURN TRUE END;
+      SysErrors.Raise(errors, d0, Sys.dup2, "");
+      RETURN FALSE
    END Dup2;
 
    PROCEDURE Pipe(VAR readfd, writefd: File;
