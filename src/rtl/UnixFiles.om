@@ -37,9 +37,9 @@
 
 MODULE UnixFiles;
 
-   IMPORT Clocks, Conditions, Events, Priorities, RelatedEvents,
+   IMPORT Conditions, Events, Priorities, RelatedEvents,
       Services, StreamConditions, Streams, SYS := SYSTEM, SysErrors, SysIO,
-      SysSockets, SysStat, SysTypes, Tasks, TimeConditions, Times,
+      SysStat, SysTypes, Tasks,
       UnixFileConditions;
 
    (* this module sets Streams.stdin, Streams.stdout, and Streams.stderr

@@ -17,7 +17,7 @@ for test in $tests; do
       RuntimeIO) module="IO Out4" ;;
       RuntimeProcess) module="SysProcess SysIO" ;;
       RuntimeConversions) module="SysConversions IPv6Addresses" ;;
-      RuntimeDirectory) module="SysConversions UnixDirectories" ;;
+      RuntimeDirectory) module="SysConversions UnixDirectories UnixFiles" ;;
       *) module= ;;
    esac
    for module in $module; do
