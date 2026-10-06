@@ -1,2 +1,9 @@
 We are looking for volunteers who are willing to generate and maintain
 ready-to-use packages for individual Linux distributions.
+
+Future target: support a 386 with a 387 floating point coprocessor.
+The current i386 runtime requires a Pentium because small allocations use
+CMPXCHG8B. Replace that fast path with Storage.AllocateWithTag, check
+allocation during startup and signal handling, and rebuild the runtime
+and bootstrap compilers. Keep x87 floating point and HUGEINT DIV/MOD;
+a processor without a floating point coprocessor is a separate target.
