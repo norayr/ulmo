@@ -872,7 +872,6 @@ MODULE AMD64Instructions;
          For 16/32-bit, fall back to "?A??O?C7%0D0%%1I%", rmop, id (6 bytes). *)
       ok := Gen.RegisterFormat2(MOV, "?A?C6%0D0%%1I%", rmb, ib, 1); ASSERT(ok);
       ok := Gen.RegisterFormat2(MOV, "?A??O?C7%0D0%%1I%", rmop, id, 1); ASSERT(ok);
-      ok := Gen.RegisterFormat2(MOV, "?A?66C7%0D0%%1I%", rmw, iw, 1); ASSERT(ok);
       (* 16-bit MOV r/m16,imm16: 66H C7 /0 imm16. Must be registered AFTER the
          rmop+id format so it lands at the list head and is tried first. The
          rmop+id format (above) writes 4 bytes of immediate even with the 66H
