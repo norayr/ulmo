@@ -1,0 +1,10 @@
+MODULE RuntimeShort;
+   IMPORT Conclusions, SYS := SYSTEM, Write;
+   VAR value: SYS.INT16; real: LONGREAL;
+BEGIN
+   value := 1234;
+   INC(value, 300); ASSERT(value = 1534);
+   real := 1.25; ASSERT(ENTIER(real) = 1);
+   real := -1.25; ASSERT(ENTIER(real) = -2);
+   Write.Real(1.25, 0); Write.Ln;
+END RuntimeShort.

@@ -1508,6 +1508,17 @@ MODULE AMD64OpCodeGenerator; (* Christian Ehrhardt, AMD64 adaptation *)
 	 END;
 	 INC(i);
       END;
+      IF os = 2 THEN
+         (* Fixed imm32 encodings are not valid with a 16-bit operand.
+            Prefer the operand-sized immediate or an explicit imm16 form. *)
+         i := 0;
+         WHILE i < nops DO
+            IF (inst.ops[i].type = timm) &
+               (inst.ops[i].immregsz.base = 4) &
+               (inst.ops[i].immregsz.opm = 0) THEN RETURN FALSE END;
+            INC(i);
+         END;
+      END;
       IF as >= 0 THEN
 	 ASSERT ((as = 2) OR (as = 4) OR (as = 8));
          IF as = 2 THEN
