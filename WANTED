@@ -19,10 +19,6 @@ AMD64 runtime follow-up, before expanding the managed address space:
   arithmetic, size types, type descriptors and the copying collector.
 
 Smaller executables:
-- Reduce the compulsory startup dependency graph, especially timezone,
-  formatted I/O, persistence and networking support in minimal programs.
-- Emit independently removable procedure sections and matching metadata;
-  linker garbage collection currently cannot remove unused procedures
-  from a retained module.
-- Move zero-initialized globals to BSS while preserving their preceding
-  garbage-collector tag, for example by initializing the tag at startup.
+- Continue separating runtime mechanisms from optional facilities,
+  especially persistence and generic time/scheduling types, preserving
+  whole modules as the units of initialization and linking.

@@ -36,6 +36,10 @@ The former README and installation instructions are kept in
   compiler (`src/rtl`, `src/lib`, `src/compiler`).
 - **Run time error messages** name the correct source line, report index
   errors with the valid range, and report dereferences of NIL.
+- **Smaller compulsory runtime.** Basic diagnostics share a small writer,
+  process naming does not import argument parsing, and timezone support is
+  selected from the linked modules. `Out` provides lightweight text and
+  integer output.
 
 ## Requirements
 
@@ -75,7 +79,8 @@ stages, each compiling the whole compiler and library:
 `make check-runtime` tests TCP and UDP sockets, file-backed memory mapping,
 resource limits, basic I/O, process creation and descriptor duplication,
 native C structure conversions, IPv6 addresses and directory enumeration.
-It can also be run with `ARCH=i386`.
+It also checks argument naming, integer and floating-point output, timezone
+files and automatic timezone-provider selection. It can be run with `ARCH=i386`.
 
 Everything goes to `build/`; `make clean` removes it. The directory
 `build/root` has the same layout as an installation, so the freshly built
@@ -139,10 +144,10 @@ exports nothing needs no definition; ulmo creates an empty one.
 ```oberon
 MODULE Hello;
 
-   IMPORT Write;
+   IMPORT Out;
 
 BEGIN
-   Write.Line("Hello, world!");
+   Out.Line("Hello, world!");
 END Hello.
 ```
 
@@ -173,6 +178,11 @@ Options:
 | `-L dir` | take the libraries from `dir` |
 
 Without `-m`, ulmo only compiles the given modules to `.o` files.
+
+`Out.Char`, `Out.String`, `Out.Int(value, width)`, `Out.Line` and `Out.Ln`
+write to buffered standard output without importing the general formatter.
+Use `Write` or `Print` for floating-point or general formatted output;
+the existing `Write` interface is preserved.
 
 How compilation works:
 
@@ -231,14 +241,14 @@ the run time system.
 
 ## Program size
 
-A program is statically linked and contains the run time system, about 80
+A program is statically linked and contains the run time system, about 69
 modules, among them a garbage collector, coroutines and a stream system.
 The hello world program of `src/test`:
 
 | | as linked | stripped |
 |---|---|---|
-| amd64 | 1.6 MB | 0.7 MB |
-| i386 | 1.3 MB | 0.54 MB |
+| amd64 | 1.45 MB | 0.64 MB |
+| i386 | 1.16 MB | 0.47 MB |
 
 More than half of it is the symbol table. Remove it with `strip`, or link
 without it:
@@ -251,12 +261,22 @@ LDFLAGS=-s ulmo -m Hello Hello.om
 Keep the symbols while you debug: they are all there is (see below).
 
 Most of this size is the runtime dependency graph, rather than the program
-itself. An empty module produces a stripped executable of about 741 KB on
-amd64 or 545 KB on i386 and pulls in 81 runtime modules. Adding
+itself. The following are stripped executables, with sizes in bytes:
+
+| program | amd64 | i386 |
+|---|---:|---:|
+| empty module | 576,504 | 425,916 |
+| hello world using `Out` | 578,064 | 426,932 |
+| hello world using `Write` | 640,080 | 471,888 |
+
+The empty program links 69 runtime modules, down from 81. Its size has
+fallen by about 22% from the former 741 KB / 545 KB baseline. The native
+timezone provider is included automatically when `Timezones` is linked;
+programs that do not use it do not carry the timezone reader. Adding
 `LDFLAGS='-s --gc-sections'` does not reduce that baseline: the compiler
 emits code at module granularity, and retained modules keep their unused
-procedures. Substantial reductions need a smaller startup dependency graph
-or procedure-level elimination together with its runtime metadata.
+procedures. Further reductions need more separation of optional facilities
+from the remaining core runtime dependencies.
 
 ## Errors at run time and debugging
 
