@@ -1,0 +1,8 @@
+(* MODULE Wrong;
+   (* a nested comment containing MODULE AlsoWrong; *)
+*)
+MODULE (* the name follows a comment *) InferredMain;
+   IMPORT Out;
+BEGIN
+   Out.Line("inferred main: ok");
+END InferredMain.

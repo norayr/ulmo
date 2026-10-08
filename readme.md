@@ -65,6 +65,7 @@ make                # for the architecture of the host
 make ARCH=i386      # or for a given one: i386 or amd64
 make check          # optional: self-hosting check and a test program
 make check-runtime  # optional: runtime interface regression programs
+make check-cli      # optional: main-module selection and wrapper checks
 ```
 
 The build takes a few minutes (on a current PC about 7 minutes for amd64
@@ -87,7 +88,7 @@ Everything goes to `build/`; `make clean` removes it. The directory
 compiler can be used in place:
 
 ```sh
-build/root/bin/ulmo -m Hello Hello.om
+build/root/bin/ulmo -m Hello.om
 ```
 
 ## Installing
@@ -152,7 +153,7 @@ END Hello.
 ```
 
 ```sh
-$ ulmo -m Hello Hello.om
+$ ulmo -m Hello.om
 ulmo: Hello.om -> Hello.o
 ulmo: linked -> Hello
 $ ./Hello
@@ -169,7 +170,7 @@ Options:
 
 | option | |
 |---|---|
-| `-m Main` | link a program with the main module `Main` |
+| `-m [Main]` | link a program; `-m Hello.om` reads its main-module name from the source header; `-m Main source.om` selects it explicitly |
 | `-o file` | name of the program (default: name of the main module) |
 | `-arch ARCH` | target architecture: `amd64` or `i386` (default: the host's, if installed) |
 | `-I dir` | search sources in `dir`, too |
@@ -178,6 +179,13 @@ Options:
 | `-L dir` | take the libraries from `dir` |
 
 Without `-m`, ulmo only compiles the given modules to `.o` files.
+
+`ulmo -m Hello.om` selects the module declared in `Hello.om`, compiles it
+and links a program with that module name. You can give other sources
+after it, or choose an output filename with `-o program`. A bare `-m`
+before other options (for example, `ulmo -m -o program Hello.om`) infers
+the main module when exactly one implementation source is given. The
+explicit form `ulmo -m Hello Hello.om` continues to work.
 
 `Out.Char`, `Out.String`, `Out.Int(value, width)`, `Out.Line` and `Out.Ln`
 write to buffered standard output without importing the general formatter.

@@ -6,6 +6,8 @@
 #       compile each .om (or .mod) to a .o
 #   ulmo [options] -m MainModule [-o outfile] sourcefile...
 #       compile, then link a program whose main module is MainModule
+#   ulmo [options] -m MainModule.om [-o outfile] [sourcefile...]
+#       infer the main module from the source header and compile that file
 #   ulmo [options] -S sourcefile...
 #       compile each .om and emit the .tof intermediate text instead of a .o
 #
@@ -37,7 +39,8 @@ Usage: $cmdname [options] sourcefile...
 Options:
   -arch ARCH      target architecture (installed: `ls "$ULMOLIBDIR" 2>/dev/null | grep -v tof2elf | tr '\n' ' '`)
   -I dir          add dir to the source search path
-  -m MainModule   link a program with MainModule as main module
+   -m [MainModule] link a program; infer the name from a module source if omitted
+   -m Main.om      select and compile Main.om as the main module
   -o outfile      name of the program (default: name of the main module)
   -L dir          take the libraries from dir instead of ULMOLIBDIR/ARCH
   -S              emit .tof files instead of .o files; do not link
@@ -60,6 +63,8 @@ fi
 
 iflags=""
 main_module=""
+main_source=""
+infer_main=0
 out_file=""
 libdir=""
 asm_only=0
@@ -70,7 +75,18 @@ while [ $# -gt 0 ]; do
    -arch) [ $# -lt 2 ] && usage; arch="$2"; shift 2 ;;
    -I)    [ $# -lt 2 ] && usage; iflags="$iflags -I $2"; shift 2 ;;
    -I*)   iflags="$iflags -I${1#-I}"; shift ;;
-   -m)    [ $# -lt 2 ] && usage; main_module="$2"; shift 2 ;;
+    -m)
+       infer_main=0; main_module=""; main_source=""
+       if [ $# -eq 1 ]; then
+          infer_main=1; shift
+       else
+          case "$2" in
+          *.om|*.mod) infer_main=1; main_source="$2"; shift 2 ;;
+          -*|*.od)   infer_main=1; shift ;;
+          *)         main_module="$2"; shift 2 ;;
+          esac
+       fi
+       ;;
    -o)    [ $# -lt 2 ] && usage; out_file="$2"; shift 2 ;;
    -L)    [ $# -lt 2 ] && usage; libdir="$2"; shift 2 ;;
    -L*)   libdir="${1#-L}"; shift ;;
@@ -81,8 +97,68 @@ while [ $# -gt 0 ]; do
    *)     break ;;
    esac
 done
-[ $# -eq 0 ] && usage
+[ $# -eq 0 ] && [ -z "$main_source" ] && usage
 sources="$*"
+if [ -n "$main_source" ]; then
+   sources="$main_source $sources"
+fi
+
+if [ "$infer_main" -eq 1 ]; then
+   if [ -z "$main_source" ]; then
+      for sourcefile in $sources; do
+         case "$sourcefile" in
+         *.om|*.mod)
+            if [ -n "$main_source" ]; then
+               echo "$cmdname: several module sources; select one with -m Main or -m Main.om" >&2
+               exit 1
+            fi
+            main_source="$sourcefile"
+            ;;
+         esac
+      done
+   fi
+   [ -n "$main_source" ] || usage
+   # Read only the header: whitespace and nested comments may precede or
+   # separate its tokens. The compiler handles the rest of the source.
+   main_module=$(perl -e '
+      use strict;
+      use warnings;
+      my ($file, $cmd) = @ARGV;
+      open(my $in, "<", $file) or die "$cmd: $file: $!\n";
+      my $ch = getc($in);
+      sub advance { $ch = getc($in); }
+      sub invalid { die "$cmd: $file: expected MODULE name; in the source header\n"; }
+      sub skip {
+         while (defined $ch) {
+            if ($ch =~ /\s/) { advance(); }
+            elsif ($ch eq "(") {
+               advance(); invalid() unless defined($ch) && $ch eq "*";
+               advance(); my $depth = 1;
+               while ($depth) {
+                  invalid() unless defined $ch;
+                  if ($ch eq "(") {
+                     advance();
+                     if (defined($ch) && $ch eq "*") { ++$depth; advance(); }
+                  } elsif ($ch eq "*") {
+                     advance();
+                     if (defined($ch) && $ch eq ")") { --$depth; advance(); }
+                  } else { advance(); }
+               }
+            } else { last; }
+         }
+      }
+      sub identifier {
+         skip(); invalid() unless defined($ch) && $ch =~ /[A-Za-z_]/;
+         my $name = "";
+         while (defined($ch) && $ch =~ /[A-Za-z0-9_]/) { $name .= $ch; advance(); }
+         return $name;
+      }
+      invalid() unless identifier() eq "MODULE";
+      my $name = identifier(); skip();
+      invalid() unless defined($ch) && $ch eq ";";
+      print "$name\n";
+   ' "$main_source" "$cmdname") || exit 1
+fi
 
 case "$arch" in
 i386)  objarch=I386 ;;
