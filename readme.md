@@ -40,6 +40,9 @@ The former README and installation instructions are kept in
   process naming does not import argument parsing, and timezone support is
   selected from the linked modules. `Out` provides lightweight text and
   integer output.
+- **Native Oberon tools.** The public driver, startup generator and linker
+  driver are Oberon executables. Compilation does not invoke shell or Perl
+  wrappers.
 
 ## Requirements
 
@@ -50,10 +53,16 @@ The former README and installation instructions are kept in
 - GNU binutils (`as`, `ld`), also at run time: ulmo uses them to link
   programs. For i386 programs on an x86-64 system, binutils must support
   `elf_i386`, as the standard x86-64 binutils do.
-- perl (generates the start-up code of programs)
 
-The build starts from prebuilt compilers in `bootstrap/i386` and
-`bootstrap/amd64` (statically linked executables). Building for i386 on an
+The ELF converter is the existing small C tool linked against libelf.
+The compiler, driver and runtime helpers use the Ulm Oberon library. GNU
+`as` and `ld` remain the external assembler and linker. The normal build
+and installed tools do not require Perl; GNU make uses the usual POSIX
+shell for its build recipes.
+
+The build starts from prebuilt compilers, object generators and native
+link helpers in `bootstrap/i386` and `bootstrap/amd64` (statically linked
+executables). Building for i386 on an
 x86-64 system runs the 32-bit bootstrap compiler, which needs a kernel with
 32-bit support (`CONFIG_IA32_EMULATION`, enabled on common distributions).
 Building for amd64 does not need any 32-bit support.
@@ -75,7 +84,7 @@ stages, each compiling the whole compiler and library:
 - stage 1 is built by the bootstrap compiler,
 - stage 2 by the compiler of stage 1; this is the one installed,
 - stage 3 (only for `make check`) by the compiler of stage 2 and must be
-  identical to stage 2.
+  identical to stage 2, including the native driver and runtime helpers.
 
 `make check-runtime` tests TCP and UDP sockets, file-backed memory mapping,
 resource limits, basic I/O, process creation and descriptor duplication,
@@ -106,11 +115,15 @@ make uninstall                                # per architecture, too
 
 | path | contents |
 |---|---|
-| `BINDIR/ulmo` | the only command you need |
+| `BINDIR/ulmo` | symlink to the native driver for an installed architecture |
 | `LIBDIR/ulmo/tof2elf` | TOF to ELF converter |
 | `LIBDIR/ulmo/ARCH/` | compiler, tools and libraries for one target architecture |
 | `LIBDIR/ulmo/ARCH/obj/` | compiled interfaces of the library modules |
 | `DATADIR/ulmo/src/` | the sources of the library and the compiler |
+
+`LIBDIR/ulmo/ulmo.sources` records the installed source directory. The
+driver locates its private tools through its executable path and selects
+the target architecture's tools from the same library root.
 
 The Oberon libraries are not system libraries: they belong to the compiler,
 and each target architecture has its own directory under `LIBDIR/ulmo`. So
@@ -206,6 +219,13 @@ How compilation works:
   precedence and is linked instead of the library's version.
 - All modules compiled in the current directory are linked, so use one
   directory per program.
+
+The native driver keeps compiler invocations separate and sequential,
+retaining the existing bounded-memory build model. It executes tools via
+`SysProcess.Fork`/`Exec`/`WaitFor`, with argument vectors rather than shell
+command strings. Startup generation uses the same instruction sequences
+as the former Perl tools; comparison tests produced identical assembler
+objects on AMD64 and i386, with and without timezone startup.
 
 ### Compiled files
 
