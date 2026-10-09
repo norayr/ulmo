@@ -1,0 +1,289 @@
+MODULE UlmoDriver;
+   IMPORT BasicWrite, DP := DriverProcesses, Process, RelatedEvents, Streams,
+      Strings, SYS := SYSTEM, SysArgs, SysFile, SysUname, UnixDirectories, UnixEnvironment, UnixFiles;
+   VAR
+      sources, includes, objects, args: DP.Arguments;
+      arch, objarch, libroot, srcroot, tools, libraries, executable, main, mainSource, output,
+      word, path, name, extension, directory, objfile, ofile, tof, loglevel: DP.Word;
+      index: INTEGER; auto, assemblyOnly: BOOLEAN;
+
+   PROCEDURE Error(text: ARRAY OF CHAR);
+   BEGIN
+      BasicWrite.StringS(Streams.stderr, "ulmo: "); BasicWrite.LineS(Streams.stderr, text); Process.Exit(1);
+   END Error;
+   PROCEDURE Usage;
+   BEGIN
+      BasicWrite.LineS(Streams.stderr, "Usage: ulmo [-arch amd64|i386] [-I dir] [-L dir] [-v level] [-S] [-m [Main|Main.om]] [-o output] source...");
+      Process.Exit(1);
+   END Usage;
+   PROCEDURE Suffix(text, suffix: ARRAY OF CHAR) : BOOLEAN;
+      VAR a, b, i: LONGINT;
+   BEGIN
+      a := Strings.Len(text); b := Strings.Len(suffix); IF a < b THEN RETURN FALSE END;
+      i := 0; WHILE i < b DO IF text[a-b+i] # suffix[i] THEN RETURN FALSE END; INC(i) END;
+      RETURN TRUE
+   END Suffix;
+   PROCEDURE Parts(file: ARRAY OF CHAR; VAR module, ext: ARRAY OF CHAR);
+      VAR i, start, dot, dest: LONGINT;
+   BEGIN
+      start := 0; dot := -1; i := 0;
+      WHILE file[i] # 0X DO
+         IF file[i] = "/" THEN start := i+1; dot := -1 ELSIF file[i] = "." THEN dot := i END; INC(i);
+      END;
+      IF dot < 0 THEN dot := i END;
+      dest := 0; WHILE start < dot DO module[dest] := file[start]; INC(dest); INC(start) END;
+      module[dest] := 0X; dest := 0; INC(dot);
+      WHILE dot < i DO ext[dest] := file[dot]; INC(dest); INC(dot) END; ext[dest] := 0X;
+   END Parts;
+   PROCEDURE Member(list: DP.Arguments; text: ARRAY OF CHAR) : BOOLEAN;
+   BEGIN
+      WHILE list # NIL DO IF list.word = text THEN RETURN TRUE END; list := list.next END;
+      RETURN FALSE
+   END Member;
+   PROCEDURE Source(dir, module, ext: ARRAY OF CHAR; VAR file: ARRAY OF CHAR);
+   BEGIN DP.Join(file, dir, module); Strings.Concatenate(file, ext) END Source;
+   PROCEDURE Header(file: ARRAY OF CHAR; VAR module: ARRAY OF CHAR);
+      VAR s: Streams.Stream; ch: CHAR; present: BOOLEAN; token: DP.Word; pos, depth: LONGINT;
+      PROCEDURE Next;
+      BEGIN present := Streams.ReadByte(s, ch) END Next;
+      PROCEDURE Invalid;
+      BEGIN Streams.Release(s); Error("expected MODULE name; in the source header") END Invalid;
+      PROCEDURE Skip;
+      BEGIN
+         LOOP
+            IF ~present THEN EXIT END;
+            IF ch <= " " THEN Next
+            ELSIF ch = "(" THEN
+               Next; IF ~present OR (ch # "*") THEN Invalid END;
+               Next; depth := 1;
+               WHILE depth > 0 DO
+                  IF ~present THEN Invalid END;
+                  IF ch = "(" THEN Next; IF present & (ch = "*") THEN INC(depth); Next END
+                  ELSIF ch = "*" THEN Next; IF present & (ch = ")") THEN DEC(depth); Next END
+                  ELSE Next END;
+               END;
+            ELSE EXIT END;
+         END;
+      END Skip;
+      PROCEDURE Identifier(VAR text: ARRAY OF CHAR);
+      BEGIN
+         Skip; pos := 0;
+         WHILE present & (((ch >= "A") & (ch <= "Z")) OR ((ch >= "a") & (ch <= "z")) OR
+               ((ch >= "0") & (ch <= "9")) OR (ch = "_")) DO
+            IF pos + 1 >= LEN(text) THEN Invalid END;
+            text[pos] := ch; INC(pos); Next;
+         END;
+         text[pos] := 0X; IF pos = 0 THEN Invalid END;
+      END Identifier;
+   BEGIN
+      IF ~UnixFiles.Open(s, file, UnixFiles.read, Streams.onebuf, RelatedEvents.null) THEN Error(file) END;
+      Next; Identifier(token); IF token # "MODULE" THEN Invalid END;
+      Identifier(module); Skip; IF ~present OR (ch # ";") THEN Invalid END;
+      Streams.Release(s);
+   END Header;
+   PROCEDURE Compile(files: DP.Arguments);
+      VAR node: DP.Arguments;
+   BEGIN
+      args := NIL; DP.Join(path, tools, "ulmoc"); DP.Append(args, path);
+      DP.Append(args, "-a"); DP.Append(args, arch);
+      IF loglevel # "" THEN DP.Append(args, "-v"); DP.Append(args, loglevel) END;
+      DP.Append(args, "-I"); DP.Append(args, ".");
+      node := includes; WHILE node # NIL DO DP.Append(args, "-I"); DP.Append(args, node.word); node := node.next END;
+      DP.Join(path, libraries, "obj");
+      IF DP.Exists(path) THEN DP.Append(args, "-L"); DP.Append(args, path) END;
+      node := files; WHILE node # NIL DO DP.Append(args, node.word); node := node.next END;
+      IF ~DP.Run(args, "") THEN Process.Exit(1) END;
+   END Compile;
+   PROCEDURE FindSource(module, ext: ARRAY OF CHAR; VAR file: ARRAY OF CHAR) : BOOLEAN;
+      VAR node: DP.Arguments;
+   BEGIN
+      Source(".", module, ext, file); IF DP.Exists(file) THEN RETURN TRUE END;
+      node := includes;
+      WHILE node # NIL DO
+         Source(node.word, module, ext, file); IF DP.Exists(file) THEN RETURN TRUE END;
+         node := node.next;
+      END;
+      RETURN FALSE
+   END FindSource;
+   PROCEDURE Missing;
+      VAR s: Streams.Stream; entry: UnixDirectories.Entry; pending, last, node: DP.Arguments;
+         module, body, file: DP.Word; found: BOOLEAN;
+   BEGIN
+      last := NIL;
+      LOOP
+         pending := NIL;
+         IF ~UnixDirectories.Open(s, ".", RelatedEvents.null) THEN Error("cannot read current directory") END;
+         WHILE Streams.Read(s, entry) DO
+            IF Suffix(entry.name, "-def-gen.obj") THEN
+               COPY(entry.name, module); module[Strings.Len(module)-12] := 0X;
+               body := module; Strings.Concatenate(body, "-mod-"); Strings.Concatenate(body, objarch); Strings.Concatenate(body, ".obj");
+               IF ~DP.Exists(body) THEN
+                  found := FindSource(module, ".om", file);
+                  IF ~found THEN found := FindSource(module, ".mod", file) END;
+                  IF found & ~Member(pending, file) THEN DP.Append(pending, file) END;
+               END;
+            END;
+         END;
+         Streams.Release(s);
+         IF pending = NIL THEN EXIT END;
+         node := pending; found := TRUE;
+         WHILE node # NIL DO found := found & Member(last, node.word); node := node.next END;
+         IF found THEN Error("cannot compile imported module implementations") END;
+         DP.Sort(pending); Compile(pending); last := pending;
+      END;
+   END Missing;
+   PROCEDURE Convert(module, file: ARRAY OF CHAR);
+      VAR generator, converter: DP.Word;
+   BEGIN
+      COPY(module, tof);
+      IF assemblyOnly THEN Strings.Concatenate(tof, ".tof")
+      ELSE Strings.Concatenate(tof, "-mod-"); Strings.Concatenate(tof, objarch); Strings.Concatenate(tof, ".tof") END;
+      DP.Join(generator, tools, "obtofgen"); args := NIL; DP.Append(args, generator);
+      DP.Append(args, "-o"); DP.Append(args, tof); DP.Append(args, file);
+      IF ~DP.Run(args, "") THEN Process.Exit(1) END;
+      COPY(module, ofile); Strings.Concatenate(ofile, ".o");
+      IF ~assemblyOnly THEN
+         DP.Join(converter, libroot, "tof2elf"); args := NIL; DP.Append(args, converter);
+         DP.Append(args, "-arch"); DP.Append(args, arch); DP.Append(args, "-o"); DP.Append(args, ofile); DP.Append(args, tof);
+         IF ~DP.Run(args, "") THEN IF ~SysFile.Unlink(tof, RelatedEvents.null) THEN END; Process.Exit(1) END;
+         IF ~SysFile.Unlink(tof, RelatedEvents.null) THEN END;
+         DP.Append(objects, ofile);
+      END;
+   END Convert;
+   PROCEDURE Setup;
+      VAR s: Streams.Stream; ch: CHAR; pos: LONGINT; native: DP.Word;
+   BEGIN
+      DP.Executable(executable); DP.Directory(executable, tools); DP.Directory(tools, libroot);
+      IF UnixEnvironment.String("ULMOLIBDIR", path) THEN libroot := path END;
+      DP.Join(srcroot, libroot, "../../share/ulmo/src");
+      DP.Join(path, libroot, "ulmo.sources");
+      IF UnixFiles.Open(s, path, UnixFiles.read, Streams.onebuf, RelatedEvents.null) THEN
+         pos := 0;
+         WHILE Streams.ReadByte(s, ch) & (ch # 0AX) & (pos + 1 < LEN(srcroot)) DO srcroot[pos] := ch; INC(pos) END;
+         srcroot[pos] := 0X; Streams.Release(s);
+      END;
+      IF UnixEnvironment.String("ULMOSRCDIR", path) THEN srcroot := path END;
+      IF SYS.SIZE(SYS.ADDRESS) = 8 THEN arch := "amd64" ELSE arch := "i386" END;
+      SysUname.GetMachine(native);
+      IF (native = "x86_64") OR (native = "amd64") THEN
+         DP.Join(path, libroot, "amd64/ulmoc"); IF DP.Exists(path) THEN arch := "amd64" END;
+      END;
+      main := ""; mainSource := ""; output := ""; libraries := ""; loglevel := "";
+      sources := NIL; includes := NIL; objects := NIL; auto := FALSE; assemblyOnly := FALSE;
+      index := 1;
+      LOOP
+         IF index >= SysArgs.argc THEN EXIT END;
+         DP.Argument(index, word);
+         IF word[0] # "-" THEN EXIT END;
+         INC(index);
+         IF word = "--" THEN EXIT
+         ELSIF word = "-S" THEN assemblyOnly := TRUE
+         ELSIF word = "-m" THEN
+            main := ""; mainSource := ""; auto := TRUE;
+            IF index < SysArgs.argc THEN
+               DP.Argument(index, word);
+               IF Suffix(word, ".om") OR Suffix(word, ".mod") THEN mainSource := word; DP.Append(sources, word); INC(index)
+               ELSIF (word[0] # "-") & ~Suffix(word, ".od") THEN main := word; auto := FALSE; INC(index) END;
+            END;
+         ELSIF (word = "-arch") OR (word = "-o") OR (word = "-I") OR (word = "-L") OR (word = "-v") THEN
+            IF index >= SysArgs.argc THEN Usage END;
+            DP.Argument(index, path); INC(index);
+            IF word = "-arch" THEN arch := path ELSIF word = "-o" THEN output := path
+            ELSIF word = "-I" THEN DP.Append(includes, path) ELSIF word = "-L" THEN libraries := path
+            ELSE loglevel := path END;
+         ELSIF (word[1] = "I") OR (word[1] = "L") THEN
+            Strings.PartCopy(path, 0, word, 2);
+            IF word[1] = "I" THEN DP.Append(includes, path) ELSE libraries := path END;
+         ELSE Usage END;
+      END;
+      WHILE index < SysArgs.argc DO DP.Argument(index, word); DP.Append(sources, word); INC(index) END;
+      IF sources = NIL THEN Usage END;
+      IF (arch # "amd64") & (arch # "i386") THEN Error("unsupported architecture") END;
+      IF arch = "amd64" THEN objarch := "AMD64" ELSE objarch := "I386" END;
+      DP.Join(tools, libroot, arch); IF libraries = "" THEN libraries := tools END;
+      DP.Join(path, srcroot, "rtl/"); Strings.Concatenate(path, arch); IF DP.Exists(path) THEN DP.Append(includes, path) END;
+      DP.Join(path, srcroot, "rtl"); DP.Append(includes, path);
+      DP.Join(path, srcroot, "lib"); DP.Append(includes, path);
+      DP.Join(path, srcroot, "compiler"); DP.Append(includes, path);
+   END Setup;
+   PROCEDURE Build;
+      VAR node, privateFiles: DP.Arguments; s: Streams.Stream; entry: UnixDirectories.Entry; module, ext, file, target: DP.Word;
+   BEGIN
+      IF auto THEN
+         IF mainSource = "" THEN
+            node := sources;
+            WHILE node # NIL DO
+               IF Suffix(node.word, ".om") OR Suffix(node.word, ".mod") THEN
+                  IF mainSource # "" THEN Error("several module sources; select one with -m Main or -m Main.om") END;
+                  mainSource := node.word;
+               END; node := node.next;
+            END;
+         END;
+         IF mainSource = "" THEN Usage END; Header(mainSource, main);
+      END;
+      node := sources;
+      WHILE node # NIL DO
+         IF ~DP.Exists(node.word) THEN Error(node.word) END;
+         Parts(node.word, module, ext);
+         IF (ext = "om") OR (ext = "mod") THEN
+            DP.Directory(node.word, directory); Source(directory, module, ".od", file);
+            IF ~DP.Exists(file) & ~FindSource(module, ".od", file) THEN
+               Source(".", module, ".od", file);
+               IF ~UnixFiles.Open(s, file, UnixFiles.write + UnixFiles.create, Streams.onebuf, RelatedEvents.null) THEN Error(file) END;
+               BasicWrite.StringS(s, "DEFINITION "); BasicWrite.StringS(s, module); BasicWrite.LineS(s, ";");
+               BasicWrite.StringS(s, "END "); BasicWrite.StringS(s, module); BasicWrite.LineS(s, ".");
+               IF ~Streams.Close(s) THEN Error(file) END;
+            END;
+         END;
+         node := node.next;
+      END;
+      IF (output # "") & (main = "") THEN Parts(output, main, ext) END;
+      IF (main # "") & (output = "") THEN output := main END;
+      Compile(sources);
+      IF (main # "") & ~assemblyOnly THEN Missing END;
+      node := sources;
+      WHILE node # NIL DO
+         Parts(node.word, module, ext);
+         IF (ext = "om") OR (ext = "mod") THEN
+            target := module; Strings.Concatenate(target, ".o");
+            IF ~Member(objects, target) THEN
+               file := module; Strings.Concatenate(file, "-mod-"); Strings.Concatenate(file, objarch); Strings.Concatenate(file, ".obj");
+               IF ~DP.Exists(file) THEN DP.Join(path, libraries, "obj"); DP.Join(path, path, file); file := path END;
+               Convert(module, file);
+               BasicWrite.StringS(Streams.stdout, "ulmo: "); BasicWrite.StringS(Streams.stdout, node.word);
+               BasicWrite.StringS(Streams.stdout, " -> ");
+               IF assemblyOnly THEN BasicWrite.LineS(Streams.stdout, tof) ELSE BasicWrite.LineS(Streams.stdout, ofile) END;
+            END;
+         END;
+         node := node.next;
+      END;
+      IF assemblyOnly OR (main = "") THEN RETURN END;
+      IF ~UnixDirectories.Open(s, ".", RelatedEvents.null) THEN Error("cannot read current directory") END;
+      privateFiles := NIL;
+      WHILE Streams.Read(s, entry) DO
+         file := "-mod-"; Strings.Concatenate(file, objarch); Strings.Concatenate(file, ".obj");
+         IF Suffix(entry.name, file) THEN
+            DP.Append(privateFiles, entry.name);
+         END;
+      END;
+      Streams.Release(s);
+      DP.Sort(privateFiles); node := privateFiles;
+      WHILE node # NIL DO
+         file := "-mod-"; Strings.Concatenate(file, objarch); Strings.Concatenate(file, ".obj");
+         module := node.word; module[Strings.Len(module)-Strings.Len(file)] := 0X;
+         target := module; Strings.Concatenate(target, ".o");
+         IF ~Member(objects, target) THEN Convert(module, node.word) END;
+         node := node.next;
+      END;
+      IF ~UnixEnvironment.String("ULMOLINK", path) THEN DP.Join(path, tools, "oblink") END;
+      args := NIL; DP.Append(args, path); DP.Append(args, arch); DP.Append(args, tools); DP.Append(args, output); DP.Append(args, main);
+      node := objects; WHILE node # NIL DO DP.Append(args, node.word); node := node.next END;
+      DP.Join(path, libraries, "libcompiler.a"); DP.Append(args, path);
+      DP.Join(path, libraries, "libo.a"); DP.Append(args, path);
+      DP.Join(path, libraries, "librtl.a"); DP.Append(args, path);
+      IF ~DP.Run(args, "") THEN Process.Exit(1) END;
+      BasicWrite.StringS(Streams.stdout, "ulmo: linked -> "); BasicWrite.LineS(Streams.stdout, output);
+   END Build;
+BEGIN
+   Setup; Build;
+END UlmoDriver.

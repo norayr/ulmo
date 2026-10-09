@@ -81,15 +81,15 @@ B := build/$(ARCH)
 ROOT := build/root
 ROOTARCH := $(ROOT)/lib/ulmo/$(ARCH)
 TOF2ELF := $(ROOT)/lib/ulmo/tof2elf
-GENOBRTS := src/util/genobrts/genobrts-$(ARCH)
 LDSCRIPT := src/util/oblink/oberon-$(ARCH).ld
+LINKER ?= $(B)/stage2/oblink
 
 # shell command linking the main module $$main into the program $$prog
 # with the libraries in the directory $$libs
 LINK = echo "  LINK    $$prog" && \
 	AS='$(AS)' LD='$(LD)' LDFLAGS='$(LDFLAGS)' \
-	GENOBRTS='$(GENOBRTS)' LDSCRIPT='$(LDSCRIPT)' \
-	sh src/util/oblink/link-static.sh $(ARCH) $$libs $$prog $$main \
+	LDSCRIPT='$(LDSCRIPT)' \
+	$(LINKER) $(ARCH) $$libs $$prog $$main \
 		$$libs/libcompiler.a $$libs/libo.a $$libs/librtl.a
 
 .PHONY: all stage1 stage2 stage3 root check check-runtime check-cli install uninstall clean cdb-tools
@@ -104,15 +104,16 @@ all: root
 
 stage1: $(TOF2ELF)
 	@$(MAKE) --no-print-directory stage STAGE=1 \
-		OC=bootstrap/$(ARCH)/ulmoc TOFGEN=bootstrap/$(ARCH)/obtofgen
+		OC=bootstrap/$(ARCH)/ulmoc TOFGEN=bootstrap/$(ARCH)/obtofgen \
+		LINKER=bootstrap/$(ARCH)/oblink
 
 stage2: stage1
 	@$(MAKE) --no-print-directory stage STAGE=2 \
-		OC=$(B)/stage1/ulmoc TOFGEN=$(B)/stage1/obtofgen
+		OC=$(B)/stage1/ulmoc TOFGEN=$(B)/stage1/obtofgen LINKER=$(B)/stage1/oblink
 
 stage3: stage2
 	@$(MAKE) --no-print-directory stage STAGE=3 \
-		OC=$(B)/stage2/ulmoc TOFGEN=$(B)/stage2/obtofgen
+		OC=$(B)/stage2/ulmoc TOFGEN=$(B)/stage2/obtofgen LINKER=$(B)/stage2/oblink
 
 $(TOF2ELF): src/util/tof2elf/tof2elf.c
 	@mkdir -p $(@D)
@@ -122,15 +123,15 @@ root: stage2
 	@mkdir -p $(ROOT)/bin $(ROOTARCH) $(ROOT)/share/ulmo
 	@# remove first: the old programs may still be running
 	@rm -f $(ROOTARCH)/ulmoc $(ROOTARCH)/obtofgen $(ROOTARCH)/genobrts \
-		$(ROOT)/bin/ulmo
+		$(ROOTARCH)/ulmo $(ROOTARCH)/oblink $(ROOT)/bin/ulmo
 	@cp -p $(B)/stage2/ulmoc $(B)/stage2/obtofgen $(B)/stage2/lib/*.a \
 		$(LDSCRIPT) $(ROOTARCH)/
 	@rm -rf $(ROOTARCH)/obj
 	@mkdir -p $(ROOTARCH)/obj
 	@cp -p $(B)/stage2/obj/*.obj $(ROOTARCH)/obj/
-	@cp -p $(GENOBRTS) $(ROOTARCH)/genobrts
-	@cp -p src/util/oblink/link-static.sh $(ROOTARCH)/oblink
-	@cp -p src/util/ulmo/ulmo.sh $(ROOT)/bin/ulmo
+	@cp -p $(B)/stage2/ulmo $(B)/stage2/genobrts $(B)/stage2/oblink $(ROOTARCH)/
+	@ln -sfn ../lib/ulmo/$(ARCH)/ulmo $(ROOT)/bin/ulmo
+	@printf '%s\n' '$(CURDIR)/src' >$(ROOT)/lib/ulmo/ulmo.sources
 	@chmod 755 $(ROOT)/bin/ulmo $(ROOTARCH)/genobrts $(ROOTARCH)/oblink
 	@ln -sfn ../../../../src $(ROOT)/share/ulmo/src
 
@@ -142,7 +143,7 @@ MOD_OBJ := $(foreach m,$(call modules,$(ALL_SRC)),$(S)/obj/$(m)-mod-$(OBJARCH).o
 objects = $(addprefix $(S)/obj/,$(addsuffix .o,$(call modules,$(1))))
 
 .PHONY: stage
-stage: $(S)/ulmoc $(S)/obtofgen
+stage: $(S)/ulmoc $(S)/obtofgen $(S)/ulmo $(S)/genobrts $(S)/oblink
 	@echo "stage $(STAGE) ($(ARCH)): ulmoc $$(md5sum < $(S)/ulmoc | cut -c1-32)"
 
 # objects compiled by another compiler are not reused
@@ -179,13 +180,15 @@ $(S)/lib/%.a:
 	@rm -f $@
 	@$(AR) rcD $@ $^
 
-$(S)/ulmoc: $(S)/lib/libcompiler.a $(S)/lib/libo.a $(S)/lib/librtl.a \
-	$(GENOBRTS) $(LDSCRIPT) src/util/oblink/link-static.sh
+$(S)/ulmoc: $(S)/lib/libcompiler.a $(S)/lib/libo.a $(S)/lib/librtl.a $(LDSCRIPT) $(LINKER)
 	@main=Ulmo prog=$@ libs=$(S)/lib; $(LINK)
 
-$(S)/obtofgen: $(S)/lib/libcompiler.a $(S)/lib/libo.a $(S)/lib/librtl.a \
-	$(GENOBRTS) $(LDSCRIPT) src/util/oblink/link-static.sh
+$(S)/obtofgen: $(S)/lib/libcompiler.a $(S)/lib/libo.a $(S)/lib/librtl.a $(LDSCRIPT) $(LINKER)
 	@main=$(TOFGEN_MAIN) prog=$@ libs=$(S)/lib; $(LINK)
+
+$(S)/ulmo $(S)/genobrts $(S)/oblink: $(S)/lib/libcompiler.a $(S)/lib/libo.a $(S)/lib/librtl.a $(LDSCRIPT) $(LINKER)
+	@case '$(@F)' in ulmo) main=UlmoDriver;; genobrts) main=RuntimeGenerator;; oblink) main=NativeLinker;; esac; \
+	prog=$@ libs=$(S)/lib; $(LINK)
 endif
 
 # === check ================================================================
@@ -193,6 +196,9 @@ endif
 check: all stage3
 	@cmp $(B)/stage2/ulmoc $(B)/stage3/ulmoc
 	@cmp $(B)/stage2/obtofgen $(B)/stage3/obtofgen
+	@cmp $(B)/stage2/ulmo $(B)/stage3/ulmo
+	@cmp $(B)/stage2/genobrts $(B)/stage3/genobrts
+	@cmp $(B)/stage2/oblink $(B)/stage3/oblink
 	@echo "self-hosting: stages 2 and 3 are identical"
 	@rm -rf $(B)/test
 	@mkdir -p $(B)/test
@@ -212,13 +218,11 @@ check-cli: all
 install: all
 	$(INSTALL) -d $(DESTDIR)$(BINDIR) $(DESTDIR)$(ULMOLIBDIR)/$(ARCH) \
 		$(DESTDIR)$(ULMOSRCDIR)
-	sed -e 's|^ULMOLIBDIR=.*|ULMOLIBDIR=$${ULMOLIBDIR:-$(ULMOLIBDIR)}|' \
-		-e 's|^ULMOSRCDIR=.*|ULMOSRCDIR=$${ULMOSRCDIR:-$(ULMOSRCDIR)}|' \
-		src/util/ulmo/ulmo.sh >$(DESTDIR)$(BINDIR)/ulmo
-	chmod 755 $(DESTDIR)$(BINDIR)/ulmo
+	ln -sfn $(ULMOLIBDIR)/$(ARCH)/ulmo $(DESTDIR)$(BINDIR)/ulmo
 	$(INSTALL) -m 755 $(TOF2ELF) $(DESTDIR)$(ULMOLIBDIR)/tof2elf
 	$(INSTALL) -m 755 $(ROOTARCH)/ulmoc $(ROOTARCH)/obtofgen \
-		$(ROOTARCH)/genobrts $(ROOTARCH)/oblink $(DESTDIR)$(ULMOLIBDIR)/$(ARCH)/
+		$(ROOTARCH)/ulmo $(ROOTARCH)/genobrts $(ROOTARCH)/oblink $(DESTDIR)$(ULMOLIBDIR)/$(ARCH)/
+	printf '%s\n' '$(ULMOSRCDIR)' >$(DESTDIR)$(ULMOLIBDIR)/ulmo.sources
 	$(INSTALL) -m 644 $(ROOTARCH)/oberon-$(ARCH).ld $(ROOTARCH)/librtl.a \
 		$(ROOTARCH)/libo.a $(ROOTARCH)/libcompiler.a \
 		$(DESTDIR)$(ULMOLIBDIR)/$(ARCH)/
@@ -230,7 +234,7 @@ install: all
 # architectures and removed with the last one
 uninstall:
 	rm -rf $(DESTDIR)$(ULMOLIBDIR)/$(ARCH)
-	@if [ -z "$$(ls $(DESTDIR)$(ULMOLIBDIR) | grep -v '^tof2elf$$')" ]; then \
+	@if [ -z "$$(ls $(DESTDIR)$(ULMOLIBDIR) | grep -Ev '^(tof2elf|ulmo.sources)$$')" ]; then \
 		echo "rm -rf $(DESTDIR)$(ULMOLIBDIR) $(DESTDIR)$(DATADIR)/ulmo" \
 			"$(DESTDIR)$(BINDIR)/ulmo"; \
 		rm -rf $(DESTDIR)$(ULMOLIBDIR) $(DESTDIR)$(DATADIR)/ulmo \

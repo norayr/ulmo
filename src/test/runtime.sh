@@ -32,10 +32,11 @@ for test in $tests; do
          -I "$root/src/rtl/$arch" -I "$root/src/rtl" -I "$root/src/lib" \
          -L "$root/build/root/lib/ulmo/$arch/obj" "$source"
    done
-   sh "${ULMO:-$root/build/root/bin/ulmo}" -arch "$arch" -m "$test" "$root/src/test/$test.om"
+   "${ULMO:-$root/build/root/bin/ulmo}" -arch "$arch" -m "$test" "$root/src/test/$test.om"
    case "$test" in
       RuntimeTimezone|RuntimeLocalTimezone)
-         perl "$root/src/test/timezones.pl"
+         "${ULMO:-$root/build/root/bin/ulmo}" -arch "$arch" -m "$root/src/test/TimezoneFixtures.om" >fixtures-build.log
+         ./TimezoneFixtures
          TZ="$work/$test/long-zone-name" timeout -k 2 30 "./$test"
          ;;
       HelloOut)

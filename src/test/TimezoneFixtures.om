@@ -1,0 +1,37 @@
+MODULE TimezoneFixtures;
+   IMPORT BasicWrite, Process, RelatedEvents, Streams, UnixFiles;
+   VAR s: Streams.Stream; index: INTEGER;
+   PROCEDURE Byte(value: LONGINT);
+   BEGIN IF ~Streams.WriteByte(s, CHR(value MOD 256)) THEN Process.Exit(1) END END Byte;
+   PROCEDURE Long(value: LONGINT);
+   BEGIN
+      Byte(value DIV 1000000H); Byte(value DIV 10000H);
+      Byte(value DIV 100H); Byte(value);
+   END Long;
+   PROCEDURE Open(name: ARRAY OF CHAR; transitions, types, chars, standard: LONGINT);
+      VAR i: INTEGER;
+   BEGIN
+      IF ~UnixFiles.Open(s, name, UnixFiles.write + UnixFiles.create, Streams.onebuf, RelatedEvents.null) THEN Process.Exit(1) END;
+      BasicWrite.StringS(s, "TZif"); i := 0; WHILE i < 16 DO Byte(0); INC(i) END;
+      Long(0); Long(standard); Long(0); Long(transitions); Long(types); Long(chars);
+   END Open;
+   PROCEDURE Type(offset, dst, name: LONGINT);
+   BEGIN Long(offset); Byte(dst); Byte(name) END Type;
+   PROCEDURE Name(text: ARRAY OF CHAR);
+   BEGIN BasicWrite.StringS(s, text); Byte(0) END Name;
+   PROCEDURE Close;
+   BEGIN IF ~Streams.Close(s) THEN Process.Exit(1) END END Close;
+BEGIN
+   Open("long-zone-name", 2, 2, 8, 2);
+   Long(1000000); Long(2000000); Byte(1); Byte(0);
+   Type(14400,0,0); Type(18000,1,4); Name("STD"); Name("DST"); Byte(1); Byte(0); Close;
+   Open("negative-zone",0,1,4,0); Type(-3600,0,0); Name("NEG"); Close;
+   Open("unsigned-name",0,1,131,0); Type(7200,0,128);
+   index := 0; WHILE index < 128 DO Byte(ORD("x")); INC(index) END; Name("HI"); Close;
+   Open("unsigned-type",1,129,4,0); Long(1000); Byte(128);
+   index := 0; WHILE index < 128 DO Type(0,0,0); INC(index) END; Type(14400,0,0); Name("IDX"); Close;
+   Open("bad-type",2,2,8,2); Long(1000000); Long(2000000); Byte(255); Byte(0);
+   Type(14400,0,0); Type(18000,1,4); Name("STD"); Name("DST"); Byte(1); Byte(0); Close;
+   IF ~UnixFiles.Open(s,"bad-header",UnixFiles.write+UnixFiles.create,Streams.onebuf,RelatedEvents.null) THEN Process.Exit(1) END;
+   BasicWrite.StringS(s,"not a timezone file"); Close;
+END TimezoneFixtures.
