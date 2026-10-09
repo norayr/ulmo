@@ -1,0 +1,112 @@
+MODULE RuntimeStarts;
+   IMPORT BasicWrite, Streams;
+
+   PROCEDURE Generate(s: Streams.Stream; amd64, timezones: BOOLEAN; main: ARRAY OF CHAR);
+      PROCEDURE Line(text: ARRAY OF CHAR);
+      BEGIN BasicWrite.LineS(s, text) END Line;
+      PROCEDURE Call(module, suffix: ARRAY OF CHAR);
+      BEGIN
+         BasicWrite.StringS(s, " call "); BasicWrite.StringS(s, module);
+         BasicWrite.StringS(s, "___"); BasicWrite.LineS(s, suffix);
+      END Call;
+      PROCEDURE Runtime(suffix: ARRAY OF CHAR);
+      BEGIN
+         Call("Coroutines", suffix); Call("Process", suffix); Call("RTErrors", suffix);
+         Call("Storage", suffix); Call("SysArgs", suffix); Call("SysInterrupts", suffix);
+         Call("SysModules", suffix); Call("SysSegments", suffix);
+      END Runtime;
+      PROCEDURE Unix(suffix: ARRAY OF CHAR);
+      BEGIN
+         Call("UnixClock", suffix); Call("UnixFiles", suffix); Call("UnixProcess", suffix);
+         IF timezones THEN Call("UnixTimezones", suffix) END;
+      END Unix;
+   BEGIN
+      Line(".global _rt__sigreturn"); Line("_rt__sigreturn:");
+      IF amd64 THEN
+         Line(" movq $15, %rax"); Line(" syscall"); Line(" xorq %rax, %rax"); Line(" movq (%rax), %rax");
+      ELSE
+         Line(" movl $0xad, %eax"); Line(" int $0x80"); Line(" nop"); Line(" xor %eax, %eax"); Line(" movl $0x0, (%eax)");
+      END;
+      Line(".global _entry"); Line("_entry:");
+      Runtime("startup"); Unix("startup"); Call("SysStorage", "startup"); Call("SysMain", "startup"); Call(main, "startup");
+      IF amd64 THEN
+         Line(" movq (%rsp), %rax"); Line(" movl %eax, SysArgs_argc(%rip)");
+         Line(" leaq 8(%rsp), %rbx"); Line(" movq %rbx, SysArgs_argv(%rip)");
+         Line(" leaq 8(%rbx, %rax, 8), %rax"); Line(" movq %rax, SysArgs_environ(%rip)");
+         Line("envloop:"); Line(" cmpq $0, (%rax)"); Line(" je envend"); Line(" addq $8, %rax"); Line(" jmp envloop");
+         Line("envend:"); Line(" addq $8, %rax"); Line(" movq %rax, SysArgs_auxv(%rip)");
+         Line(" xorq %rdi, %rdi"); Line(" movq $12, %rax"); Line(" syscall"); Line(" movq %rax, %rbx");
+         Line(" addq $0x40ffff, %rbx"); Line(" andq $-65536, %rbx"); Line(" movq %rbx, %rdi");
+         Line(" movq $12, %rax"); Line(" syscall"); Line(" movq %rax, Storage_end(%rip)"); Line(" movl $0x100000, Storage_left(%rip)");
+      ELSE
+         Line(" movl (%esp), %eax"); Line(" movl %eax, SysArgs_argc"); Line(" lea 4(%esp), %ebx"); Line(" movl %ebx, SysArgs_argv");
+         Line(" lea 4(%ebx, %eax, 4), %eax"); Line(" movl %eax, SysArgs_environ");
+         Line("envloop:"); Line(" cmpl $0, (%eax)"); Line(" je envend"); Line(" addl $4, %eax"); Line(" jmp envloop");
+         Line("envend:"); Line(" addl $4, %eax"); Line(" movl %eax, SysArgs_auxv");
+         Line(" xor %ebx, %ebx"); Line(" movl $45, %eax"); Line(" int $0x80"); Line(" mov %eax, %ebx");
+         Line(" addl $0x10ffff, %ebx"); Line(" andl $0xffff0000, %ebx"); Line(" movl $45, %eax"); Line(" int $0x80");
+         Line(" mov %eax, Storage_end"); Line(" movl $0x100000, Storage_left");
+      END;
+      Runtime("init");
+      IF amd64 THEN
+         Line(" movq SysArgs_auxv(%rip), %rbx"); Line(" movq $0x1000, %rsi"); Line(" xorq %rdi, %rdi");
+         Line("_auxvloop:"); Line(" cmpq $0, (%rbx)"); Line(" je _endauxvloop"); Line(" cmpq $0x21, (%rbx)");
+         Line(" jne _auxvbase"); Line(" movq 8(%rbx), %rdi"); Line(" jmp _nextauxv");
+         Line("_auxvbase:"); Line(" cmpq $3, (%rbx)"); Line(" jne _nextauxv"); Line(" movq 8(%rbx), %rsi");
+         Line("_nextauxv:"); Line(" addq $16, %rbx"); Line(" jmp _auxvloop");
+         Line("_endauxvloop:"); Line(" movq %rsi, %rcx"); Line(" andq $-4096, %rsi"); Line(" cmpq $0, %rsi"); Line(" jne _skip3");
+         Line(" movq $0x1000, %rsi"); Line(" xorq %rcx, %rcx"); Line("_skip3:"); Line(" cmpq $0, %rcx"); Line(" je _nophdr");
+         Line(" movq 0x28(%rcx), %rax"); Line(" addq %rsi, %rax"); Line(" addq $0xfff, %rax");
+         Line(" andq $-4096, %rax"); Line(" subq %rsi, %rax"); Line(" jmp _havebinsize");
+         Line("_nophdr:"); Line(" movq $0x100000, %rax"); Line("_havebinsize:");
+         Line(" subq $24, %rsp"); Line(" movq %rsi, 0(%rsp)"); Line(" movq %rax, 8(%rsp)"); Line(" movb $0, 16(%rsp)");
+         Line(" call SysSegments_Register"); Line(" addq $24, %rsp");
+         Line(" subq $24, %rsp"); Line(" movq $0, 0(%rsp)"); Line(" movq $0x10000, 8(%rsp)"); Line(" movb $0, 16(%rsp)");
+         Line(" call SysSegments_Register"); Line(" addq $24, %rsp");
+         Line(" movq Storage_end(%rip), %rax"); Line(" subq $0x100000, %rax");
+         Line(" subq $24, %rsp"); Line(" movq %rax, 0(%rsp)"); Line(" movq $0x100000, 8(%rsp)"); Line(" movb $0, 16(%rsp)");
+         Line(" call SysSegments_Register"); Line(" addq $24, %rsp");
+         Line(" subq $24, %rsp"); Line(" movq $-1, 0(%rsp)"); Line(" movq %rsp, %rdx");
+         Line(" addq $0x0fffffff, %rdx"); Line(" andq $-268435456, %rdx"); Line(" movq %rdx, %rax");
+         Line(" subq %rsp, %rax"); Line(" andq $-4096, %rax"); Line(" addq $0x00100000, %rax");
+         Line(" movq %rax, 8(%rsp)"); Line(" movq %rdx, 0(%rsp)"); Line(" movb $-1, 16(%rsp)");
+         Line(" call SysSegments_Register"); Line(" addq $24, %rsp");
+         Line(" cmpq $0, %rdi"); Line(" je _skip2"); Line(" cmpq %rsp, %rdi"); Line(" jae _skip2");
+         Line(" cmpq Storage_end(%rip), %rsi"); Line(" jae _dosysinfo"); Line(" cmpq %rsi, %rdi"); Line(" jb _dosysinfo"); Line(" jmp _skip2");
+         Line("_dosysinfo:"); Line(" subq $24, %rsp"); Line(" movq %rdi, 0(%rsp)");
+         Line(" movq $0x1000, 8(%rsp)"); Line(" movb $0, 16(%rsp)"); Line(" call SysSegments_Register"); Line(" addq $24, %rsp");
+         Line("_skip2:"); Line(" call SysStorage___init"); Line(" subq $24, %rsp");
+         Line(" movq $0, 16(%rsp)"); Line(" leaq 16(%rsp), %rax"); Line(" movq %rax, 0(%rsp)");
+         Line(" movl $0x10000, 8(%rsp)"); Line(" movb $0, 12(%rsp)"); Line(" call Storage_AllocateStack");
+         Line(" movq 16(%rsp), %rax"); Line(" addq $24, %rsp"); Line(" subq $24, %rsp");
+         Line(" movq %rax, 0(%rsp)"); Line(" movl $0, 8(%rsp)"); Line(" movq $0x10000, 16(%rsp)");
+         Line(" movq %rsp, %rdi"); Line(" xorq %rsi, %rsi"); Line(" movq $131, %rax"); Line(" syscall"); Line(" addq $24, %rsp");
+      ELSE
+         Line(" movl SysArgs_auxv,%ebx"); Line(" movl $0x1000,%esi"); Line(" movl $0, %edi");
+         Line("_auxvloop:"); Line(" cmpl $0,(%ebx)"); Line(" je _endauxvloop"); Line(" cmpl $0x21,(%ebx)"); Line(" jne _auxvbase");
+         Line(" movl 0x4(%ebx),%edi"); Line(" jmp _nextauxv"); Line("_auxvbase:");
+         Line(" cmpl $3,(%ebx)"); Line(" jne _nextauxv"); Line(" movl 0x4(%ebx),%esi");
+         Line("_nextauxv:"); Line(" addl $8,%ebx"); Line(" jmp _auxvloop"); Line("_endauxvloop:");
+         Line(" andl $0xfffff000,%esi"); Line(" cmpl $0,%esi"); Line(" jne _skip3"); Line(" movl $0x1000,%esi"); Line("_skip3:");
+         Line(" movl Storage_end,%eax"); Line(" subl $0x100000,%eax"); Line(" subl %esi,%eax");
+         Line(" pushl $0"); Line(" pushl %eax"); Line(" pushl %esi"); Line(" call SysSegments_Register");
+         Line(" movl $0,0x8(%esp)"); Line(" movl $0x10000,0x4(%esp)"); Line(" movl $0,(%esp)"); Line(" call SysSegments_Register");
+         Line(" movl Storage_end,%eax"); Line(" subl $0x100000,%eax"); Line(" movl $0x100000,0x4(%esp)");
+         Line(" movl %eax,(%esp)"); Line(" movl $0,0x8(%esp)"); Line(" call SysSegments_Register");
+         Line(" movl $-1,0x8(%esp)"); Line(" movl %esp,%edx"); Line(" addl $0x0fffffff,%edx");
+         Line(" andl $0xf0000000,%edx"); Line(" movl %edx,%eax"); Line(" subl %esp,%eax");
+         Line(" andl $0xfffff000,%eax"); Line(" addl $0x00100000,%eax"); Line(" movl %eax,0x4(%esp)");
+         Line(" movl %edx,(%esp)"); Line(" call SysSegments_Register"); Line(" orl %edx,%edx"); Line(" jz _skip");
+         Line(" movl $0,0x8(%esp)"); Line(" movl %edx,(%esp)"); Line(" negl %edx"); Line(" movl %edx,0x4(%esp)");
+         Line(" call SysSegments_Register"); Line("_skip:"); Line(" cmpl $0,%edi"); Line(" je _skip2");
+         Line(" cmpl %esp,%edi"); Line(" jae _skip2"); Line(" cmpl Storage_end,%esi"); Line(" jae _dosysinfo");
+         Line(" cmpl %esi,%edi"); Line(" jb _dosysinfo"); Line(" jmp _skip2"); Line("_dosysinfo:");
+         Line(" movl $0,0x8(%esp)"); Line(" movl $0x1000,0x4(%esp)"); Line(" movl %edi,(%esp)"); Line(" call SysSegments_Register");
+         Line("_skip2:"); Line(" addl $0xc,%esp"); Line(" call SysStorage___init"); Line(" pushl $0"); Line(" movl %esp,%eax");
+         Line(" pushl $0"); Line(" pushl $0x10000"); Line(" pushl %eax"); Line(" call Storage_AllocateStack");
+         Line(" addl $0xc,%esp"); Line(" popl %eax"); Line(" pushl $0x10000"); Line(" pushl $0"); Line(" pushl %eax");
+         Line(" movl %esp,%ebx"); Line(" movl $0,%ecx"); Line(" movl $186,%eax"); Line(" int $0x80"); Line(" addl $0xc,%esp");
+      END;
+      Unix("init"); Call("SysMain", "init"); Line(" call Process_Terminate"); Line(" hlt");
+   END Generate;
+END RuntimeStarts.

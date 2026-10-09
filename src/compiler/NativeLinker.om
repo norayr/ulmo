@@ -1,0 +1,94 @@
+MODULE NativeLinker;
+   IMPORT BasicWrite, DP := DriverProcesses, Process, RelatedEvents, RuntimeStarts,
+      Streams, Strings, SysArgs, SysFile, UnixEnvironment, UnixFiles;
+   VAR arch, tools, output, main, assembler, linker, script, base, assembly, object, trace, help, flags, word: DP.Word;
+      inputs, args: DP.Arguments; index: INTEGER; amd64, timezones, quiet: BOOLEAN;
+
+   PROCEDURE Remove;
+   BEGIN
+      IF ~SysFile.Unlink(assembly, RelatedEvents.null) THEN END;
+      IF ~SysFile.Unlink(object, RelatedEvents.null) THEN END;
+      IF ~SysFile.Unlink(trace, RelatedEvents.null) THEN END;
+      IF ~SysFile.Unlink(help, RelatedEvents.null) THEN END;
+   END Remove;
+   PROCEDURE Fail;
+   BEGIN Remove; Process.Exit(1) END Fail;
+   PROCEDURE Contains(file, text: ARRAY OF CHAR; relay: BOOLEAN) : BOOLEAN;
+      VAR s: Streams.Stream; line: DP.Word; ch: CHAR; pos, i, j: LONGINT; found, match: BOOLEAN;
+   BEGIN
+      found := FALSE;
+      IF ~UnixFiles.Open(s, file, UnixFiles.read, Streams.onebuf, RelatedEvents.null) THEN RETURN FALSE END;
+      LOOP
+         pos := 0;
+         LOOP
+            IF ~Streams.ReadByte(s, ch) THEN EXIT END;
+            IF ch = 0AX THEN EXIT END;
+            IF pos + 1 < LEN(line) THEN line[pos] := ch; INC(pos) END;
+         END;
+         line[pos] := 0X; i := 0; match := FALSE;
+         WHILE (text[0] # 0X) & (i < pos) & ~match DO
+            j := 0;
+            WHILE (text[j] # 0X) & (i+j < pos) & (line[i+j] = text[j]) DO INC(j) END;
+            match := text[j] = 0X; INC(i);
+         END;
+         found := found OR match;
+         IF relay & ~match & (pos > 0) THEN BasicWrite.LineS(Streams.stderr, line) END;
+         IF s.eof THEN EXIT END;
+      END;
+      Streams.Release(s); RETURN found
+   END Contains;
+   PROCEDURE Assemble;
+      VAR s: Streams.Stream;
+   BEGIN
+      IF ~UnixFiles.Open(s, assembly, UnixFiles.write + UnixFiles.create, Streams.onebuf, RelatedEvents.null) THEN Fail END;
+      RuntimeStarts.Generate(s, amd64, timezones, main);
+      IF ~Streams.Close(s) THEN Fail END;
+      args := NIL; DP.Append(args, assembler);
+      IF amd64 THEN DP.Append(args, "--64") ELSE DP.Append(args, "--32") END;
+      DP.Append(args, "-o"); DP.Append(args, object); DP.Append(args, assembly);
+      IF ~DP.Run(args, "") THEN Fail END;
+   END Assemble;
+   PROCEDURE Link(probe: BOOLEAN);
+      VAR node: DP.Arguments;
+   BEGIN
+      args := NIL; DP.Append(args, linker); DP.Append(args, "-T"); DP.Append(args, script);
+      DP.Append(args, "-m");
+      IF amd64 THEN DP.Append(args, "elf_x86_64") ELSE DP.Append(args, "elf_i386") END;
+      IF quiet THEN DP.Append(args, "--no-warn-rwx-segments") END;
+      DP.Words(args, flags);
+      IF probe THEN DP.Append(args, "--trace-symbol=Timezones___startup") END;
+      DP.Append(args, "-o"); DP.Append(args, output); DP.Append(args, object);
+      node := inputs; WHILE node # NIL DO DP.Append(args, node.word); node := node.next END;
+      IF probe THEN
+         IF ~DP.Run(args, trace) THEN
+            IF Contains(trace, "", TRUE) THEN END; Fail;
+         END;
+      ELSE IF ~DP.Run(args, "") THEN Fail END END;
+   END Link;
+BEGIN
+   IF SysArgs.argc < 6 THEN
+      BasicWrite.LineS(Streams.stderr, "Usage: oblink arch tooldir output main object-or-library..."); Process.Exit(1);
+   END;
+   DP.Argument(1, arch); DP.Argument(2, tools);
+   DP.Argument(3, output); DP.Argument(4, main);
+   IF (arch # "amd64") & (arch # "i386") THEN Process.Exit(1) END;
+   amd64 := arch = "amd64";
+   IF ~UnixEnvironment.String("AS", assembler) THEN assembler := "as" END;
+   IF ~UnixEnvironment.String("LD", linker) THEN linker := "ld" END;
+   IF ~UnixEnvironment.String("LDFLAGS", flags) THEN flags := "" END;
+   IF ~UnixEnvironment.String("LDSCRIPT", script) THEN
+      DP.Join(script, tools, "oberon-"); Strings.Concatenate(script, arch); Strings.Concatenate(script, ".ld");
+   END;
+   base := output; Strings.Concatenate(base, ".start");
+   assembly := base; Strings.Concatenate(assembly, ".s"); object := base; Strings.Concatenate(object, ".o");
+   trace := base; Strings.Concatenate(trace, ".trace"); help := base; Strings.Concatenate(help, ".help");
+   inputs := NIL; index := 5;
+   WHILE index < SysArgs.argc DO DP.Argument(index, word); DP.Append(inputs, word); INC(index) END;
+   args := NIL; DP.Append(args, linker); DP.Append(args, "--help");
+   quiet := DP.Capture(args, help, "") & Contains(help, "--no-warn-rwx-segments", FALSE);
+   timezones := FALSE; Assemble; Link(TRUE);
+   timezones := Contains(trace, ": definition of Timezones___startup", FALSE);
+   IF Contains(trace, "Timezones___startup", TRUE) THEN END;
+   IF timezones THEN Assemble; Link(FALSE) END;
+   Remove;
+END NativeLinker.

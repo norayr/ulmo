@@ -1,0 +1,161 @@
+MODULE DriverProcesses;
+   IMPORT BasicWrite, RelatedEvents, Storage, Streams, Strings, SYS := SYSTEM,
+      SysArgs, SysFile, SysIO, SysProcess, UnixEnvironment;
+   TYPE
+      Word = ARRAY 4096 OF CHAR;
+      Arguments = POINTER TO ArgumentsRec;
+      ArgumentsRec = RECORD word: Word; next: Arguments END;
+
+   PROCEDURE Append(VAR args: Arguments; word: ARRAY OF CHAR);
+      VAR node, last: Arguments;
+   BEGIN
+      NEW(node); COPY(word, node.word); node.next := NIL;
+      IF args = NIL THEN args := node ELSE
+         last := args; WHILE last.next # NIL DO last := last.next END;
+         last.next := node;
+      END;
+   END Append;
+
+   PROCEDURE Sort(VAR args: Arguments);
+      VAR sorted, node, last: Arguments;
+   BEGIN
+      sorted := NIL;
+      WHILE args # NIL DO
+         node := args; args := args.next;
+         IF (sorted = NIL) OR (node.word < sorted.word) THEN node.next := sorted; sorted := node
+         ELSE
+            last := sorted;
+            WHILE (last.next # NIL) & (last.next.word < node.word) DO last := last.next END;
+            node.next := last.next; last.next := node;
+         END;
+      END;
+      args := sorted;
+   END Sort;
+
+   PROCEDURE Words(VAR args: Arguments; text: ARRAY OF CHAR);
+      VAR index, dest: LONGINT; word: Word; quote, ch: CHAR;
+   BEGIN
+      index := 0;
+      WHILE (index < LEN(text)) & (text[index] # 0X) DO
+         WHILE (index < LEN(text)) & (text[index] <= " ") & (text[index] # 0X) DO INC(index) END;
+         IF (index < LEN(text)) & (text[index] # 0X) THEN
+            dest := 0; quote := 0X;
+            WHILE (index < LEN(text)) & (text[index] # 0X) &
+                  ((quote # 0X) OR (text[index] > " ")) DO
+               ch := text[index]; INC(index);
+               IF (quote = 0X) & ((ch = 022X) OR (ch = 027X)) THEN quote := ch
+               ELSIF ch = quote THEN quote := 0X
+               ELSE
+                  IF (ch = 05CX) & (quote # 027X) & (index < LEN(text)) & (text[index] # 0X) THEN
+                     ch := text[index]; INC(index);
+                  END;
+                  ASSERT(dest + 1 < LEN(word)); word[dest] := ch; INC(dest);
+               END;
+            END;
+            ASSERT(quote = 0X); word[dest] := 0X; Append(args, word);
+         END;
+      END;
+   END Words;
+
+   PROCEDURE Exists(path: ARRAY OF CHAR) : BOOLEAN;
+   BEGIN RETURN SysFile.Access(path, SysFile.existence, RelatedEvents.null) END Exists;
+
+   PROCEDURE Join(VAR path: ARRAY OF CHAR; directory, name: ARRAY OF CHAR);
+   BEGIN
+      COPY(directory, path);
+      IF (Strings.Len(path) > 0) & (path[Strings.Len(path)-1] # "/") THEN Strings.Concatenate(path, "/") END;
+      Strings.Concatenate(path, name);
+   END Join;
+
+   PROCEDURE Directory(path: ARRAY OF CHAR; VAR directory: ARRAY OF CHAR);
+      VAR index, last: LONGINT;
+   BEGIN
+      last := -1; index := 0;
+      WHILE (index < LEN(path)) & (path[index] # 0X) DO
+         IF path[index] = "/" THEN last := index END; INC(index);
+      END;
+      IF last < 0 THEN directory[0] := "."; directory[1] := 0X ELSE
+         COPY(path, directory);
+         IF last = 0 THEN directory[1] := 0X ELSE directory[last] := 0X END;
+      END;
+   END Directory;
+
+   PROCEDURE Executable(VAR path: ARRAY OF CHAR);
+   BEGIN
+      IF ~SysFile.ReadLink("/proc/self/exe", path, RelatedEvents.null) THEN
+         SysArgs.GetPathName(path);
+      END;
+   END Executable;
+
+   PROCEDURE Argument(index: INTEGER; VAR word: ARRAY OF CHAR);
+      VAR offset: LONGINT;
+   BEGIN
+      offset := 0;
+      WHILE (offset + 1 < LEN(word)) & (SysArgs.argv[index][offset] # 0X) DO
+         word[offset] := SysArgs.argv[index][offset]; INC(offset);
+      END;
+      word[offset] := 0X;
+   END Argument;
+
+   PROCEDURE Resolve(word: ARRAY OF CHAR; VAR path: ARRAY OF CHAR) : BOOLEAN;
+      VAR search: Word; index, start, dest: LONGINT; dir: Word;
+   BEGIN
+      index := 0;
+      WHILE (index < LEN(word)) & (word[index] # 0X) DO
+         IF word[index] = "/" THEN COPY(word, path); RETURN TRUE END; INC(index);
+      END;
+      IF ~UnixEnvironment.String("PATH", search) THEN search := "/usr/bin:/bin" END;
+      index := 0;
+      LOOP
+         start := index; dest := 0;
+         WHILE (search[index] # 0X) & (search[index] # ":") DO dir[dest] := search[index]; INC(dest); INC(index) END;
+         dir[dest] := 0X; IF dest = 0 THEN dir := "." END;
+         Join(path, dir, word);
+         IF SysFile.Access(path, SysFile.execAccess, RelatedEvents.null) THEN RETURN TRUE END;
+         IF search[index] = 0X THEN EXIT END; INC(index);
+      END;
+      RETURN FALSE
+   END Resolve;
+
+   PROCEDURE Capture(args: Arguments; stdout, stderr: ARRAY OF CHAR) : BOOLEAN;
+      VAR
+         node: Arguments; vector: ARRAY 1025 OF SysArgs.Argument;
+         index: INTEGER; path: Word; pid: SysProcess.ProcessId;
+         status: SysProcess.Status; fd: SysIO.File; interrupted, ok: BOOLEAN;
+   BEGIN
+      ASSERT(args # NIL);
+      IF ~Resolve(args.word, path) THEN
+         BasicWrite.StringS(Streams.stderr, "ulmo: executable not found: ");
+         BasicWrite.LineS(Streams.stderr, args.word); RETURN FALSE
+      END;
+      Storage.DisableCollection;
+      node := args; index := 0;
+      WHILE node # NIL DO
+         ASSERT(index < LEN(vector)-1);
+         vector[index] := SYS.VAL(SysArgs.Argument, SYS.ADR(node.word));
+         INC(index); node := node.next;
+      END;
+      vector[index] := NIL;
+      IF ~SysProcess.Fork(pid, RelatedEvents.null) THEN Storage.EnableCollection; RETURN FALSE END;
+      IF pid = 0 THEN
+         IF stdout[0] # 0X THEN
+            IF ~SysIO.OpenCreat(fd, stdout, SysIO.wronly + SysIO.creat + SysIO.trunc,
+                               384, RelatedEvents.null, TRUE, interrupted) THEN SysProcess.Exit(126) END;
+            IF ~SysIO.Dup2(fd, 1, RelatedEvents.null) THEN SysProcess.Exit(126) END;
+            IF fd # 1 THEN IF ~SysIO.Close(fd, RelatedEvents.null, TRUE, interrupted) THEN END END;
+         END;
+         IF stderr[0] # 0X THEN
+            IF ~SysIO.OpenCreat(fd, stderr, SysIO.wronly + SysIO.creat + SysIO.trunc,
+                               384, RelatedEvents.null, TRUE, interrupted) THEN SysProcess.Exit(126) END;
+            IF ~SysIO.Dup2(fd, 2, RelatedEvents.null) THEN SysProcess.Exit(126) END;
+            IF fd # 2 THEN IF ~SysIO.Close(fd, RelatedEvents.null, TRUE, interrupted) THEN END END;
+         END;
+         SysProcess.Exec(path, SYS.VAL(SysArgs.Arguments, SYS.ADR(vector)), RelatedEvents.null);
+         SysProcess.Exit(126);
+      END;
+      ok := SysProcess.WaitFor(pid, status, RelatedEvents.null) & (status.signal = 0) & (status.exitcode = 0);
+      Storage.EnableCollection; RETURN ok
+   END Capture;
+   PROCEDURE Run(args: Arguments; stderr: ARRAY OF CHAR) : BOOLEAN;
+   BEGIN RETURN Capture(args, "", stderr) END Run;
+END DriverProcesses.

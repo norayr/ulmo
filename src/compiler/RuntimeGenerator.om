@@ -1,0 +1,47 @@
+MODULE RuntimeGenerator;
+   IMPORT BasicWrite, DriverProcesses, Process, RelatedEvents, RuntimeStarts,
+      Streams, SYS := SYSTEM, SysArgs, UnixFiles;
+   VAR index: INTEGER; word, main, output: DriverProcesses.Word;
+      amd64, timezones, list: BOOLEAN; s: Streams.Stream;
+   PROCEDURE Usage;
+   BEGIN
+      BasicWrite.LineS(Streams.stderr, "Usage: genobrts [-a amd64|i386] [-t] [-o output] module | -r");
+      Process.Exit(1);
+   END Usage;
+BEGIN
+   index := 1; amd64 := SYS.SIZE(SYS.ADDRESS) = 8; timezones := FALSE; list := FALSE;
+   main := ""; output := "";
+   WHILE index < SysArgs.argc DO
+      DriverProcesses.Argument(index, word); INC(index);
+      IF word = "-t" THEN timezones := TRUE
+      ELSIF word = "-r" THEN list := TRUE
+      ELSIF (word = "-a") OR (word = "-o") THEN
+         IF index >= SysArgs.argc THEN Usage END;
+         IF word = "-o" THEN DriverProcesses.Argument(index, output)
+         ELSE
+            DriverProcesses.Argument(index, word);
+            IF word = "amd64" THEN amd64 := TRUE ELSIF word = "i386" THEN amd64 := FALSE ELSE Usage END;
+         END;
+         INC(index);
+      ELSIF main = "" THEN main := word ELSE Usage END;
+   END;
+   IF list THEN
+      BasicWrite.LineS(Streams.stdout, "Coroutines"); BasicWrite.LineS(Streams.stdout, "Process");
+      BasicWrite.LineS(Streams.stdout, "RTErrors"); BasicWrite.LineS(Streams.stdout, "Storage");
+      BasicWrite.LineS(Streams.stdout, "SysArgs"); BasicWrite.LineS(Streams.stdout, "SysInterrupts");
+      BasicWrite.LineS(Streams.stdout, "SysMain"); BasicWrite.LineS(Streams.stdout, "SysModules");
+      BasicWrite.LineS(Streams.stdout, "SysSegments"); BasicWrite.LineS(Streams.stdout, "SysStorage");
+      BasicWrite.LineS(Streams.stdout, "UnixClock"); BasicWrite.LineS(Streams.stdout, "UnixFiles");
+      BasicWrite.LineS(Streams.stdout, "UnixProcess");
+      IF timezones THEN BasicWrite.LineS(Streams.stdout, "UnixTimezones") END;
+   ELSE
+      IF main = "" THEN Usage END;
+      s := Streams.stdout;
+      IF output # "" THEN
+         IF ~UnixFiles.Open(s, output, UnixFiles.write + UnixFiles.create, Streams.onebuf, RelatedEvents.null) THEN Usage END;
+      END;
+      RuntimeStarts.Generate(s, amd64, timezones, main);
+      IF ~Streams.Flush(s) THEN Process.Exit(1) END;
+      IF output # "" THEN IF ~Streams.Close(s) THEN Process.Exit(1) END END;
+   END;
+END RuntimeGenerator.

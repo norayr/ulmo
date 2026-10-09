@@ -1,0 +1,4 @@
+DEFINITION RuntimeStarts;
+   IMPORT Streams;
+   PROCEDURE Generate(s: Streams.Stream; amd64, timezones: BOOLEAN; main: ARRAY OF CHAR);
+END RuntimeStarts.

@@ -1,0 +1,16 @@
+DEFINITION DriverProcesses;
+   TYPE
+      Word = ARRAY 4096 OF CHAR;
+      Arguments = POINTER TO ArgumentsRec;
+      ArgumentsRec = RECORD word: Word; next: Arguments END;
+   PROCEDURE Append(VAR args: Arguments; word: ARRAY OF CHAR);
+   PROCEDURE Words(VAR args: Arguments; text: ARRAY OF CHAR);
+   PROCEDURE Sort(VAR args: Arguments);
+   PROCEDURE Run(args: Arguments; stderr: ARRAY OF CHAR) : BOOLEAN;
+   PROCEDURE Capture(args: Arguments; stdout, stderr: ARRAY OF CHAR) : BOOLEAN;
+   PROCEDURE Exists(path: ARRAY OF CHAR) : BOOLEAN;
+   PROCEDURE Join(VAR path: ARRAY OF CHAR; directory, name: ARRAY OF CHAR);
+   PROCEDURE Directory(path: ARRAY OF CHAR; VAR directory: ARRAY OF CHAR);
+   PROCEDURE Executable(VAR path: ARRAY OF CHAR);
+   PROCEDURE Argument(index: INTEGER; VAR word: ARRAY OF CHAR);
+END DriverProcesses.
