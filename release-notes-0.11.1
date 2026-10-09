@@ -1,0 +1,56 @@
+# ulmo 0.11.1
+
+This patch release makes main-module selection more convenient in the
+command-line driver.
+
+## Infer the main module from its source
+
+For a file `Hello.om` declaring `MODULE Hello;`, use:
+
+```sh
+ulmo -m Hello.om
+./Hello
+```
+
+The wrapper reads the module name from the source header, compiles that
+file and links the executable. Additional source files can follow:
+
+```sh
+ulmo -m Hello.om o.om
+ulmo -m Hello.om -o hello
+```
+
+The explicit form remains supported:
+
+```sh
+ulmo -m Hello Hello.om
+```
+
+A bare `-m` before other options also infers the main module when exactly
+one implementation source is given:
+
+```sh
+ulmo -m -o hello Hello.om
+```
+
+When multiple implementation sources make that form ambiguous, the driver
+asks for an explicit main module or main source file.
+
+## Header handling and checks
+
+- Whitespace and nested comments are accepted before and between header
+  tokens, including comments containing misleading `MODULE` declarations.
+- Only the header is read for inference, keeping memory use small.
+- Missing files, invalid headers and definition-only inputs are rejected
+  before linking.
+- Compilation without `-m` continues to produce object files only.
+- Added `make check-cli` for wrapper regression checks.
+
+Command-line checks passed on AMD64 and i386, and the installed wrapper
+was verified using a staged Linux installation.
+
+The change is in the shell wrapper; the existing Oberon compiler and
+runtime can be used with an updated wrapper. A rewrite of the driver into
+Oberon is not required for this shortcut.
+
+Full changes: https://github.com/norayr/ulmo/compare/v0.11.0...v0.11.1
