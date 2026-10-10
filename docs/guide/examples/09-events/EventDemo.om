@@ -1,0 +1,15 @@
+MODULE EventDemo;
+   IMPORT Events, Out;
+   VAR changed: Events.EventType; event: Events.Event;
+
+   PROCEDURE Notify(event: Events.Event);
+   BEGIN
+      Out.String("observer: "); Out.Line(event.message);
+   END Notify;
+
+BEGIN
+   Events.Define(changed);
+   Events.Handler(changed, Notify);
+   NEW(event); event.type := changed; event.message := "document changed";
+   Events.Raise(event);
+END EventDemo.

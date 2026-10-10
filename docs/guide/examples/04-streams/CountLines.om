@@ -1,0 +1,24 @@
+MODULE CountLines;
+   IMPORT Out, Process, Streams, Strings;
+   VAR s: Streams.Stream; sample: ARRAY 80 OF CHAR; lines: LONGINT;
+
+   PROCEDURE Count(s: Streams.Stream; VAR lines: LONGINT) : BOOLEAN;
+      VAR ch: CHAR;
+   BEGIN
+      lines := 0;
+      WHILE Streams.ReadByte(s, ch) DO
+         IF ch = 0AX THEN INC(lines) END;
+      END;
+      RETURN s.eof & ~s.error
+   END Count;
+
+BEGIN
+   sample := "first second ";
+   sample[5] := 0AX; sample[12] := 0AX;
+   Strings.Open(s, sample);
+   IF ~Count(s, lines) THEN Process.Exit(1) END;
+   Out.String("string: "); Out.Int(lines, 0); Out.Ln;
+   IF ~Streams.Close(s) THEN Process.Exit(1) END;
+   IF ~Count(Streams.stdin, lines) THEN Process.Exit(1) END;
+   Out.String("stdin: "); Out.Int(lines, 0); Out.Ln;
+END CountLines.

@@ -15,6 +15,9 @@ This version:
 - builds with `make` and installs into a prefix or the usual Unix places,
   so it can be packaged for distributions.
 
+For a practical introduction with small examples, read
+[Finding your way around Ulm's Oberon](docs/guide/guide.md).
+
 The original documentation is at <http://www.mathematik.uni-ulm.de/oberon/>.
 The former README and installation instructions are kept in
 `README_legacy` and `INSTALL_legacy`.

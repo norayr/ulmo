@@ -1,0 +1,3 @@
+DEFINITION Counter;
+   PROCEDURE Next() : LONGINT;
+END Counter.

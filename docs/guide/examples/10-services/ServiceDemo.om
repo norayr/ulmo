@@ -1,0 +1,43 @@
+MODULE ServiceDemo;
+   IMPORT Disciplines, Out, Services;
+   TYPE
+      Note = POINTER TO NoteRec;
+      NoteRec = RECORD (Services.ObjectRec) title: ARRAY 80 OF CHAR END;
+      Summary = POINTER TO SummaryRec;
+      SummaryRec = RECORD
+         (Disciplines.DisciplineRec)
+         text: ARRAY 80 OF CHAR;
+      END;
+   VAR noteType: Services.Type; summaryService: Services.Service;
+      summaryId: Disciplines.Identifier; note: Note; text: ARRAY 80 OF CHAR;
+
+   PROCEDURE InstallSummary(object: Services.Object; service: Services.Service);
+      VAR summary: Summary;
+   BEGIN
+      WITH object: Note DO
+         NEW(summary); summary.id := summaryId;
+         COPY(object.title, summary.text);
+         Disciplines.Add(object, summary);
+      END;
+   END InstallSummary;
+
+   PROCEDURE GetSummary(object: Services.Object; VAR text: ARRAY OF CHAR) : BOOLEAN;
+      VAR summary: Summary;
+   BEGIN
+      IF Services.Install(object, summaryService) &
+            Disciplines.Seek(object, summaryId, summary) THEN
+         COPY(summary.text, text); RETURN TRUE
+      END;
+      text[0] := 0X; RETURN FALSE
+   END GetSummary;
+
+BEGIN
+   summaryId := Disciplines.Unique();
+   Services.CreateType(noteType, "ServiceDemo.Note", "");
+   Services.Create(summaryService, "ServiceDemo.Summary");
+   Services.Define(noteType, summaryService, InstallSummary);
+   NEW(note); Services.Init(note, noteType);
+   note.title := "A small note";
+   IF GetSummary(note, text) THEN Out.Line(text) END;
+   IF GetSummary(note, text) THEN Out.Line(text) END;
+END ServiceDemo.

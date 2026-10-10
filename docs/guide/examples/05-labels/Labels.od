@@ -1,0 +1,5 @@
+DEFINITION Labels;
+   IMPORT Disciplines;
+   PROCEDURE Set(object: Disciplines.Object; text: ARRAY OF CHAR);
+   PROCEDURE Get(object: Disciplines.Object; VAR text: ARRAY OF CHAR) : BOOLEAN;
+END Labels.

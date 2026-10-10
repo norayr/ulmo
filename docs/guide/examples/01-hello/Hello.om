@@ -1,0 +1,5 @@
+MODULE Hello;
+   IMPORT Out;
+BEGIN
+   Out.Line("Hello from Ulm's Oberon.");
+END Hello.

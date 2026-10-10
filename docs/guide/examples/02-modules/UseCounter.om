@@ -1,0 +1,7 @@
+MODULE UseCounter;
+   IMPORT Counter, Out;
+BEGIN
+   Out.Line("UseCounter is running.");
+   Out.Int(Counter.Next(), 0); Out.Ln;
+   Out.Int(Counter.Next(), 0); Out.Ln;
+END UseCounter.

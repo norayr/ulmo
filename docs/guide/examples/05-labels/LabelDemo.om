@@ -1,0 +1,10 @@
+MODULE LabelDemo;
+   IMPORT Labels, Out, Streams;
+   VAR name: ARRAY 80 OF CHAR;
+BEGIN
+   Labels.Set(Streams.stdout, "the report destination");
+   IF Labels.Get(Streams.stdout, name) THEN Out.Line(name) END;
+   Labels.Set(Streams.stdout, "the renamed destination");
+   IF Labels.Get(Streams.stdout, name) THEN Out.Line(name) END;
+   IF ~Labels.Get(Streams.stderr, name) THEN Out.Line("stderr has no label") END;
+END LabelDemo.

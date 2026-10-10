@@ -1,0 +1,21 @@
+MODULE Ports;
+   IMPORT Events, RelatedEvents;
+   TYPE
+      Event = POINTER TO EventRec;
+      EventRec = RECORD (Events.EventRec) value: LONGINT END;
+   VAR invalid: Events.EventType;
+
+   PROCEDURE Check(value: LONGINT; errors: RelatedEvents.Object) : BOOLEAN;
+      VAR event: Event;
+   BEGIN
+      IF (value >= 1) & (value <= 65535) THEN RETURN TRUE END;
+      NEW(event); event.type := invalid;
+      event.message := "port must be between 1 and 65535";
+      event.value := value;
+      RelatedEvents.Raise(errors, event);
+      RETURN FALSE
+   END Check;
+
+BEGIN
+   Events.Define(invalid);
+END Ports.

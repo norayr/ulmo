@@ -1,0 +1,8 @@
+DEFINITION Ports;
+   IMPORT Events, RelatedEvents;
+   TYPE
+      Event = POINTER TO EventRec;
+      EventRec = RECORD (Events.EventRec) value: LONGINT END;
+   VAR invalid: Events.EventType;
+   PROCEDURE Check(value: LONGINT; errors: RelatedEvents.Object) : BOOLEAN;
+END Ports.

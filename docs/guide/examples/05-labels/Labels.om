@@ -1,0 +1,30 @@
+MODULE Labels;
+   IMPORT Disciplines;
+   TYPE
+      Label = POINTER TO LabelRec;
+      LabelRec = RECORD
+         (Disciplines.DisciplineRec)
+         text: ARRAY 80 OF CHAR;
+      END;
+   VAR id: Disciplines.Identifier;
+
+   PROCEDURE Set(object: Disciplines.Object; text: ARRAY OF CHAR);
+      VAR label: Label;
+   BEGIN
+      NEW(label); label.id := id;
+      COPY(text, label.text);
+      Disciplines.Add(object, label);
+   END Set;
+
+   PROCEDURE Get(object: Disciplines.Object; VAR text: ARRAY OF CHAR) : BOOLEAN;
+      VAR label: Label;
+   BEGIN
+      IF Disciplines.Seek(object, id, label) THEN
+         COPY(label.text, text); RETURN TRUE
+      END;
+      text[0] := 0X; RETURN FALSE
+   END Get;
+
+BEGIN
+   id := Disciplines.Unique();
+END Labels.

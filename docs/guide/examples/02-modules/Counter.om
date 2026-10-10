@@ -1,0 +1,14 @@
+MODULE Counter;
+   IMPORT Out;
+   VAR count: LONGINT;
+
+   PROCEDURE Next() : LONGINT;
+   BEGIN
+      INC(count);
+      RETURN count
+   END Next;
+
+BEGIN
+   count := 0;
+   Out.Line("Counter is initialized.");
+END Counter.

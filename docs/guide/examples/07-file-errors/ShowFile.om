@@ -1,0 +1,47 @@
+MODULE ShowFile;
+   IMPORT BasicWrite, Events, Process, RelatedEvents, Streams,
+      SysErrors, UnixArguments, UnixFiles;
+   VAR s: Streams.Stream; errors: RelatedEvents.Object;
+      filename: ARRAY 1024 OF CHAR; ch: CHAR; ok: BOOLEAN;
+
+   PROCEDURE Report(context: ARRAY OF CHAR);
+      VAR queue: RelatedEvents.Queue; event: Events.Event;
+   BEGIN
+      BasicWrite.LineS(Streams.stderr, context);
+      RelatedEvents.GetQueue(errors, queue);
+      WHILE queue # NIL DO
+         event := queue.event;
+         BasicWrite.StringS(Streams.stderr, "  ");
+         BasicWrite.LineS(Streams.stderr, event.message);
+         IF event IS SysErrors.Event THEN
+            WITH event: SysErrors.Event DO
+               BasicWrite.StringS(Streams.stderr, "  ");
+               BasicWrite.LineS(Streams.stderr, event.text);
+            END;
+         END;
+         queue := queue.next;
+      END;
+   END Report;
+
+BEGIN
+   UnixArguments.Init("filename");
+   IF ~UnixArguments.GetArg(filename) THEN UnixArguments.Usage END;
+   UnixArguments.AllArgs;
+   NEW(errors); RelatedEvents.QueueEvents(errors);
+   IF ~UnixFiles.Open(s, filename, UnixFiles.read,
+                      Streams.onebuf, errors) THEN
+      Report("Cannot open the input file:"); Process.Exit(1);
+   END;
+   RelatedEvents.Forward(s, errors);
+   RelatedEvents.Forward(Streams.stdout, errors);
+   ok := TRUE;
+   WHILE ok & Streams.ReadByte(s, ch) DO
+      ok := Streams.WriteByte(Streams.stdout, ch);
+   END;
+   ok := ok & s.eof & ~s.error;
+   IF ~Streams.Close(s) THEN ok := FALSE END;
+   IF ~Streams.Flush(Streams.stdout) THEN ok := FALSE END;
+   IF ~ok OR RelatedEvents.EventsPending(errors) THEN
+      Report("Cannot finish displaying the file:"); Process.Exit(1);
+   END;
+END ShowFile.

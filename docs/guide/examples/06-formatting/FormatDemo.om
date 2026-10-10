@@ -1,0 +1,15 @@
+MODULE FormatDemo;
+   IMPORT BasicWrite, Out, Process, StreamDisciplines, Streams, Strings;
+   VAR s: Streams.Stream; text: ARRAY 80 OF CHAR;
+      ending: StreamDisciplines.LineTerminator;
+BEGIN
+   text := ""; Strings.Open(s, text);
+   ending := "|";
+   StreamDisciplines.SetLineTerm(s, ending);
+   StreamDisciplines.SetIndentationWidth(s, 3);
+   BasicWrite.IndentS(s); BasicWrite.LineS(s, "first");
+   BasicWrite.IndentS(s); BasicWrite.LineS(s, "second");
+   IF s.error THEN Process.Exit(1) END;
+   Out.Line(text);
+   IF ~Streams.Close(s) THEN Process.Exit(1) END;
+END FormatDemo.

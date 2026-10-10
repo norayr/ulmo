@@ -1,0 +1,54 @@
+MODULE SavedNumber;
+   IMPORT NetIO, Out, PersistentObjects, Process, RelatedEvents,
+      Services, Streams, UnixFiles;
+   TYPE
+      Number = POINTER TO NumberRec;
+      NumberRec = RECORD (PersistentObjects.ObjectRec) value: LONGINT END;
+   VAR numberType: Services.Type; interface: PersistentObjects.Interface;
+      number: Number; restored: PersistentObjects.Object;
+      s: Streams.Stream; errors: RelatedEvents.Object;
+
+   PROCEDURE Create(VAR object: PersistentObjects.Object);
+      VAR number: Number;
+   BEGIN
+      NEW(number); PersistentObjects.Init(number, numberType);
+      object := number;
+   END Create;
+
+   PROCEDURE Read(s: Streams.Stream; object: PersistentObjects.Object) : BOOLEAN;
+   BEGIN
+      WITH object: Number DO RETURN NetIO.ReadLongInt(s, object.value) END;
+   END Read;
+
+   PROCEDURE Write(s: Streams.Stream; object: PersistentObjects.Object) : BOOLEAN;
+   BEGIN
+      WITH object: Number DO RETURN NetIO.WriteLongInt(s, object.value) END;
+   END Write;
+
+   PROCEDURE Require(ok: BOOLEAN);
+   BEGIN
+      IF ~ok THEN Out.Line("persistence example failed"); Process.Exit(1) END;
+   END Require;
+
+BEGIN
+   NEW(interface);
+   interface.create := Create; interface.read := Read; interface.write := Write;
+   interface.createAndRead := NIL;
+   PersistentObjects.RegisterType(numberType, "SavedNumber.Number",
+                                 "", interface);
+   NEW(number); PersistentObjects.Init(number, numberType); number.value := 42;
+   NEW(errors); RelatedEvents.QueueEvents(errors);
+   Require(UnixFiles.Open(s, "number.dat", UnixFiles.write + UnixFiles.create,
+                         Streams.onebuf, errors));
+   RelatedEvents.Forward(s, errors);
+   Require(PersistentObjects.Write(s, number));
+   Require(Streams.Close(s));
+   Require(UnixFiles.Open(s, "number.dat", UnixFiles.read, Streams.onebuf, errors));
+   RelatedEvents.Forward(s, errors);
+   Require(PersistentObjects.Read(s, restored));
+   Require(restored IS Number);
+   number := restored(Number);
+   Out.String("restored: "); Out.Int(number.value, 0); Out.Ln;
+   Require(Streams.Close(s));
+   Require(~RelatedEvents.EventsPending(errors));
+END SavedNumber.

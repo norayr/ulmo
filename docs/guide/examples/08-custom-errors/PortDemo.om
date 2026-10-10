@@ -1,0 +1,21 @@
+MODULE PortDemo;
+   IMPORT Events, Out, Ports, RelatedEvents;
+   VAR errors: RelatedEvents.Object; queue: RelatedEvents.Queue;
+      event: Events.Event;
+BEGIN
+   NEW(errors); RelatedEvents.QueueEvents(errors);
+   IF Ports.Check(8080, errors) THEN Out.Line("8080 is accepted") END;
+   IF ~Ports.Check(70000, errors) THEN
+      RelatedEvents.GetQueue(errors, queue);
+      WHILE queue # NIL DO
+         event := queue.event;
+         Out.Line(event.message);
+         IF event IS Ports.Event THEN
+            WITH event: Ports.Event DO
+               Out.String("rejected value: "); Out.Int(event.value, 0); Out.Ln;
+            END;
+         END;
+         queue := queue.next;
+      END;
+   END;
+END PortDemo.

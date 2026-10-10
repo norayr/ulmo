@@ -1,0 +1,17 @@
+MODULE Greet;
+   IMPORT Out, UnixArguments;
+   VAR greeting, name: ARRAY 80 OF CHAR; flag: CHAR;
+BEGIN
+   UnixArguments.Init("[-p greeting] name");
+   greeting := "Hello";
+   WHILE UnixArguments.GetFlag(flag) DO
+      CASE flag OF
+      | "p": UnixArguments.FetchString(greeting);
+      ELSE UnixArguments.Usage
+      END;
+   END;
+   IF ~UnixArguments.GetArg(name) THEN UnixArguments.Usage END;
+   UnixArguments.AllArgs;
+   Out.String(greeting); Out.String(", ");
+   Out.String(name); Out.Line("!");
+END Greet.
